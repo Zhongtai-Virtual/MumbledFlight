@@ -1,4 +1,4 @@
-//! Shared state and DataRef management for the MumblingCockpit application.
+//! Shared state and DataRef management for the MumbledFlight application.
 
 use serde_json::Value;
 use log::debug;

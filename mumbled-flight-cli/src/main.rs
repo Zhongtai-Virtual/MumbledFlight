@@ -1,4 +1,4 @@
-//! MumblingCockpit: A high-fidelity bridge between X-Plane 12 and Mumble.
+//! MumbledFlight: A high-fidelity bridge between X-Plane 12 and Mumble.
 
 mod xplane;
 
@@ -14,7 +14,7 @@ use mumbled_flight_core::config::Config;
 
 #[derive(Parser, Debug)]
 #[command(
-    author = "MumblingCockpit Team",
+    author = "MumbledFlight Team",
     version,
     about = "High-fidelity shared cockpit audio bridge for X-Plane 12 and Mumble.",
     long_about = "A standalone utility that bridges X-Plane 12 cockpit states with Mumble VoIP."
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
     // Ensure we have a flight ID for normal operation
     let flight_id = args.flight_id.expect("Error: Flight ID is required. Use --help for usage details.");
 
-    info!("MumblingCockpit Standalone Bridge starting...");
+    info!("MumbledFlight Standalone Bridge starting...");
 
     // 2. Initialize shared state
     let state = Arc::new(Mutex::new(CockpitState::default()));

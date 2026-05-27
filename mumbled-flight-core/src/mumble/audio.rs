@@ -1,4 +1,4 @@
-//! High-Performance Audio Engine for MumblingCockpit.
+//! High-Performance Audio Engine for MumbledFlight.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, debug, error};

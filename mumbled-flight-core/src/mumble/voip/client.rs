@@ -94,7 +94,7 @@ impl MumbleVoipClient {
 
         let mut version = msgs::Version::new();
         version.set_version(MUMBLE_VERSION);
-        version.set_release("MumblingCockpit".to_string());
+        version.set_release("MumbledFlight".to_string());
         control.send(ControlPacket::Version(Box::new(version))).await?;
 
         let mut auth = msgs::Authenticate::new();
