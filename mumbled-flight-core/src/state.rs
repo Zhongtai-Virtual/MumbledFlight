@@ -115,4 +115,9 @@ impl CockpitState {
             debug!("[State] seat={} ic={} pa={} (via {:?})", self.seat, self.ic, self.pa, id);
         }
     }
+
+    /// Convenience wrapper for the plugin flight loop: update from a raw f32 DataRef value.
+    pub fn update_from_float(&mut self, id: DataRefId, val: f32) {
+        self.update_from_dataref(id, &serde_json::json!(val as f64));
+    }
 }

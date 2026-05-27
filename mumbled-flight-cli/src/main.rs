@@ -1,6 +1,5 @@
 //! MumblingCockpit: A high-fidelity bridge between X-Plane 12 and Mumble.
 
-mod config;
 mod xplane;
 
 use anyhow::Result;
@@ -11,7 +10,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use mumbled_flight_core::state::CockpitState;
 use mumbled_flight_core::mumble;
-use crate::config::Config;
+use mumbled_flight_core::config::Config;
 
 #[derive(Parser, Debug)]
 #[command(
