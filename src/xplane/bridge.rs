@@ -10,6 +10,7 @@ use tokio::time::{sleep, interval, timeout};
 use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use crate::state::{CockpitState, DataRefId};
+use log::{info, warn};
 
 const XPLANE_WEB_REST: &str = "http://localhost:8086/api/v3";
 const XPLANE_WEB_WS: &str = "ws://localhost:8086/api/v3";
@@ -39,7 +40,7 @@ struct RestResponse {
 pub async fn run_bridge_forever(state: Arc<Mutex<CockpitState>>) -> Result<()> {
     loop {
         if let Err(e) = run_bridge(Arc::clone(&state)).await {
-            eprintln!("X-Plane Bridge error: {}. Retrying in 5s...", e);
+            warn!("X-Plane bridge error: {}. Retrying in 5s...", e);
             sleep(Duration::from_secs(5)).await;
         }
     }
@@ -82,7 +83,7 @@ fn parse_ws_updates(text: &str) -> Option<Vec<(u64, Value)>> {
 }
 
 async fn run_bridge(state: Arc<Mutex<CockpitState>>) -> Result<()> {
-    println!("Discovering DataRefs...");
+    info!("Discovering DataRefs...");
     let client = reqwest::Client::new();
     let rest_resp: RestResponse = client
         .get(format!("{}/datarefs", XPLANE_WEB_REST))
@@ -115,7 +116,7 @@ async fn run_bridge(state: Arc<Mutex<CockpitState>>) -> Result<()> {
     write.send(Message::Text(sub_req.to_string().into())).await?;
 
     // Initial sync: fetch all known DataRefs once before streaming begins.
-    println!("Fetching initial state...");
+    info!("Fetching initial state...");
     let all_ids: Vec<u64> = id_to_enum.keys().copied().collect();
     poll_datarefs(&all_ids, 500, &client, &id_to_enum, &state).await;
 

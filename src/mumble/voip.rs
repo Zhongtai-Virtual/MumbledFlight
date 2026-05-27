@@ -23,6 +23,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_native_tls::TlsConnector;
 use tokio_util::codec::Framed;
 use crate::state::CockpitState;
+use log::{info, debug};
 use std::marker::PhantomData;
 use std::io::Cursor;
 
@@ -89,7 +90,7 @@ impl MumbleVoipClient {
         mut audio_rx: broadcast::Receiver<Vec<f32>>,
         playback_tx: mpsc::Sender<Vec<f32>>,
     ) -> Result<()> {
-        println!("[VoIP:{}] Connecting to {}...", self.username, server_addr);
+        info!("[VoIP:{}] Connecting to {}...", self.username, server_addr);
 
         let identity = self.generate_temp_identity()?;
         let tcp_stream = TcpStream::connect(&server_addr).await?;
@@ -131,7 +132,7 @@ impl MumbleVoipClient {
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut udp_ping_interval = tokio::time::interval(std::time::Duration::from_secs(1));
 
-        println!("[VoIP:{}] Listening for voice...", self.username);
+        info!("[VoIP:{}] Listening for voice...", self.username);
 
         loop {
             tokio::select! {
@@ -160,7 +161,7 @@ impl MumbleVoipClient {
                     if my_session == Some(session_id) || self.is_radio { continue; }
                     let VoicePacketPayload::Opus(data, _) = payload else { continue };
                     let decoder = decoders.entry(session_id).or_insert_with(|| {
-                        println!("[VoIP:{}] Detected remote speaker (Session: {})", self.username, session_id);
+                        debug!("[VoIP:{}] Detected remote speaker (session {})", self.username, session_id);
                         Decoder::new(SampleRate::Hz48000, Channels::Mono).expect("Failed to create decoder")
                     });
                     let Some(mono) = decode_opus_packet(decoder, &data) else { continue };
@@ -192,7 +193,7 @@ impl MumbleVoipClient {
                                 user_state.set_session(sync.get_session());
                                 user_state.set_plugin_context(self.context.as_bytes().to_vec());
                                 user_state.set_plugin_identity(self.username.clone());
-                                println!("[VoIP:{}] Context active: '{}'", self.username, self.context);
+                                info!("[VoIP:{}] Context active: '{}'", self.username, self.context);
                                 control.send(ControlPacket::UserState(Box::new(user_state))).await?;
                                 
                                 if let Some(&cid) = channels.get(&self.target_channel) {
@@ -363,7 +364,7 @@ impl MumbleVoipClient {
 
         static PACKET_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if PACKET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 400 == 0 {
-            println!("{}", debug_line);
+            debug!("{}", debug_line);
         }
 
         let mut output = Vec::with_capacity(mono.len() * 2);

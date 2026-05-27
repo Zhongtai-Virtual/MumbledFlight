@@ -1,6 +1,7 @@
 //! High-Performance Audio Engine for MumblingCockpit.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use log::{info, debug, error};
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
@@ -37,7 +38,7 @@ pub fn create_linux_sink() -> Option<String> {
             }
         });
 
-        println!("[Audio:Linux] Creating MumblingRadio virtual device...");
+        info!("[Audio:Linux] Creating MumblingRadio virtual device...");
         let status = std::process::Command::new("pactl")
             .args(&["load-module", "module-null-sink", "sink_name=MumblingRadio", "format=float32le", "rate=48000", "channels=2", "sink_properties=device.description=MumblingRadio"])
             .status();
@@ -81,7 +82,7 @@ pub fn start_capture(
             .with_sample_rate(cpal::SampleRate(48000));
 
         let num_channels = config.channels() as usize;
-        println!("[Audio:Capture] Active: {} (Strict 48kHz, {} channels)", device.name().unwrap_or_default(), num_channels);
+        info!("[Audio:Capture] Active: {} (48kHz, {} ch)", device.name().unwrap_or_default(), num_channels);
 
         let mut capture_buffer = Vec::new();
         let stream = device.build_input_stream(
@@ -102,7 +103,7 @@ pub fn start_capture(
                     let _ = tx.try_send(frame);
                 }
             },
-            |err| eprintln!("[Audio:Capture] Error: {}", err),
+            |err| error!("[Audio:Capture] {}", err),
             None
         ).expect("Failed to build input stream");
 
@@ -134,8 +135,7 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
         .with_sample_rate(cpal::SampleRate(48000));
         
     let device_channels = config.channels() as usize;
-    println!("[Audio:Out] Sink: {} (Strict 48kHz, {} channels)", 
-        device.name().unwrap_or_default(), device_channels);
+    info!("[Audio:Out] Sink: {} (48kHz, {} ch)", device.name().unwrap_or_default(), device_channels);
 
     // REAL-TIME RING BUFFER: Optimized for O(1) removals.
     let pending_samples = Arc::new(Mutex::new(VecDeque::<f32>::new()));
@@ -173,7 +173,7 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
             }
 
             if last_log.elapsed().as_secs() >= 5 {
-                println!("[Audio:Out] Buffer: {:.1}ms", lock.len() as f32 / (48.0 * device_channels as f32));
+                debug!("[Audio:Out] buffer {:.1}ms", lock.len() as f32 / (48.0 * device_channels as f32));
                 last_log = std::time::Instant::now();
             }
         }
@@ -201,7 +201,7 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
                 data[i] = sample;
             }
         },
-        |err| eprintln!("[Audio:Out] Error: {}", err),
+        |err| error!("[Audio:Out] {}", err),
         None
     ).expect("Failed to build output stream");
 

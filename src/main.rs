@@ -7,6 +7,7 @@ mod mumble;
 
 use anyhow::Result;
 use clap::Parser;
+use log::{info, error};
 use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -65,6 +66,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
     let args = Args::parse();
 
     // 1. Device Discovery Mode
@@ -76,7 +78,7 @@ async fn main() -> Result<()> {
     // Ensure we have a flight ID for normal operation
     let flight_id = args.flight_id.expect("Error: Flight ID is required. Use --help for usage details.");
 
-    println!("MumblingCockpit Standalone Bridge starting...");
+    info!("MumblingCockpit Standalone Bridge starting...");
 
     // 2. Initialize shared state
     let state = Arc::new(Mutex::new(CockpitState::default()));
@@ -90,12 +92,12 @@ async fn main() -> Result<()> {
             .expect("Critical: Found X-Plane path but could not read CL650 configuration.");
         cfg.user_name
     } else {
-        eprintln!("Error: Username could not be determined.");
-        eprintln!("Please provide either --user <Name> or --xplane-path <Path>.");
+        error!("Username could not be determined.");
+        error!("Please provide either --user <Name> or --xplane-path <Path>.");
         std::process::exit(1);
     };
 
-    println!("Session Ready. User: {}, Flight ID: {}, Denoise: {}", 
+    info!("Session ready — user: {}, flight: {}, denoise: {}",
         user_prefix, flight_id, args.denoise);
 
     // 4. Start Mumble Stack

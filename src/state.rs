@@ -1,6 +1,7 @@
 //! Shared state and DataRef management for the MumblingCockpit application.
 
 use serde_json::Value;
+use log::debug;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataRefId {
@@ -111,13 +112,7 @@ impl CockpitState {
         }
 
         if self.ic != old_state.ic || self.pa != old_state.pa || self.seat != old_state.seat {
-            println!("[State:Change] Seat: {}, IC: {}, PA: {} (Triggered by {:?})", 
-                self.seat, self.ic, self.pa, id);
-        }
-
-        if self.pos != old_state.pos && id == DataRefId::HeadZ {
-             // Only log Z changes as they are the most frequent
-             // println!("[State:Pos] Z: {:.3}", self.pos[2]);
+            debug!("[State] seat={} ic={} pa={} (via {:?})", self.seat, self.ic, self.pa, id);
         }
     }
 }
