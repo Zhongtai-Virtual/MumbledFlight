@@ -61,6 +61,19 @@ jobs:
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix opus)/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
 
+      - name: Create X-Plane SDK framework stubs (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # XPLM symbols are provided by X-Plane at runtime; create empty stub frameworks
+          # so the linker is satisfied, then -undefined dynamic_lookup handles the rest.
+          for fw in XPLM XPWidgets; do
+            sudo mkdir -p /Library/Frameworks/${fw}.framework
+            printf 'void _stub(void){}' | \
+              cc -x c - -dynamiclib -arch arm64 -arch x86_64 \
+                 -o /Library/Frameworks/${fw}.framework/${fw}
+          done
+          echo "RUSTFLAGS=-C link-arg=-undefined -C link-arg=dynamic_lookup" >> "$GITHUB_ENV"
+
       # ── Windows ────────────────────────────────────────────────────────────
       - name: Install Windows system dependencies (vcpkg)
         if: runner.os == 'Windows'

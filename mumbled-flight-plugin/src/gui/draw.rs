@@ -232,7 +232,27 @@ impl GuiState {
         unsafe {
             glow::Context::from_loader_function(|s| {
                 let cstr = CString::new(s).unwrap_or_default();
-                libc::dlsym(std::ptr::null_mut(), cstr.as_ptr()) as *const c_void
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // RTLD_DEFAULT (null) searches already-loaded libs — libGL is loaded by X-Plane.
+                    libc::dlsym(std::ptr::null_mut(), cstr.as_ptr()) as *const c_void
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    extern "system" {
+                        fn wglGetProcAddress(name: *const i8) -> *const c_void;
+                        fn LoadLibraryA(name: *const i8) -> *mut c_void;
+                        fn GetProcAddress(module: *mut c_void, name: *const i8) -> *const c_void;
+                    }
+                    // wglGetProcAddress covers OpenGL extensions; GetProcAddress covers core 1.1.
+                    let p = wglGetProcAddress(cstr.as_ptr());
+                    if !p.is_null() {
+                        p
+                    } else {
+                        let lib = LoadLibraryA(b"opengl32.dll\0".as_ptr() as *const i8);
+                        GetProcAddress(lib, cstr.as_ptr())
+                    }
+                }
             })
         }
     }
