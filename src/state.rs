@@ -1,0 +1,101 @@
+//! Shared state and DataRef management for the MumblingCockpit application.
+
+use serde_json::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DataRefId {
+    HeadX, HeadY, HeadZ, HeadPsi, HeadThe, HeadPhi,
+    PilotSeat,
+    Acp1Ic, Acp1Mic, Acp1Spkr,
+    Acp2Ic, Acp2Mic, Acp2Spkr,
+}
+
+impl DataRefId {
+    pub fn name(&self) -> &'static str {
+        match self {
+            DataRefId::HeadX => "sim/graphics/view/pilots_head_x",
+            DataRefId::HeadY => "sim/graphics/view/pilots_head_y",
+            DataRefId::HeadZ => "sim/graphics/view/pilots_head_z",
+            DataRefId::HeadPsi => "sim/graphics/view/pilots_head_psi",
+            DataRefId::HeadThe => "sim/graphics/view/pilots_head_the",
+            DataRefId::HeadPhi => "sim/graphics/view/pilots_head_phi",
+            DataRefId::PilotSeat => "CL650/pilot_seat",
+            DataRefId::Acp1Ic => "CL650/ACP/1/ic",
+            DataRefId::Acp1Mic => "CL650/ACP/1/mic_value",
+            DataRefId::Acp1Spkr => "CL650/ACP/1/spkr_tog",
+            DataRefId::Acp2Ic => "CL650/ACP/2/ic",
+            DataRefId::Acp2Mic => "CL650/ACP/2/mic_value",
+            DataRefId::Acp2Spkr => "CL650/ACP/2/spkr_tog",
+        }
+    }
+
+    pub fn all() -> &'static [DataRefId] {
+        &[
+            DataRefId::HeadX, DataRefId::HeadY, DataRefId::HeadZ,
+            DataRefId::HeadPsi, DataRefId::HeadThe, DataRefId::HeadPhi,
+            DataRefId::PilotSeat,
+            DataRefId::Acp1Ic, DataRefId::Acp1Mic, DataRefId::Acp1Spkr,
+            DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
+        ]
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().iter().find(|id| id.name() == name).copied()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CockpitState {
+    pub pos: [f32; 3],
+    pub rot: [f32; 3],
+    pub seat: i32,
+    pub ic: bool,
+    pub pa: bool,
+    pub spkr: bool,
+}
+
+impl CockpitState {
+    fn val_to_bool(val: &Value) -> bool {
+        if let Some(f) = val.as_f64() {
+            f > 0.1 // Use a small epsilon to catch 1.0 vs 0.0
+        } else if let Some(i) = val.as_i64() {
+            i != 0
+        } else {
+            false
+        }
+    }
+
+    fn val_to_int(val: &Value) -> i32 {
+        val.as_i64().map(|i| i as i32)
+           .unwrap_or_else(|| val.as_f64().map(|f| f as i32).unwrap_or(0))
+    }
+
+    pub fn update_from_dataref(&mut self, id: DataRefId, val: &Value) {
+        let is_pilot = self.seat == 0;
+        let old_state = self.clone();
+
+        match id {
+            DataRefId::HeadX => self.pos[0] = val.as_f64().unwrap_or(0.0) as f32,
+            DataRefId::HeadY => self.pos[1] = val.as_f64().unwrap_or(0.0) as f32,
+            DataRefId::HeadZ => self.pos[2] = val.as_f64().unwrap_or(0.0) as f32,
+            DataRefId::HeadPsi => self.rot[0] = val.as_f64().unwrap_or(0.0) as f32,
+            DataRefId::HeadThe => self.rot[1] = val.as_f64().unwrap_or(0.0) as f32,
+            DataRefId::HeadPhi => self.rot[2] = val.as_f64().unwrap_or(0.0) as f32,
+            DataRefId::PilotSeat => self.seat = Self::val_to_int(val),
+            
+            DataRefId::Acp1Ic => if is_pilot { self.ic = Self::val_to_bool(val) },
+            DataRefId::Acp1Mic => if is_pilot { self.pa = Self::val_to_int(val) == 7 },
+            DataRefId::Acp1Spkr => if is_pilot { self.spkr = Self::val_to_bool(val) },
+            
+            DataRefId::Acp2Ic => if !is_pilot { self.ic = Self::val_to_bool(val) },
+            DataRefId::Acp2Mic => if !is_pilot { self.pa = Self::val_to_int(val) == 7 },
+            DataRefId::Acp2Spkr => if !is_pilot { self.spkr = Self::val_to_bool(val) },
+        }
+
+        // Log if a logical switch changed
+        if self.ic != old_state.ic || self.pa != old_state.pa || self.seat != old_state.seat {
+            println!("[State:Change] Seat: {}, IC: {}, PA: {} (Triggered by {:?})", 
+                self.seat, self.ic, self.pa, id);
+        }
+    }
+}
