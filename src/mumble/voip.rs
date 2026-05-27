@@ -391,7 +391,7 @@ impl MumbleVoipClient {
         cert_builder.set_not_after(&later)?;
         cert_builder.sign(&pkey, MessageDigest::sha256())?;
         let cert = cert_builder.build();
-        let p12 = Pkcs12::builder().build("", &self.username, &pkey, &cert)?;
+        let p12 = Pkcs12::builder().name(&self.username).pkey(&pkey).cert(&cert).build2("")?;
         let der = p12.to_der()?;
         Identity::from_pkcs12(&der, "").map_err(|e| anyhow!("Identity error: {}", e))
     }
