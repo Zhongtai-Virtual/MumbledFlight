@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::time::{interval, sleep, timeout};
 use std::time::Duration;
-use crate::state::{CockpitState, DataRefId};
+use mumbling_cockpit_standalone::state::{CockpitState, DataRefId};
 use log::{info, warn};
 
 const XPLANE_WEB_REST: &str = "http://localhost:8086/api/v3";

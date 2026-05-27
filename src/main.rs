@@ -1,9 +1,7 @@
 //! MumblingCockpit: A high-fidelity bridge between X-Plane 12 and Mumble.
 
-mod state;
 mod config;
 mod xplane;
-mod mumble;
 
 use anyhow::Result;
 use clap::Parser;
@@ -11,7 +9,8 @@ use log::{info, error};
 use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use crate::state::CockpitState;
+use mumbling_cockpit_standalone::state::CockpitState;
+use mumbling_cockpit_standalone::mumble;
 use crate::config::Config;
 
 #[derive(Parser, Debug)]
