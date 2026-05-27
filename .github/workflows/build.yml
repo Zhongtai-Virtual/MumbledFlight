@@ -69,7 +69,7 @@ jobs:
           for fw in XPLM XPWidgets; do
             sudo mkdir -p /Library/Frameworks/${fw}.framework
             printf 'void _stub(void){}' | \
-              cc -x c - -dynamiclib -arch arm64 -arch x86_64 \
+              cc -x c - -dynamiclib \
                  -o /Library/Frameworks/${fw}.framework/${fw}
           done
           echo "RUSTFLAGS=-C link-arg=-undefined -C link-arg=dynamic_lookup" >> "$GITHUB_ENV"
