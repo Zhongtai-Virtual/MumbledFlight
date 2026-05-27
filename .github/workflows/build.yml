@@ -13,13 +13,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            xpl: lin.xpl
+            xpl_dir: lin_x64
             lib: libmumbled_flight_plugin.so
           - os: macos-latest
-            xpl: mac.xpl
+            xpl_dir: mac_x64
             lib: libmumbled_flight_plugin.dylib
           - os: windows-latest
-            xpl: win.xpl
+            xpl_dir: win_x64
             lib: mumbled_flight_plugin.dll
 
     runs-on: ${{ matrix.os }}
@@ -90,16 +90,17 @@ jobs:
       - name: Package .xpl
         shell: bash
         run: |
-          mkdir -p dist/MumbledFlight/64
-          cp target/release/${{ matrix.lib }} dist/MumbledFlight/64/${{ matrix.xpl }}
+          mkdir -p dist/${{ matrix.xpl_dir }}
+          cp target/release/${{ matrix.lib }} dist/${{ matrix.xpl_dir }}/MumbledFlight.xpl
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.xpl }}
-          path: dist/MumbledFlight/64/${{ matrix.xpl }}
+          name: ${{ matrix.xpl_dir }}
+          path: dist/${{ matrix.xpl_dir }}/MumbledFlight.xpl
 
-  # Combine all three .xpl files into one zip: MumbledFlight/64/{lin,mac,win}.xpl
+  # Combine all three platforms into MumbledFlight.zip
+  # Extract into Resources/plugins/ to install.
   bundle:
     needs: build
     runs-on: ubuntu-latest
@@ -107,12 +108,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist/MumbledFlight/64
-
-      - name: Flatten artifact subdirs
-        run: |
-          find dist/MumbledFlight/64 -mindepth 2 -name '*.xpl' -exec mv {} dist/MumbledFlight/64/ \;
-          find dist/MumbledFlight/64 -mindepth 1 -type d -delete
+          path: dist/MumbledFlight
 
       - name: Zip plugin bundle
         run: cd dist && zip -r MumbledFlight.zip MumbledFlight/
