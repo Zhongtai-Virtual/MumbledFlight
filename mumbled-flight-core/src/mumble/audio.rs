@@ -27,24 +27,29 @@ pub fn list_audio_devices() {
 pub fn create_linux_sink() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("pactl").args(&["list", "short", "modules"]).output().map(|out| {
-            let s = String::from_utf8_lossy(&out.stdout);
-            for line in s.lines() {
-                if line.contains("sink_name=MumblingRadio") {
-                    if let Some(id) = line.split_whitespace().next() {
-                        let _ = std::process::Command::new("pactl").args(&["unload-module", id]).status();
-                    }
-                }
-            }
-        });
+        const SINK: &str = "MumblingRadio";
 
-        info!("[Audio:Linux] Creating MumblingRadio virtual device...");
+        // Reuse if already present — avoids accumulating duplicate modules across reconnects.
+        if let Ok(out) = std::process::Command::new("pactl").args(&["list", "short", "sinks"]).output() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if s.lines().any(|l| l.split_whitespace().nth(1) == Some(SINK)) {
+                info!("[Audio:Linux] Reusing existing {SINK} virtual sink");
+                return Some(format!("{SINK}.monitor"));
+            }
+        }
+
+        info!("[Audio:Linux] Creating {SINK} virtual sink...");
         let status = std::process::Command::new("pactl")
-            .args(&["load-module", "module-null-sink", "sink_name=MumblingRadio", "format=float32le", "rate=48000", "channels=2", "sink_properties=device.description=MumblingRadio"])
+            .args(&[
+                "load-module", "module-null-sink",
+                &format!("sink_name={SINK}"),
+                "format=float32le", "rate=48000", "channels=2",
+                &format!("sink_properties=device.description={SINK}"),
+            ])
             .status();
-        
+
         if let Ok(s) = status {
-            if s.success() { return Some("MumblingRadio.monitor".to_string()); }
+            if s.success() { return Some(format!("{SINK}.monitor")); }
         }
         None
     }
