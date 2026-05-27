@@ -64,15 +64,14 @@ jobs:
       - name: Create X-Plane SDK framework stubs (macOS)
         if: runner.os == 'macOS'
         run: |
-          # XPLM symbols are provided by X-Plane at runtime; create empty stub frameworks
-          # so the linker is satisfied, then -undefined dynamic_lookup handles the rest.
+          # Build stub dylibs in /tmp (no sudo needed), then point the linker there with -F.
+          # -undefined dynamic_lookup lets all XPLM symbols resolve when X-Plane loads the plugin.
           for fw in XPLM XPWidgets; do
-            sudo mkdir -p /Library/Frameworks/${fw}.framework
+            mkdir -p /tmp/XPlaneSDK/${fw}.framework
             printf 'void _stub(void){}' | \
-              cc -x c - -dynamiclib \
-                 -o /Library/Frameworks/${fw}.framework/${fw}
+              cc -x c - -dynamiclib -o /tmp/XPlaneSDK/${fw}.framework/${fw}
           done
-          echo "RUSTFLAGS=-C link-arg=-undefined -C link-arg=dynamic_lookup" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-F /tmp/XPlaneSDK -C link-arg=-undefined -C link-arg=dynamic_lookup" >> "$GITHUB_ENV"
 
       # ── Windows ────────────────────────────────────────────────────────────
       - name: Install Windows system dependencies (vcpkg)
