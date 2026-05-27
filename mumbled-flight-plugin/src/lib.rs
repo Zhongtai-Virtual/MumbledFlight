@@ -4,11 +4,11 @@ mod connection;
 mod gui;
 mod logger;
 
+use log::{debug, info};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use log::{debug, info};
 
 use mumbled_flight_core::{
     config::Config,
@@ -16,8 +16,8 @@ use mumbled_flight_core::{
 };
 use xplane_sys::{
     XPLMAppendMenuItem, XPLMCheckMenuItem, XPLMCreateMenu, XPLMDataRef, XPLMDataTypeID,
-    XPLMDebugString, XPLMDestroyMenu, XPLMFindDataRef, XPLMFindPluginsMenu, XPLMGetDataf,
-    XPLMGetDatai, XPLMGetDataRefTypes, XPLMGetSystemPath, XPLMGetWindowIsVisible, XPLMMenuCheck,
+    XPLMDebugString, XPLMDestroyMenu, XPLMFindDataRef, XPLMFindPluginsMenu, XPLMGetDataRefTypes,
+    XPLMGetDataf, XPLMGetDatai, XPLMGetSystemPath, XPLMGetWindowIsVisible, XPLMMenuCheck,
     XPLMMenuID, XPLMRegisterFlightLoopCallback, XPLMSetWindowIsVisible, XPLMTakeKeyboardFocus,
     XPLMUnregisterFlightLoopCallback,
 };
@@ -38,20 +38,30 @@ unsafe impl Send for PluginState {}
 
 impl PluginState {
     unsafe fn retry_pending_datarefs(&mut self) {
-        if self.pending_datarefs.is_empty() { return; }
+        if self.pending_datarefs.is_empty() {
+            return;
+        }
         self.retry_ticks += 1;
-        if self.retry_ticks < 40 { return; }
+        if self.retry_ticks < 40 {
+            return;
+        }
         self.retry_ticks = 0;
         let pending = std::mem::take(&mut self.pending_datarefs);
         let mut newly_found = 0u32;
         for id in pending {
             match find_dataref(id) {
-                Some(e) => { self.datarefs.push(e); newly_found += 1; }
-                None    => self.pending_datarefs.push(id),
+                Some(e) => {
+                    self.datarefs.push(e);
+                    newly_found += 1;
+                }
+                None => self.pending_datarefs.push(id),
             }
         }
         if newly_found > 0 {
-            info!("+{newly_found} DataRefs resolved ({} still pending)", self.pending_datarefs.len());
+            info!(
+                "+{newly_found} DataRefs resolved ({} still pending)",
+                self.pending_datarefs.len()
+            );
         }
     }
 }
@@ -69,11 +79,11 @@ pub fn plugin_cell() -> &'static Mutex<Option<PluginState>> {
 #[no_mangle]
 pub unsafe extern "C" fn XPluginStart(
     out_name: *mut c_char,
-    out_sig:  *mut c_char,
+    out_sig: *mut c_char,
     out_desc: *mut c_char,
 ) -> c_int {
     write_cstr(out_name, "MumbledFlight");
-    write_cstr(out_sig,  "dev.mumbling.flight");
+    write_cstr(out_sig, "dev.mumbling.flight");
     write_cstr(out_desc, "Spatial audio bridge for Mumble VoIP");
     logger::init();
     info!("XPluginStart");
@@ -94,11 +104,10 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
     XPLMGetSystemPath(buf.as_mut_ptr());
     let xp_path = CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_string();
 
-    let auto_user = Config::read_cl60_config(PathBuf::from(&xp_path).as_path())
-        .map(|c| c.user_name);
+    let auto_user =
+        Config::read_cl60_config(PathBuf::from(&xp_path).as_path()).map(|c| c.user_name);
 
-    let config_path = PathBuf::from(&xp_path)
-        .join("Resources/plugins/MumblingCockpit/config.toml");
+    let config_path = PathBuf::from(&xp_path).join("Resources/plugins/MumbledFlight/config.toml");
 
     let mut datarefs: Vec<(XPLMDataRef, DataRefId, bool)> = Vec::new();
     let mut pending_datarefs: Vec<DataRefId> = Vec::new();
@@ -108,8 +117,12 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
             None => pending_datarefs.push(id),
         }
     }
-    info!("{}/{} DataRefs found at enable ({} pending)",
-        datarefs.len(), DataRefId::all().len(), pending_datarefs.len());
+    info!(
+        "{}/{} DataRefs found at enable ({} pending)",
+        datarefs.len(),
+        DataRefId::all().len(),
+        pending_datarefs.len()
+    );
 
     let plugins_menu = XPLMFindPluginsMenu();
     let sub_idx = XPLMAppendMenuItem(
@@ -162,22 +175,29 @@ pub unsafe extern "C" fn XPluginDisable() {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn XPluginReceiveMessage(
-    _from: c_int, _msg: c_int, _param: *mut c_void,
-) {}
+pub unsafe extern "C" fn XPluginReceiveMessage(_from: c_int, _msg: c_int, _param: *mut c_void) {}
 
 // ── Menu callback ─────────────────────────────────────────────────────────────
 
 unsafe extern "C-unwind" fn menu_handler(_menu_ref: *mut c_void, _item_ref: *mut c_void) {
-    let Ok(mut g) = plugin_cell().lock() else { return };
+    let Ok(mut g) = plugin_cell().lock() else {
+        return;
+    };
     let Some(ps) = g.as_mut() else { return };
     let win = ps.gui.window_id;
     let now_visible = XPLMGetWindowIsVisible(win) != 0;
     XPLMSetWindowIsVisible(win, if now_visible { 0 } else { 1 });
-    if !now_visible { XPLMTakeKeyboardFocus(win); }
+    if !now_visible {
+        XPLMTakeKeyboardFocus(win);
+    }
     XPLMCheckMenuItem(
-        ps.menu_id, 0,
-        if now_visible { XPLMMenuCheck::Unchecked } else { XPLMMenuCheck::Checked },
+        ps.menu_id,
+        0,
+        if now_visible {
+            XPLMMenuCheck::Unchecked
+        } else {
+            XPLMMenuCheck::Checked
+        },
     );
     info!("window {}", if now_visible { "hidden" } else { "shown" });
 }
@@ -190,8 +210,12 @@ unsafe extern "C-unwind" fn flight_loop_cb(
     _counter: c_int,
     _refcon: *mut c_void,
 ) -> c_float {
-    let Ok(mut guard) = plugin_cell().lock() else { return 1.0 / 20.0 };
-    let Some(ps) = guard.as_mut() else { return 1.0 / 20.0 };
+    let Ok(mut guard) = plugin_cell().lock() else {
+        return 1.0 / 20.0;
+    };
+    let Some(ps) = guard.as_mut() else {
+        return 1.0 / 20.0;
+    };
 
     ps.retry_pending_datarefs();
 
@@ -201,8 +225,14 @@ unsafe extern "C-unwind" fn flight_loop_cb(
         }
     }
 
-    if ps.gui.should_connect    { ps.gui.should_connect    = false; connection::start(ps); }
-    if ps.gui.should_disconnect { ps.gui.should_disconnect = false; connection::stop(ps); }
+    if ps.gui.should_connect {
+        ps.gui.should_connect = false;
+        connection::start(ps);
+    }
+    if ps.gui.should_disconnect {
+        ps.gui.should_disconnect = false;
+        connection::stop(ps);
+    }
 
     1.0 / 20.0
 }
@@ -211,7 +241,11 @@ unsafe extern "C-unwind" fn flight_loop_cb(
 
 unsafe fn poll_datarefs(datarefs: &[(XPLMDataRef, DataRefId, bool)], cs: &mut CockpitState) {
     for &(dr, id, use_int) in datarefs {
-        let val = if use_int { XPLMGetDatai(dr) as f32 } else { XPLMGetDataf(dr) };
+        let val = if use_int {
+            XPLMGetDatai(dr) as f32
+        } else {
+            XPLMGetDataf(dr)
+        };
         cs.update_from_float(id, val);
     }
 }
@@ -219,7 +253,9 @@ unsafe fn poll_datarefs(datarefs: &[(XPLMDataRef, DataRefId, bool)], cs: &mut Co
 unsafe fn find_dataref(id: DataRefId) -> Option<(XPLMDataRef, DataRefId, bool)> {
     let name = CString::new(id.name()).ok()?;
     let dr = XPLMFindDataRef(name.as_ptr());
-    if dr.is_null() { return None; }
+    if dr.is_null() {
+        return None;
+    }
     let types = XPLMGetDataRefTypes(dr);
     let use_int = (types & XPLMDataTypeID::Float).0 == 0;
     Some((dr, id, use_int))
