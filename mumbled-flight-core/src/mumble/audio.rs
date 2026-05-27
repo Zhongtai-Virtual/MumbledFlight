@@ -52,6 +52,37 @@ pub fn create_linux_sink() -> Option<String> {
     { None }
 }
 
+fn select_input_device(filter: Option<&str>) -> cpal::Device {
+    let host = cpal::default_host();
+    if let Some(f) = filter {
+        if let Ok(mut devs) = host.input_devices() {
+            if let Some(d) = devs.find(|d| d.name().unwrap_or_default().to_lowercase().contains(f)) {
+                return d;
+            }
+        }
+    }
+    host.default_input_device().expect("No default input device")
+}
+
+fn select_output_device(preferred: Option<&str>) -> cpal::Device {
+    let host = cpal::default_host();
+    if let Some(f) = preferred {
+        if let Ok(mut devs) = host.output_devices() {
+            if let Some(d) = devs.find(|d| d.name().unwrap_or_default().to_lowercase().contains(f)) {
+                return d;
+            }
+        }
+    }
+    host.output_devices().ok()
+        .and_then(|mut d| d.find(|d| {
+            let name = d.name().unwrap_or_default().to_lowercase();
+            (name == "pulse" || name == "pipewire") &&
+            d.supported_output_configs().map(|mut c| c.any(|cfg| cfg.channels() == 2)).unwrap_or(false)
+        }))
+        .or_else(|| host.default_output_device())
+        .expect("No suitable output device")
+}
+
 pub fn start_capture(
     tx: mpsc::Sender<Vec<f32>>, 
     _denoise: bool, 
@@ -61,18 +92,7 @@ pub fn start_capture(
     _is_loopback: bool
 ) {
     std::thread::spawn(move || {
-        let host = cpal::default_host();
-        let mut found = None;
-        if let Some(ref filter) = device_name_filter {
-            if let Ok(devices) = host.input_devices() {
-                for d in devices {
-                    if d.name().unwrap_or_default().to_lowercase().contains(&filter.to_lowercase()) {
-                        found = Some(d); break;
-                    }
-                }
-            }
-        }
-        let device = found.unwrap_or_else(|| host.default_input_device().expect("No default input found"));
+        let device = select_input_device(device_name_filter.as_deref());
 
         let supported_configs = device.supported_input_configs().expect("Failed to get configs");
         let config = supported_configs
@@ -114,26 +134,7 @@ pub fn start_capture(
 }
 
 pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option<String>) {
-    let host = cpal::default_host();
-
-    let device = if let Some(ref name_filter) = preferred_device {
-        host.output_devices().ok()
-            .and_then(|mut devs| devs.find(|d| {
-                d.name().unwrap_or_default().to_lowercase().contains(&name_filter.to_lowercase())
-            }))
-            .or_else(|| host.default_output_device())
-    } else {
-        // Prefer a named virtual/real sink over the ALSA "default" shim so Mumble
-        // audio ends up on its own PipeWire/PA stream, separate from X-Plane's.
-        host.output_devices().expect("No output devices found")
-            .find(|d| {
-                let name = d.name().unwrap_or_default().to_lowercase();
-                (name == "pulse" || name == "pipewire") &&
-                d.supported_output_configs().map(|mut c| c.any(|cfg| cfg.channels() == 2)).unwrap_or(false)
-            })
-            .or_else(|| host.default_output_device())
-    }
-    .expect("No suitable output device found");
+    let device = select_output_device(preferred_device.as_deref());
     
     let supported_configs = device.supported_output_configs().expect("Failed to get configs");
     let config = supported_configs

@@ -1,33 +1,48 @@
 //! Core VoIP implementation with Mumble's Official Spatial Algorithm.
 
 use anyhow::{Result, anyhow};
-use audiopus::{coder::Encoder, coder::Decoder, packet::Packet, Application, Bitrate, Channels, SampleRate, MutSignals, Bandwidth};
-use byteorder::{LittleEndian, WriteBytesExt, ReadBytesExt};
+use audiopus::{
+    coder::{Decoder, Encoder}, packet::Packet,
+    Application, Bandwidth, Bitrate, Channels, MutSignals, SampleRate,
+};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
-use mumble_protocol::control::{msgs, ControlPacket, ClientControlCodec};
+use mumble_protocol::control::{msgs, ClientControlCodec, ControlPacket};
 use mumble_protocol::crypt::CryptState;
-use mumble_protocol::voice::{Serverbound, Clientbound, VoicePacket, VoicePacketPayload};
+use mumble_protocol::voice::{Clientbound, Serverbound, VoicePacket, VoicePacketPayload};
 use native_tls::Identity;
 use openssl::asn1::Asn1Time;
 use openssl::hash::MessageDigest;
 use openssl::pkcs12::Pkcs12;
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
-use openssl::x509::{X509Name, X509};
+use openssl::x509::{X509, X509Name};
 use std::collections::HashMap;
+use std::io::Cursor;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{broadcast, mpsc};
 use tokio_native_tls::TlsConnector;
 use tokio_util::codec::Framed;
 use crate::state::CockpitState;
-use log::{info, debug};
-use std::marker::PhantomData;
-use std::io::Cursor;
+use log::{debug, info};
 
 const MUMBLE_VERSION: u32 = 0x00010400;
+
+type Control = Framed<tokio_native_tls::TlsStream<TcpStream>, ClientControlCodec>;
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+// ── Pure audio math ───────────────────────────────────────────────────────────
 
 /// Mumble's calcGain: maps dot ∈ [-1, 1] → gain ∈ [0.25, 1.0].
 fn calc_gain(dot: f32) -> f32 {
@@ -35,8 +50,8 @@ fn calc_gain(dot: f32) -> f32 {
     df + (1.0 - df) * 0.25
 }
 
-/// Attenuation factor for a single door at `door_z`. Returns 1.0 when source and listener are
-/// on the same side, or when the door is sufficiently open (open >= open_threshold).
+/// Returns 1.0 when source and listener are on the same side of the door,
+/// otherwise scales by how open it is.
 fn door_attenuation(listener_z: f32, source_z: f32, door_z: f32, open: f32, open_threshold: f32) -> f32 {
     if (listener_z - door_z) * (source_z - door_z) >= 0.0 {
         return 1.0;
@@ -44,16 +59,16 @@ fn door_attenuation(listener_z: f32, source_z: f32, door_z: f32, open: f32, open
     0.15 + 0.85 * (open / open_threshold).min(1.0)
 }
 
-/// Decodes a single Opus packet to f32 mono PCM. Returns None on any decode error.
 fn decode_opus_packet(decoder: &mut Decoder, data: &[u8]) -> Option<Vec<f32>> {
     let packet = Packet::try_from(data).ok()?;
     let mut pcm = vec![0i16; 5760];
-    let len = decoder.decode(Some(packet), MutSignals::try_from(pcm.as_mut_slice()).unwrap(), false).ok()?;
+    let len = decoder
+        .decode(Some(packet), MutSignals::try_from(pcm.as_mut_slice()).unwrap(), false)
+        .ok()?;
     pcm.truncate(len);
     Some(pcm.iter().map(|&x| x as f32 / 32767.0).collect())
 }
 
-/// Reads a Mumble positional audio position from raw position bytes.
 fn parse_position(pos_bytes: Option<Bytes>) -> Option<[f32; 3]> {
     let mut rdr = Cursor::new(pos_bytes?);
     Some([
@@ -70,6 +85,236 @@ fn encode_pos(x: f32, y: f32, z: f32) -> Bytes {
     let _ = buf.write_f32::<LittleEndian>(z);
     Bytes::from(buf)
 }
+
+/// Computes (left_gain, right_gain) from source/listener positions and head orientation.
+fn compute_stereo_gains(
+    source_pos: [f32; 3],
+    listener_pos: [f32; 3],
+    listener_rot: [f32; 3],
+    door: f32,
+    door_lav: f32,
+) -> (f32, f32) {
+    let [lx, ly, lz] = listener_pos;
+    let [sx, sy, sz] = source_pos;
+    let [h_psi, h_the, h_phi] = listener_rot;
+
+    let (dx, dy, dz) = (sx - lx, sy - ly, sz - lz);
+    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+
+    if dist < 0.01 {
+        return (1.0, 1.0);
+    }
+
+    let (nx, ny, nz) = (dx / dist, dy / dist, dz / dist);
+    let (hh, hp, hr) = (h_psi.to_radians(), h_the.to_radians(), h_phi.to_radians());
+
+    let fwd = [hp.cos() * hh.sin(), hp.sin(), hp.cos() * hh.cos()];
+    let top = [
+        -hr.sin() * hh.cos() + hp.sin() * hr.cos() * hh.sin(),
+         hp.cos() * hr.cos(),
+         hr.sin() * hh.sin()  + hp.sin() * hr.cos() * hh.cos(),
+    ];
+    let right = [
+        top[1] * fwd[2] - top[2] * fwd[1],
+        top[2] * fwd[0] - top[0] * fwd[2],
+        top[0] * fwd[1] - top[1] * fwd[0],
+    ];
+
+    let dot_r = nx * right[0] + ny * right[1] + nz * right[2];
+
+    const MIN_DIST: f32 = 1.5;
+    const MAX_DIST: f32 = 8.0;
+    let datt = if dist <= MIN_DIST {
+        1.0
+    } else if dist >= MAX_DIST {
+        0.0
+    } else {
+        let t = 1.0 - (dist - MIN_DIST) / (MAX_DIST - MIN_DIST);
+        t * t
+    };
+
+    let door_att = door_attenuation(lz, sz, 4.1, door, 0.95)
+                 * door_attenuation(lz, sz, -0.43, door_lav, 1.0);
+
+    (calc_gain(-dot_r) * datt * door_att, calc_gain(dot_r) * datt * door_att)
+}
+
+// ── Session — mutable per-connection protocol state ───────────────────────────
+
+struct Session {
+    crypt:            Option<CryptState<Serverbound, Clientbound>>,
+    my_session:       Option<u32>,
+    channels:         HashMap<String, u32>,
+    channel_joined:   bool,
+    encoder:          Encoder,
+    voice_seq:        u64,
+    was_transmitting: bool,
+    decoders:         HashMap<u32, Decoder>,
+}
+
+impl Session {
+    fn new() -> Result<Self> {
+        let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
+        encoder.set_bitrate(Bitrate::BitsPerSecond(64000))?;
+        encoder.set_bandwidth(Bandwidth::Fullband)?;
+        Ok(Self {
+            crypt: None,
+            my_session: None,
+            channels: HashMap::new(),
+            channel_joined: false,
+            encoder,
+            voice_seq: 0,
+            was_transmitting: false,
+            decoders: HashMap::new(),
+        })
+    }
+
+    fn on_crypt_setup(&mut self, setup: &msgs::CryptSetup) {
+        let key_raw = setup.get_key();
+        if key_raw.is_empty() { return; }
+        let key:     [u8; 16] = match key_raw.try_into()                  { Ok(k) => k, _ => return };
+        let c_nonce: [u8; 16] = match setup.get_client_nonce().try_into() { Ok(n) => n, _ => return };
+        let s_nonce: [u8; 16] = match setup.get_server_nonce().try_into() { Ok(n) => n, _ => return };
+        self.crypt = Some(CryptState::new_from(key, c_nonce, s_nonce));
+    }
+
+    async fn on_channel_state(
+        &mut self,
+        cs: &msgs::ChannelState,
+        target: &str,
+        control: &mut Control,
+    ) -> Result<()> {
+        if !cs.has_name() || !cs.has_channel_id() { return Ok(()); }
+        let name = cs.get_name().to_string();
+        let cid  = cs.get_channel_id();
+        self.channels.insert(name.clone(), cid);
+
+        if self.channel_joined || name != target { return Ok(()); }
+        let Some(sess) = self.my_session else { return Ok(()) };
+        let mut msg = msgs::UserState::new();
+        msg.set_session(sess);
+        msg.set_channel_id(cid);
+        control.send(ControlPacket::UserState(Box::new(msg))).await?;
+        self.channel_joined = true;
+        info!("[VoIP] Joined channel '{}' (id {})", name, cid);
+        Ok(())
+    }
+
+    async fn on_server_sync(
+        &mut self,
+        sync: &msgs::ServerSync,
+        client: &MumbleVoipClient,
+        control: &mut Control,
+    ) -> Result<()> {
+        self.my_session = Some(sync.get_session());
+
+        let mut state_msg = msgs::UserState::new();
+        state_msg.set_session(sync.get_session());
+        state_msg.set_plugin_context(client.context.as_bytes().to_vec());
+        state_msg.set_plugin_identity(client.username.clone());
+        control.send(ControlPacket::UserState(Box::new(state_msg))).await?;
+        info!("[VoIP:{}] Context active: '{}'", client.username, client.context);
+
+        if let Some(&cid) = self.channels.get(&client.target_channel) {
+            let mut move_msg = msgs::UserState::new();
+            move_msg.set_session(sync.get_session());
+            move_msg.set_channel_id(cid);
+            control.send(ControlPacket::UserState(Box::new(move_msg))).await?;
+            self.channel_joined = true;
+            info!("[VoIP:{}] Joined existing channel '{}'", client.username, client.target_channel);
+        } else {
+            info!("[VoIP:{}] Channel '{}' not found, requesting creation", client.username, client.target_channel);
+            let mut ch = msgs::ChannelState::new();
+            ch.set_parent(0);
+            ch.set_name(client.target_channel.clone());
+            ch.set_temporary(true);
+            control.send(ControlPacket::ChannelState(Box::new(ch))).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_control_msg(
+        &mut self,
+        msg: ControlPacket<Clientbound>,
+        client: &MumbleVoipClient,
+        control: &mut Control,
+    ) -> Result<()> {
+        match msg {
+            ControlPacket::CryptSetup(s)   => self.on_crypt_setup(&s),
+            ControlPacket::ChannelState(c) => self.on_channel_state(&c, &client.target_channel, control).await?,
+            ControlPacket::ServerSync(s)   => self.on_server_sync(&s, client, control).await?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn on_udp_recv(
+        &mut self,
+        buf: &[u8],
+        len: usize,
+        client: &MumbleVoipClient,
+        state: &Arc<Mutex<CockpitState>>,
+        playback_tx: &mpsc::Sender<Vec<f32>>,
+    ) {
+        // Decrypt in an inner block so the crypt borrow ends before we touch decoders.
+        let packet = {
+            let Some(cs) = self.crypt.as_mut() else { return };
+            let mut src = BytesMut::from(&buf[..len]);
+            match cs.decrypt(&mut src) { Ok(Ok(p)) => p, _ => return }
+        };
+        let VoicePacket::Audio { session_id, payload, position_info, .. } = packet else { return };
+        if self.my_session == Some(session_id) || client.is_radio { return; }
+        let VoicePacketPayload::Opus(data, _) = payload else { return };
+
+        let decoder = self.decoders.entry(session_id).or_insert_with(|| {
+            debug!("[VoIP:{}] Detected remote speaker (session {})", client.username, session_id);
+            Decoder::new(SampleRate::Hz48000, Channels::Mono).expect("decoder")
+        });
+        let Some(mono) = decode_opus_packet(decoder, &data) else { return };
+        let stereo = client.spatialize(&mono, parse_position(position_info), state, session_id);
+        let _ = playback_tx.send(stereo).await;
+    }
+
+    async fn on_mic_pcm(
+        &mut self,
+        pcm: Vec<f32>,
+        client: &MumbleVoipClient,
+        udp: &UdpSocket,
+        state: &Arc<Mutex<CockpitState>>,
+    ) -> Result<()> {
+        let is_active = {
+            let s = state.lock().unwrap();
+            if client.is_radio   { s.spkr }
+            else if client.is_ic { s.ic || s.pa }
+            else                 { true }
+        };
+        let Some(cs) = self.crypt.as_mut() else { return Ok(()) };
+        if is_active {
+            client.send_audio(&pcm, &mut self.encoder, &mut self.voice_seq, udp, cs, state, false).await?;
+            self.was_transmitting = true;
+        } else if self.was_transmitting {
+            client.send_audio(&pcm, &mut self.encoder, &mut self.voice_seq, udp, cs, state, true).await?;
+            self.was_transmitting = false;
+        }
+        Ok(())
+    }
+
+    async fn send_tcp_ping(&mut self, control: &mut Control) {
+        let mut ping = msgs::Ping::new();
+        ping.set_timestamp(unix_now_ms());
+        let _ = control.send(ControlPacket::Ping(Box::new(ping))).await;
+    }
+
+    fn send_udp_ping(&mut self, udp: &UdpSocket) {
+        let Some(cs) = self.crypt.as_mut() else { return };
+        let pkt = VoicePacket::<Serverbound>::Ping { timestamp: unix_now_ms() };
+        let mut dest = BytesMut::new();
+        cs.encrypt(pkt, &mut dest);
+        let _ = udp.try_send(&dest);
+    }
+}
+
+// ── MumbleVoipClient — static config + entry point ───────────────────────────
 
 pub struct MumbleVoipClient {
     pub username: String,
@@ -91,17 +336,48 @@ impl MumbleVoipClient {
         playback_tx: mpsc::Sender<Vec<f32>>,
     ) -> Result<()> {
         info!("[VoIP:{}] Connecting to {}...", self.username, server_addr);
+        let mut control = self.connect(server_addr).await?;
+        let udp = UdpSocket::bind("0.0.0.0:0").await?;
+        udp.connect(&server_addr).await?;
 
-        let identity = self.generate_temp_identity()?;
-        let tcp_stream = TcpStream::connect(&server_addr).await?;
-        let connector = native_tls::TlsConnector::builder().identity(identity).danger_accept_invalid_certs(true).build()?;
-        let connector = TlsConnector::from(connector);
-        let domain = server_addr.ip().to_string();
-        let tls_stream = connector.connect(&domain, tcp_stream).await?;
-        
-        let mut control = Framed::new(tls_stream, ClientControlCodec::new());
+        let mut session  = Session::new()?;
+        let mut udp_buf  = vec![0u8; 2048];
+        let mut tcp_ping = tokio::time::interval(Duration::from_secs(5));
+        let mut udp_ping = tokio::time::interval(Duration::from_secs(1));
 
-        // Handshake
+        info!("[VoIP:{}] Listening for voice...", self.username);
+        loop {
+            tokio::select! {
+                _ = tcp_ping.tick() => session.send_tcp_ping(&mut control).await,
+                _ = udp_ping.tick() => session.send_udp_ping(&udp),
+                result = udp.recv_from(&mut udp_buf) => {
+                    let Ok((len, _)) = result else { continue };
+                    session.on_udp_recv(&udp_buf, len, self, &state, &playback_tx).await;
+                }
+                result = control.next() => {
+                    let Some(Ok(msg)) = result else { break };
+                    session.on_control_msg(msg, self, &mut control).await?;
+                }
+                result = audio_rx.recv() => {
+                    let Ok(pcm) = result else { break };
+                    session.on_mic_pcm(pcm, self, &udp, &state).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn connect(&self, addr: SocketAddr) -> Result<Control> {
+        let tcp = TcpStream::connect(&addr).await?;
+        let connector = native_tls::TlsConnector::builder()
+            .identity(self.generate_temp_identity()?)
+            .danger_accept_invalid_certs(true)
+            .build()?;
+        let tls = TlsConnector::from(connector)
+            .connect(&addr.ip().to_string(), tcp)
+            .await?;
+        let mut control = Framed::new(tls, ClientControlCodec::new());
+
         let mut version = msgs::Version::new();
         version.set_version(MUMBLE_VERSION);
         version.set_release("MumblingCockpit".to_string());
@@ -112,296 +388,87 @@ impl MumbleVoipClient {
         auth.set_opus(true);
         control.send(ControlPacket::Authenticate(Box::new(auth))).await?;
 
-        let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-        udp_socket.connect(&server_addr).await?;
-        
-        let mut crypt_state: Option<CryptState<Serverbound, Clientbound>> = None;
-        let mut my_session: Option<u32> = None;
-        let mut channels: HashMap<String, u32> = HashMap::new();
-        let mut channel_joined = false;
-
-        let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
-        encoder.set_bitrate(Bitrate::BitsPerSecond(64000))?;
-        encoder.set_bandwidth(Bandwidth::Fullband)?;
-        
-        let mut voice_seq = 0u64;
-        let mut was_transmitting = false;
-
-        let mut decoders: HashMap<u32, Decoder> = HashMap::new();
-        let mut udp_recv_buf = vec![0u8; 2048];
-
-        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        let mut udp_ping_interval = tokio::time::interval(std::time::Duration::from_secs(1));
-
-        info!("[VoIP:{}] Listening for voice...", self.username);
-
-        loop {
-            tokio::select! {
-                _ = ping_interval.tick() => {
-                    let mut ping = msgs::Ping::new();
-                    ping.set_timestamp(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64);
-                    let _ = control.send(ControlPacket::Ping(Box::new(ping))).await;
-                }
-
-                _ = udp_ping_interval.tick() => {
-                    if let Some(ref mut cs) = crypt_state {
-                        let ping_packet = VoicePacket::<Serverbound>::Ping { 
-                            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 
-                        };
-                        let mut dest = BytesMut::new();
-                        cs.encrypt(ping_packet, &mut dest);
-                        let _ = udp_socket.send(&dest).await;
-                    }
-                }
-
-                result = udp_socket.recv_from(&mut udp_recv_buf) => {
-                    let Ok((len, _)) = result else { continue };
-                    let Some(cs) = crypt_state.as_mut() else { continue };
-                    let mut src = BytesMut::from(&udp_recv_buf[..len]);
-                    let Ok(Ok(VoicePacket::Audio { session_id, payload, position_info, .. })) = cs.decrypt(&mut src) else { continue };
-                    if my_session == Some(session_id) || self.is_radio { continue; }
-                    let VoicePacketPayload::Opus(data, _) = payload else { continue };
-                    let decoder = decoders.entry(session_id).or_insert_with(|| {
-                        debug!("[VoIP:{}] Detected remote speaker (session {})", self.username, session_id);
-                        Decoder::new(SampleRate::Hz48000, Channels::Mono).expect("Failed to create decoder")
-                    });
-                    let Some(mono) = decode_opus_packet(decoder, &data) else { continue };
-                    let source_pos = parse_position(position_info);
-                    let stereo = self.spatialize(&mono, source_pos, &state, session_id);
-                    let _ = playback_tx.send(stereo).await;
-                }
-
-                result = control.next() => {
-                    match result {
-                        Some(Ok(msg)) => match msg {
-                            ControlPacket::CryptSetup(setup) => {
-                                let key_raw = setup.get_key();
-                                if !key_raw.is_empty() {
-                                    let key: [u8; 16] = key_raw.try_into().unwrap();
-                                    let c_nonce: [u8; 16] = setup.get_client_nonce().try_into().unwrap();
-                                    let s_nonce: [u8; 16] = setup.get_server_nonce().try_into().unwrap();
-                                    crypt_state = Some(CryptState::new_from(key, c_nonce, s_nonce));
-                                }
-                            }
-                            ControlPacket::ChannelState(cs) => {
-                                if cs.has_name() && cs.has_channel_id() {
-                                    let name = cs.get_name().to_string();
-                                    let cid  = cs.get_channel_id();
-                                    channels.insert(name.clone(), cid);
-                                    // Join if this is the confirmation of our target channel
-                                    // arriving after ServerSync (i.e. we requested creation).
-                                    if !channel_joined && name == self.target_channel {
-                                        if let Some(sess) = my_session {
-                                            let mut move_msg = msgs::UserState::new();
-                                            move_msg.set_session(sess);
-                                            move_msg.set_channel_id(cid);
-                                            control.send(ControlPacket::UserState(Box::new(move_msg))).await?;
-                                            channel_joined = true;
-                                            info!("[VoIP:{}] Joined channel '{}' (id {})", self.username, name, cid);
-                                        }
-                                    }
-                                }
-                            }
-                            ControlPacket::ServerSync(sync) => {
-                                my_session = Some(sync.get_session());
-                                let mut user_state = msgs::UserState::new();
-                                user_state.set_session(sync.get_session());
-                                user_state.set_plugin_context(self.context.as_bytes().to_vec());
-                                user_state.set_plugin_identity(self.username.clone());
-                                info!("[VoIP:{}] Context active: '{}'", self.username, self.context);
-                                control.send(ControlPacket::UserState(Box::new(user_state))).await?;
-
-                                if let Some(&cid) = channels.get(&self.target_channel) {
-                                    let mut move_msg = msgs::UserState::new();
-                                    move_msg.set_session(sync.get_session());
-                                    move_msg.set_channel_id(cid);
-                                    control.send(ControlPacket::UserState(Box::new(move_msg))).await?;
-                                    channel_joined = true;
-                                    info!("[VoIP:{}] Joined existing channel '{}'", self.username, self.target_channel);
-                                } else {
-                                    // Channel doesn't exist yet — request creation.
-                                    info!("[VoIP:{}] Channel '{}' not found, requesting creation", self.username, self.target_channel);
-                                    let mut ch = msgs::ChannelState::new();
-                                    ch.set_parent(0);
-                                    ch.set_name(self.target_channel.clone());
-                                    ch.set_temporary(true);
-                                    control.send(ControlPacket::ChannelState(Box::new(ch))).await?;
-                                }
-                            }
-                            _ => {}
-                        },
-                        _ => break,
-                    }
-                }
-
-                pcm_result = audio_rx.recv() => {
-                    match pcm_result {
-                        Ok(pcm) => {
-                            if let Some(ref mut cs) = crypt_state {
-                                let is_active = {
-                                    let s = state.lock().unwrap();
-                                    if self.is_radio { s.spkr }
-                                    else if self.is_ic { s.ic || s.pa } 
-                                    else { true }
-                                };
-
-                                if is_active {
-                                    self.process_audio_packet(&pcm, &mut encoder, &mut voice_seq, &udp_socket, cs, &state, false).await?;
-                                    was_transmitting = true;
-                                } else if was_transmitting {
-                                    self.process_audio_packet(&pcm, &mut encoder, &mut voice_seq, &udp_socket, cs, &state, true).await?;
-                                    was_transmitting = false;
-                                }
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }
-        }
-        Ok(())
+        Ok(control)
     }
 
-    /// Builds the outgoing Mumble positional bytes for this client's current state.
-    /// IC clients send no position; test mode uses a fixed position; others use live head position.
-    /// Mumble space: +X right, +Y up, +Z forward (X-Plane +Z is aft, so we negate).
-    fn position_bytes(&self, s: &CockpitState) -> Option<Bytes> {
-        if self.is_ic {
-            None
-        } else if let Some(tp) = self.test_pos {
-            Some(encode_pos(tp[0], tp[1], tp[2]))
-        } else if self.is_radio {
-            Some(encode_pos(0.0, 0.0, 0.0))
-        } else {
-            Some(encode_pos(s.pos[0], s.pos[1], -s.pos[2]))
-        }
-    }
-
-    async fn process_audio_packet(&self, pcm: &[f32], encoder: &mut Encoder, voice_seq: &mut u64, udp_socket: &UdpSocket, crypt: &mut CryptState<Serverbound, Clientbound>, state: &Arc<Mutex<CockpitState>>, last_bit: bool) -> Result<()> {
+    async fn send_audio(
+        &self,
+        pcm: &[f32],
+        encoder: &mut Encoder,
+        voice_seq: &mut u64,
+        udp: &UdpSocket,
+        crypt: &mut CryptState<Serverbound, Clientbound>,
+        state: &Arc<Mutex<CockpitState>>,
+        end: bool,
+    ) -> Result<()> {
         let pcm_i16: Vec<i16> = pcm.iter().map(|&x| (x.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
         let mut opus_out = vec![0u8; 1024];
         let len = encoder.encode(&pcm_i16, &mut opus_out)?;
         opus_out.truncate(len);
 
         let pos_bytes = self.position_bytes(&state.lock().unwrap());
-        let voice_packet = VoicePacket::<Serverbound>::Audio {
+        let pkt = VoicePacket::<Serverbound>::Audio {
             _dst: PhantomData,
             target: 0,
             session_id: (),
             seq_num: *voice_seq,
-            payload: VoicePacketPayload::Opus(Bytes::from(opus_out), last_bit),
+            payload: VoicePacketPayload::Opus(Bytes::from(opus_out), end),
             position_info: pos_bytes,
         };
         let mut dest = BytesMut::new();
-        crypt.encrypt(voice_packet, &mut dest);
-        let _ = udp_socket.send(&dest).await;
+        crypt.encrypt(pkt, &mut dest);
+        let _ = udp.send(&dest).await;
         *voice_seq += 2;
         Ok(())
     }
 
-    fn spatialize(&self, mono: &[f32], source_pos: Option<[f32; 3]>, state: &Arc<Mutex<CockpitState>>, remote_sid: u32) -> Vec<f32> {
-        // Read listener state: pos is already in Mumble space (+Z forward, -pilots_head_z)
-        let (lx, ly, lz, h_psi, h_the, h_phi, door, door_lav) = {
+    fn position_bytes(&self, s: &CockpitState) -> Option<Bytes> {
+        if self.is_ic           { None }
+        else if self.is_radio   { Some(encode_pos(0.0, 0.0, 0.0)) }
+        else if let Some(tp) = self.test_pos { Some(encode_pos(tp[0], tp[1], tp[2])) }
+        else                    { Some(encode_pos(s.pos[0], s.pos[1], -s.pos[2])) }
+    }
+
+    fn spatialize(
+        &self,
+        mono: &[f32],
+        source_pos: Option<[f32; 3]>,
+        state: &Arc<Mutex<CockpitState>>,
+        remote_sid: u32,
+    ) -> Vec<f32> {
+        let (lpos, lrot, door, door_lav) = {
             let s = state.lock().unwrap();
-            (s.pos[0], s.pos[1], -s.pos[2], s.rot[0], s.rot[1], s.rot[2], s.door, s.door_lav)
+            ([s.pos[0], s.pos[1], -s.pos[2]], s.rot, s.door, s.door_lav)
         };
 
-        // Default: centered mono. Only changes when position data arrives.
-        let mut gains = (0.5f32, 0.5f32);
-        let mut debug_line = format!("[Spatial:{}] no pos data", remote_sid);
-
-        if let Some([sx, sy, sz]) = source_pos {
-            let dx = sx - lx;
-            let dy = sy - ly;
-            let dz = sz - lz;
-            let dist = (dx*dx + dy*dy + dz*dz).sqrt();
-
-            if dist < 0.01 {
-                // Source and listener at the same point — full volume, centered.
-                gains = (1.0, 1.0);
-            } else {
-                // Normalized direction vector from listener to source (Mumble aircraft-local space).
-                let nx = dx / dist;
-                let ny = dy / dist;
-                let nz = dz / dist;
-
-                // pilots_head_psi/the/phi are relative to the aircraft body axes (0 = forward),
-                // the same frame as pilots_head_x/y/z positions.  Using h_psi directly keeps
-                // the orientation vectors in aircraft-local space — consistent with [nx,ny,nz].
-                // (Subtracting plane_psi would rotate the basis into world space, making the
-                // dot product with aircraft-local positions meaningless.)
-                let hh = h_psi.to_radians();
-                let hp = h_the.to_radians();
-                let hr = h_phi.to_radians();
-
-                // Build listener orientation vectors in Mumble/aircraft-local space.
-                // These are the same formulas used by the X-Plane plugin to populate
-                // the Mumble Link shared memory (fCameraFront / fCameraTop).
-                let fwd = [
-                    hp.cos() * hh.sin(),   // x
-                    hp.sin(),               // y
-                    hp.cos() * hh.cos(),   // z  (+Z = aircraft-forward in Mumble space)
-                ];
-                let top = [
-                    -hr.sin() * hh.cos() + hp.sin() * hr.cos() * hh.sin(),
-                    hp.cos() * hr.cos(),
-                    hr.sin() * hh.sin()  + hp.sin() * hr.cos() * hh.cos(),
-                ];
-
-                // right = top × fwd   (matches Mumble: right = cameraAxis.crossProduct(cameraDir))
-                let right = [
-                    top[1] * fwd[2] - top[2] * fwd[1],
-                    top[2] * fwd[0] - top[0] * fwd[2],
-                    top[0] * fwd[1] - top[1] * fwd[0],
-                ];
-
-                // In headphone mode Mumble places speakers at (±1, 0, 0) in listener-local
-                // space, which after head-orientation rotation become ±right in world/cockpit
-                // space.  dot_r = how much the source direction aligns with the right ear.
-                let dot_r =  nx * right[0] + ny * right[1] + nz * right[2];
-                let dot_l = -dot_r;
-
-                // Distance attenuation: full volume up to 1.5 m, fades to zero at 8 m.
-                // Power-law curve mirrors Mumble's log-distance model at cockpit scale.
-                const MIN_DIST: f32 = 1.5;
-                const MAX_DIST: f32 = 8.0;
-                let datt = if dist <= MIN_DIST {
-                    1.0
-                } else if dist >= MAX_DIST {
-                    0.0
-                } else {
-                    let t = 1.0 - (dist - MIN_DIST) / (MAX_DIST - MIN_DIST);
-                    t * t
-                };
-
-                // Mumble z = -pilots_head_z: cabin door at z=4.1, lavatory door at z=-0.43.
-                // Cabin door (0.95 = panel removed / fully clear).
-                let door_att = door_attenuation(lz, sz, 4.1, door, 0.95)
-                             * door_attenuation(lz, sz, -0.43, door_lav, 1.0);
-
-                gains = (calc_gain(dot_l) * datt * door_att, calc_gain(dot_r) * datt * door_att);
-                debug_line = format!(
-                    "[Spatial:{}] dist={:.2}m dX={:.2} dY={:.2} dZ={:.2} headPsi={:.1}° dot_R={:.3} door={:.2} lav={:.2} L={:.3} R={:.3}",
-                    remote_sid, dist, dx, dy, dz, h_psi, dot_r, door, door_lav, gains.0, gains.1
+        let (gain_l, gain_r, debug_msg) = match source_pos {
+            None => (0.5f32, 0.5f32, format!("[Spatial:{}] no pos data", remote_sid)),
+            Some(spos) => {
+                let (gl, gr) = compute_stereo_gains(spos, lpos, lrot, door, door_lav);
+                let [lx, ly, lz] = lpos;
+                let [sx, sy, sz] = spos;
+                let dist = ((sx-lx).powi(2) + (sy-ly).powi(2) + (sz-lz).powi(2)).sqrt();
+                let msg = format!(
+                    "[Spatial:{}] dist={dist:.2}m dX={:.2} dY={:.2} dZ={:.2} \
+                     door={door:.2} lav={door_lav:.2} L={gl:.3} R={gr:.3}",
+                    remote_sid, sx-lx, sy-ly, sz-lz,
                 );
+                (gl, gr, msg)
             }
-        }
+        };
 
         static PACKET_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if PACKET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 400 == 0 {
-            debug!("{}", debug_line);
+            debug!("{}", debug_msg);
         }
 
-        let mut output = Vec::with_capacity(mono.len() * 2);
-        for &s in mono {
-            output.push(s * gains.0);
-            output.push(s * gains.1);
-        }
-        output
+        let mut out = Vec::with_capacity(mono.len() * 2);
+        for &s in mono { out.push(s * gain_l); out.push(s * gain_r); }
+        out
     }
 
     fn generate_temp_identity(&self) -> Result<Identity> {
-        let rsa = Rsa::generate(2048)?;
+        let rsa  = Rsa::generate(2048)?;
         let pkey = PKey::from_rsa(rsa)?;
         let mut name_builder = X509Name::builder()?;
         name_builder.append_entry_by_text("CN", &self.username)?;
@@ -411,14 +478,13 @@ impl MumbleVoipClient {
         cert_builder.set_subject_name(&x509_name)?;
         cert_builder.set_issuer_name(&x509_name)?;
         cert_builder.set_pubkey(&pkey)?;
-        let now = Asn1Time::days_from_now(0)?;
-        let later = Asn1Time::days_from_now(365)?;
-        cert_builder.set_not_before(&now)?;
-        cert_builder.set_not_after(&later)?;
+        let not_before = Asn1Time::days_from_now(0)?;
+        let not_after  = Asn1Time::days_from_now(365)?;
+        cert_builder.set_not_before(&not_before)?;
+        cert_builder.set_not_after(&not_after)?;
         cert_builder.sign(&pkey, MessageDigest::sha256())?;
         let cert = cert_builder.build();
-        let p12 = Pkcs12::builder().name(&self.username).pkey(&pkey).cert(&cert).build2("")?;
-        let der = p12.to_der()?;
-        Identity::from_pkcs12(&der, "").map_err(|e| anyhow!("Identity error: {}", e))
+        let p12  = Pkcs12::builder().name(&self.username).pkey(&pkey).cert(&cert).build2("")?;
+        Identity::from_pkcs12(&p12.to_der()?, "").map_err(|e| anyhow!("Identity error: {e}"))
     }
 }

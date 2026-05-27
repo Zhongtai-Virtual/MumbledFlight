@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use log::{debug, info, warn};
 
 use mumbled_flight_core::{
     config::Config,
@@ -40,6 +41,44 @@ pub struct PluginState {
 // XPLMDataRef is *mut c_void — only accessed from the XPLM main thread.
 unsafe impl Send for PluginState {}
 
+impl PluginState {
+    unsafe fn retry_pending_datarefs(&mut self) {
+        if self.pending_datarefs.is_empty() { return; }
+        self.retry_ticks += 1;
+        if self.retry_ticks < 40 { return; }
+        self.retry_ticks = 0;
+        let pending = std::mem::take(&mut self.pending_datarefs);
+        let mut newly_found = 0u32;
+        for id in pending {
+            match find_dataref(id) {
+                Some(e) => { self.datarefs.push(e); newly_found += 1; }
+                None    => self.pending_datarefs.push(id),
+            }
+        }
+        if newly_found > 0 {
+            info!("+{newly_found} DataRefs resolved ({} still pending)", self.pending_datarefs.len());
+        }
+    }
+}
+
+// ── Logging backend ───────────────────────────────────────────────────────────
+
+struct XPlaneLogger;
+
+impl log::Log for XPlaneLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Debug
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            xp_log(&format!("[MumbledFlight:{}] {}\n", record.level(), record.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+static LOGGER: XPlaneLogger = XPlaneLogger;
+
 static PLUGIN: OnceLock<Mutex<Option<PluginState>>> = OnceLock::new();
 
 pub fn plugin_cell() -> &'static Mutex<Option<PluginState>> {
@@ -57,14 +96,23 @@ pub unsafe extern "C" fn XPluginStart(
     write_cstr(out_name, "MumbledFlight");
     write_cstr(out_sig,  "dev.mumbling.flight");
     write_cstr(out_desc, "Spatial audio bridge for Mumble VoIP");
-    xp_log("MumbledFlight: XPluginStart\n");
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Info);
+    info!("XPluginStart");
     1
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn XPluginStop() {
-    xp_log("MumbledFlight: XPluginStop\n");
+    info!("XPluginStop");
     *plugin_cell().lock().unwrap() = None;
+}
+
+unsafe fn poll_datarefs(datarefs: &[(XPLMDataRef, DataRefId, bool)], cs: &mut CockpitState) {
+    for &(dr, id, use_int) in datarefs {
+        let val = if use_int { XPLMGetDatai(dr) as f32 } else { XPLMGetDataf(dr) };
+        cs.update_from_float(id, val);
+    }
 }
 
 unsafe fn find_dataref(id: DataRefId) -> Option<(XPLMDataRef, DataRefId, bool)> {
@@ -78,7 +126,7 @@ unsafe fn find_dataref(id: DataRefId) -> Option<(XPLMDataRef, DataRefId, bool)> 
 
 #[no_mangle]
 pub unsafe extern "C" fn XPluginEnable() -> c_int {
-    xp_log("MumbledFlight: XPluginEnable\n");
+    info!("XPluginEnable");
 
     // Auto-detect username from CL650 config; user can override in the GUI.
     let auto_user = {
@@ -97,8 +145,8 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
             None => pending_datarefs.push(id),
         }
     }
-    xp_log(&format!("MumbledFlight: {}/{} DataRefs found at enable ({} pending)\n",
-        datarefs.len(), DataRefId::all().len(), pending_datarefs.len()));
+    info!("{}/{} DataRefs found at enable ({} pending)",
+        datarefs.len(), DataRefId::all().len(), pending_datarefs.len());
 
     // Build "Plugins → MumbledFlight → Show Window" menu.
     let plugins_menu = XPLMFindPluginsMenu();
@@ -123,7 +171,7 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
     );
     // Start unchecked — window is hidden on startup.
     XPLMCheckMenuItem(menu_id, 0, XPLMMenuCheck::Unchecked);
-    xp_log("MumbledFlight: menu created\n");
+    debug!("menu created");
 
     let gui = gui::GuiState::new(auto_user);
 
@@ -142,7 +190,7 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
 
 #[no_mangle]
 pub unsafe extern "C" fn XPluginDisable() {
-    xp_log("MumbledFlight: XPluginDisable\n");
+    info!("XPluginDisable");
     XPLMUnregisterFlightLoopCallback(Some(flight_loop_cb), std::ptr::null_mut());
     let mut guard = plugin_cell().lock().unwrap();
     if let Some(ps) = guard.as_ref() {
@@ -164,8 +212,7 @@ unsafe extern "C-unwind" fn menu_handler(_menu_ref: *mut c_void, _item_ref: *mut
         ps.menu_id, 0,
         if now_visible { XPLMMenuCheck::Unchecked } else { XPLMMenuCheck::Checked },
     );
-    xp_log(&format!("MumbledFlight: window {}\n",
-        if now_visible { "hidden" } else { "shown" }));
+    info!("window {}", if now_visible { "hidden" } else { "shown" });
 }
 
 #[no_mangle]
@@ -184,48 +231,16 @@ unsafe extern "C-unwind" fn flight_loop_cb(
     let Ok(mut guard) = plugin_cell().lock() else { return 1.0 / 20.0 };
     let Some(ps) = guard.as_mut() else { return 1.0 / 20.0 };
 
-    // 0. Retry any DataRefs not found at enable time (aircraft plugin may load later).
-    //    Check every ~2 seconds (40 ticks at 20 Hz) until all are resolved.
-    if !ps.pending_datarefs.is_empty() {
-        ps.retry_ticks += 1;
-        if ps.retry_ticks >= 40 {
-            ps.retry_ticks = 0;
-            let mut still_pending = Vec::new();
-            let mut newly_found = 0u32;
-            for &id in &ps.pending_datarefs {
-                match find_dataref(id) {
-                    Some(entry) => { ps.datarefs.push(entry); newly_found += 1; }
-                    None => still_pending.push(id),
-                }
-            }
-            if newly_found > 0 {
-                xp_log(&format!("MumbledFlight: +{} DataRefs resolved ({} still pending)\n",
-                    newly_found, still_pending.len()));
-            }
-            ps.pending_datarefs = still_pending;
-        }
-    }
+    ps.retry_pending_datarefs();
 
-    // 1. Update CockpitState from DataRefs (only when connected).
     if let Some(conn) = &ps.connection {
         if let Ok(mut cs) = conn.cockpit_state.lock() {
-            for &(dr, id, use_int) in &ps.datarefs {
-                let val = if use_int { XPLMGetDatai(dr) as f32 } else { XPLMGetDataf(dr) };
-                cs.update_from_float(id, val);
-            }
+            poll_datarefs(&ps.datarefs, &mut cs);
         }
     }
 
-    // 2. React to GUI actions.
-    if ps.gui.should_connect {
-        xp_log("MumbledFlight: flight_loop — should_connect=true, calling start_connection\n");
-        ps.gui.should_connect = false;
-        start_connection(ps);
-    }
-    if ps.gui.should_disconnect {
-        ps.gui.should_disconnect = false;
-        stop_connection(ps);
-    }
+    if ps.gui.should_connect    { ps.gui.should_connect    = false; start_connection(ps); }
+    if ps.gui.should_disconnect { ps.gui.should_disconnect = false; stop_connection(ps); }
 
     1.0 / 20.0
 }
@@ -233,15 +248,13 @@ unsafe extern "C-unwind" fn flight_loop_cb(
 // ── Connection helpers ────────────────────────────────────────────────────────
 
 fn start_connection(ps: &mut PluginState) {
-    xp_log(&format!(
-        "MumbledFlight: start_connection — server='{}' user='{}' flight='{}'\n",
-        ps.gui.server, ps.gui.user_name, ps.gui.flight_id
-    ));
+    info!("start_connection — server='{}' user='{}' flight='{}'",
+        ps.gui.server, ps.gui.user_name, ps.gui.flight_id);
     let server_addr: SocketAddr = match ps.gui.server.parse() {
         Ok(a) => a,
         Err(e) => {
             let msg = format!("Invalid server address '{}': {e}", ps.gui.server);
-            xp_log(&format!("MumbledFlight: {msg}\n"));
+            warn!("{msg}");
             ps.gui.status = msg;
             return;
         }
@@ -276,15 +289,14 @@ fn start_connection(ps: &mut PluginState) {
     ps.connection = Some(MumbleConnection { cockpit_state, _runtime: runtime });
     ps.gui.is_connected = true;
     ps.gui.status = format!("Connected to {}", ps.gui.server);
-    xp_log(&format!("MumbledFlight: connected — user={} flight={}\n",
-        ps.gui.user_name, ps.gui.flight_id));
+    info!("connected — user={} flight={}", ps.gui.user_name, ps.gui.flight_id);
 }
 
 fn stop_connection(ps: &mut PluginState) {
     ps.connection = None;
     ps.gui.is_connected = false;
     ps.gui.status = "Disconnected.".to_string();
-    xp_log("MumbledFlight: disconnected\n");
+    info!("disconnected");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

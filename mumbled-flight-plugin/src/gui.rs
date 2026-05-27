@@ -3,6 +3,7 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::time::Instant;
+use log::{debug, warn, LevelFilter};
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use xplane_sys::{
@@ -34,6 +35,7 @@ pub struct GuiState {
     pub gain: f32,
     pub output_devices: Vec<String>,
     pub selected_device: i32,
+    pub log_level: LevelFilter,
 
     // Actions / status
     pub should_connect: bool,
@@ -69,6 +71,7 @@ impl GuiState {
             gain: 1.0,
             output_devices,
             selected_device: 0,
+            log_level: LevelFilter::Info,
             should_connect: false,
             should_disconnect: false,
             is_connected: false,
@@ -108,7 +111,7 @@ impl GuiState {
                 self.imgui_ctx = Some(ctx);
                 self.imgui_renderer = Some(renderer);
             }
-            Err(e) => crate::xp_log(&format!("MumbledFlight: renderer init failed: {e}\n")),
+            Err(e) => warn!("renderer init failed: {e}"),
         }
     }
 
@@ -145,11 +148,9 @@ impl GuiState {
 
         if !self.logged_coords {
             self.logged_coords = true;
-            crate::xp_log(&format!(
-                "MumbledFlight: virt={virt_w}x{virt_h} phys={phys_w}x{phys_h} \
+            debug!("virt={virt_w}x{virt_h} phys={phys_w}x{phys_h} \
                  scale={scale_x:.2}x{scale_y:.2} win=({left},{bottom})-({right},{top}) \
-                 imgui_pos=({win_imgui_x},{win_imgui_y})\n"
-            ));
+                 imgui_pos=({win_imgui_x},{win_imgui_y})");
         }
 
         let dt = {
@@ -166,6 +167,7 @@ impl GuiState {
         let mut user_name = self.user_name.clone();
         let mut gain = self.gain;
         let mut selected_device = self.selected_device;
+        let mut log_level = self.log_level;
         let mut should_connect = false;
         let mut should_disconnect = false;
         let is_connected = self.is_connected;
@@ -225,7 +227,7 @@ impl GuiState {
                             .get(selected_device as usize)
                             .map(|s| s.as_str())
                             .unwrap_or("(default)");
-                        ui.text("Output");
+                        ui.text("Audio Playback");
                         ui.same_line();
                         ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                         ui.set_next_item_width(fw);
@@ -242,6 +244,25 @@ impl GuiState {
                         }
                     }
 
+                    const LOG_LEVELS: &[LevelFilter] = &[
+                        LevelFilter::Error,
+                        LevelFilter::Warn,
+                        LevelFilter::Info,
+                        LevelFilter::Debug,
+                    ];
+                    let level_preview = format!("{log_level}");
+                    ui.text("Log Level");
+                    ui.same_line();
+                    ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                    ui.set_next_item_width(fw);
+                    if let Some(_tok) = ui.begin_combo("##loglevel", &level_preview) {
+                        for &lvl in LOG_LEVELS {
+                            if ui.selectable_config(format!("{lvl}")).selected(log_level == lvl).build() {
+                                log_level = lvl;
+                            }
+                        }
+                    }
+
                     ui.spacing();
                     ui.separator();
                     ui.spacing();
@@ -251,26 +272,19 @@ impl GuiState {
                             should_disconnect = true;
                         }
                         ui.same_line();
-                        ui.text_colored([0.3, 1.0, 0.3, 1.0], "● Connected");
+                        ui.text_colored([0.3, 1.0, 0.3, 1.0], "Connected");
                     } else {
                         if ui.button("Connect") {
-                            crate::xp_log(&format!(
-                                "MumbledFlight: Connect pressed — \
-                                 flight_id='{}' user='{}'\n",
-                                flight_id.trim(),
-                                user_name.trim()
-                            ));
+                            debug!("Connect pressed — flight_id='{}' user='{}'",
+                                flight_id.trim(), user_name.trim());
                             if !flight_id.trim().is_empty() && !user_name.trim().is_empty() {
                                 should_connect = true;
                             } else {
-                                crate::xp_log(
-                                    "MumbledFlight: Connect blocked — \
-                                     flight_id or username is empty\n",
-                                );
+                                warn!("Connect blocked — flight_id or username is empty");
                             }
                         }
                         ui.same_line();
-                        ui.text_colored([0.8, 0.3, 0.3, 1.0], "○ Disconnected");
+                        ui.text_colored([0.8, 0.3, 0.3, 1.0], "Disconnected");
                     }
 
                     if !status.is_empty() {
@@ -291,6 +305,10 @@ impl GuiState {
         self.user_name = user_name;
         self.gain = gain;
         self.selected_device = selected_device;
+        if log_level != self.log_level {
+            self.log_level = log_level;
+            log::set_max_level(log_level);
+        }
         if should_connect {
             self.should_connect = true;
         }
@@ -309,11 +327,8 @@ impl GuiState {
             unsafe {
                 XPLMTakeKeyboardFocus(win);
             }
-            crate::xp_log(&format!(
-                "MumbledFlight: mouse down xplm=({x},{y}) \
-                 imgui=({:.0},{:.0}) screen_h={}\n",
-                self.mouse_pos[0], self.mouse_pos[1], self.screen_h
-            ));
+            debug!("mouse down xplm=({x},{y}) imgui=({:.0},{:.0}) screen_h={}",
+                self.mouse_pos[0], self.mouse_pos[1], self.screen_h);
         } else if status == XPLMMouseStatus::Up {
             self.mouse_down[0] = false;
         }
