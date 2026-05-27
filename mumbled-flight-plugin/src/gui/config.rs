@@ -13,6 +13,8 @@ pub struct PluginConfig {
     pub gain: f32,
     pub output_device: String,
     pub log_level: String,
+    /// "" = disabled, "__auto__" = MumblingRadio auto-sink, anything else = device name.
+    pub radio_source: String,
 }
 
 impl Default for PluginConfig {
@@ -24,6 +26,7 @@ impl Default for PluginConfig {
             gain: 1.0,
             output_device: String::new(),
             log_level: "info".to_string(),
+            radio_source: String::new(),
         }
     }
 }

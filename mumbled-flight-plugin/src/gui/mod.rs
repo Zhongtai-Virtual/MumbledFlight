@@ -12,6 +12,9 @@ use log::{debug, LevelFilter};
 
 use xplane_sys::{XPLMMouseStatus, XPLMTakeKeyboardFocus, XPLMWindowID};
 
+/// Sentinel stored in config when the auto-sink option is selected.
+pub const RADIO_AUTO_SINK: &str = "__auto__";
+
 pub struct GuiState {
     pub window_id: XPLMWindowID,
     config_path: PathBuf,
@@ -35,6 +38,11 @@ pub struct GuiState {
     pub selected_device: i32,
     pub log_level: LevelFilter,
 
+    // Radio relay source.
+    // Index 0 = disabled, 1 = auto-sink, 2+ = input_devices[i-2].
+    pub radio_input_devices: Vec<String>,
+    pub selected_radio: i32,
+
     pub should_connect: bool,
     pub should_disconnect: bool,
     pub is_connected: bool,
@@ -47,12 +55,22 @@ unsafe impl Send for GuiState {}
 impl GuiState {
     pub fn new(auto_user: Option<String>, config_path: PathBuf) -> Self {
         let (output_devices, output_device_labels) = devices::enumerate_output_devices();
+        let radio_input_devices = devices::enumerate_input_devices();
         let cfg = config::PluginConfig::load(&config_path);
 
         let selected_device = output_devices.iter()
             .position(|d| d == &cfg.output_device)
             .map(|i| i as i32)
             .unwrap_or(0);
+
+        let selected_radio = match cfg.radio_source.as_str() {
+            ""              => 0,
+            RADIO_AUTO_SINK => 1,
+            name            => radio_input_devices.iter()
+                .position(|d| d == name)
+                .map(|i| i as i32 + 2)
+                .unwrap_or(0),
+        };
 
         let log_level = match cfg.log_level.to_lowercase().as_str() {
             "error" => LevelFilter::Error,
@@ -88,6 +106,8 @@ impl GuiState {
             output_device_labels,
             selected_device,
             log_level,
+            radio_input_devices,
+            selected_radio,
             should_connect: false,
             should_disconnect: false,
             is_connected: false,
@@ -100,6 +120,7 @@ impl GuiState {
             .get(self.selected_device as usize)
             .cloned()
             .unwrap_or_default();
+        let radio_source = self.radio_source_str().to_string();
         let cfg = config::PluginConfig {
             server: self.server.clone(),
             flight_id: self.flight_id.clone(),
@@ -107,12 +128,33 @@ impl GuiState {
             gain: self.gain,
             output_device,
             log_level: self.log_level.to_string().to_lowercase(),
+            radio_source,
         };
         cfg.save(&self.config_path);
     }
 
     pub fn output_device(&self) -> Option<String> {
         self.output_devices.get(self.selected_device as usize).cloned()
+    }
+
+    /// Returns `(radio_source, auto_sink)` for passing to `run_mumble_stack`.
+    pub fn radio_params(&self) -> (Option<String>, bool) {
+        match self.selected_radio {
+            0 => (None, false),
+            1 => (None, true),
+            i => (self.radio_input_devices.get(i as usize - 2).cloned(), false),
+        }
+    }
+
+    fn radio_source_str(&self) -> &str {
+        match self.selected_radio {
+            0 => "",
+            1 => RADIO_AUTO_SINK,
+            i => self.radio_input_devices
+                .get(i as usize - 2)
+                .map(|s| s.as_str())
+                .unwrap_or(""),
+        }
     }
 
     // ── Input handlers ────────────────────────────────────────────────────────
@@ -154,4 +196,3 @@ impl GuiState {
         }
     }
 }
-

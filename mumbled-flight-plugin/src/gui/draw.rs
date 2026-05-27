@@ -64,10 +64,12 @@ impl GuiState {
         let mut should_disconnect = false;
         let is_connected         = self.is_connected;
         let status               = self.status.clone();
-        let output_devices       = self.output_devices.clone();
-        let output_device_labels = self.output_device_labels.clone();
-        let mouse_pos            = self.mouse_pos;
-        let mouse_down           = self.mouse_down;
+        let output_devices        = self.output_devices.clone();
+        let output_device_labels  = self.output_device_labels.clone();
+        let radio_input_devices   = self.radio_input_devices.clone();
+        let mut selected_radio    = self.selected_radio;
+        let mouse_pos             = self.mouse_pos;
+        let mouse_down            = self.mouse_down;
 
         let (Some(ctx), Some(renderer)) =
             (self.imgui_ctx.as_mut(), self.imgui_renderer.as_mut())
@@ -139,6 +141,39 @@ impl GuiState {
                         drop(_dis);
                     }
 
+                    {
+                        let radio_labels: Vec<String> = {
+                            let mut v = vec![
+                                "(disabled)".to_string(),
+                                "MumblingRadio (auto-sink)".to_string(),
+                            ];
+                            v.extend(radio_input_devices.iter().cloned());
+                            v
+                        };
+                        let radio_preview = radio_labels
+                            .get(selected_radio as usize)
+                            .map(|s| s.as_str())
+                            .unwrap_or("(disabled)");
+                        ui.text("Radio Source");
+                        ui.same_line();
+                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                        ui.set_next_item_width(fw);
+                        let _dis = ui.begin_disabled(is_connected);
+                        if let Some(_tok) = ui.begin_combo("##radio", radio_preview) {
+                            let avail_w = ui.content_region_avail()[0];
+                            for (i, label) in radio_labels.iter().enumerate() {
+                                let display = fit_label(ui, label, avail_w);
+                                if ui.selectable_config(&*display)
+                                    .selected(selected_radio == i as i32)
+                                    .build()
+                                {
+                                    selected_radio = i as i32;
+                                }
+                            }
+                        }
+                        drop(_dis);
+                    }
+
                     const LOG_LEVELS: &[LevelFilter] = &[
                         LevelFilter::Error, LevelFilter::Warn,
                         LevelFilter::Info,  LevelFilter::Debug,
@@ -199,6 +234,7 @@ impl GuiState {
         self.user_name       = user_name;
         self.gain            = gain;
         self.selected_device = selected_device;
+        self.selected_radio  = selected_radio;
         if log_level != self.log_level {
             self.log_level = log_level;
             log::set_max_level(log_level);

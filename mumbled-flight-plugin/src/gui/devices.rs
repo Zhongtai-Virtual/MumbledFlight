@@ -1,4 +1,4 @@
-//! Output device enumeration — ALSA via CPAL plus PipeWire/PulseAudio via pactl.
+//! Audio device enumeration — output (ALSA + pactl sinks) and input (CPAL).
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use std::collections::HashMap;
@@ -29,6 +29,14 @@ pub fn enumerate_output_devices() -> (Vec<String>, Vec<String>) {
         .collect();
 
     (names, labels)
+}
+
+/// Returns CPAL input device names for use as radio relay sources.
+pub fn enumerate_input_devices() -> Vec<String> {
+    cpal::default_host()
+        .input_devices()
+        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
 }
 
 fn pactl_sink_descriptions() -> HashMap<String, String> {
