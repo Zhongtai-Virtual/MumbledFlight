@@ -19,7 +19,7 @@ pub async fn run_mumble_stack(
     radio_source: Option<String>,
     auto_sink: bool,
     single_client: bool,
-    test_mode: bool,
+    test_pos: Option<[f32; 3]>,
     server_addr: SocketAddr,
 ) {
     // 1. MIC Chain
@@ -76,7 +76,7 @@ pub async fn run_mumble_stack(
             is_radio: false,
             target_channel: format!("{}_ambient", sid_a),
             denoise,
-            test_mode,
+            test_pos,
         };
         let _ = client.run(server_addr, st_a, mic_rx_a, pb_tx_a).await;
     });
@@ -99,7 +99,7 @@ pub async fn run_mumble_stack(
             is_radio: false,
             target_channel: format!("{}_ic", sid_i),
             denoise,
-            test_mode,
+            test_pos,
         };
         let _ = client.run(server_addr, st_i, mic_rx_i, pb_tx_i).await;
     });
@@ -119,7 +119,7 @@ pub async fn run_mumble_stack(
                 is_radio: true,
                 target_channel: format!("{}_radio", sid_r),
                 denoise,
-                test_mode,
+                test_pos,
             };
             let _ = client.run(server_addr, st_r, radio_rx, pb_tx_r).await;
         });

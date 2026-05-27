@@ -57,9 +57,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     single_client: bool,
 
-    /// Test Mode: Fixed source at X=2 (Right side)
-    #[arg(long, default_value_t = false)]
-    test_mode: bool,
+    /// Test Mode: transmit from a fixed static position in Mumble space (X,Y,Z meters).
+    /// Use without a value for the origin (0,0,0), or supply coordinates: --test-mode 2,0,7
+    #[arg(long, value_name = "X,Y,Z", num_args = 0..=1, default_missing_value = "0,0,0")]
+    test_mode: Option<String>,
 }
 
 #[tokio::main]
@@ -98,18 +99,22 @@ async fn main() -> Result<()> {
         user_prefix, flight_id, args.denoise);
 
     // 4. Start Mumble Stack
+    let test_pos: Option<[f32; 3]> = args.test_mode.map(|s| {
+        let p: Vec<f32> = s.split(',').map(|c| c.trim().parse().unwrap_or(0.0)).collect();
+        [p.first().copied().unwrap_or(0.0), p.get(1).copied().unwrap_or(0.0), p.get(2).copied().unwrap_or(0.0)]
+    });
     let state_mumble = Arc::clone(&state);
     tokio::spawn(async move {
         mumble::run_mumble_stack(
-            state_mumble, 
-            user_prefix, 
-            flight_id, 
-            args.gain, 
-            args.denoise, 
+            state_mumble,
+            user_prefix,
+            flight_id,
+            args.gain,
+            args.denoise,
             args.radio_source,
             args.auto_sink,
             args.single_client,
-            args.test_mode,
+            test_pos,
             server_addr
         ).await;
     });

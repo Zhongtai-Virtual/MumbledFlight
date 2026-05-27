@@ -36,7 +36,7 @@ pub struct MumbleVoipClient {
     pub target_channel: String,
     #[allow(dead_code)]
     pub denoise: bool,
-    pub test_mode: bool,
+    pub test_pos: Option<[f32; 3]>,
 }
 
 impl MumbleVoipClient {
@@ -231,11 +231,11 @@ impl MumbleVoipClient {
             let s = _state.lock().unwrap();
             if self.is_ic { 
                 None 
-            } else if self.test_mode {
+            } else if let Some(tp) = self.test_pos {
                 let mut buf = Vec::new();
-                let _ = buf.write_f32::<LittleEndian>(2.0); // 2m Right
-                let _ = buf.write_f32::<LittleEndian>(0.0);
-                let _ = buf.write_f32::<LittleEndian>(7.0); // Forward
+                let _ = buf.write_f32::<LittleEndian>(tp[0]);
+                let _ = buf.write_f32::<LittleEndian>(tp[1]);
+                let _ = buf.write_f32::<LittleEndian>(tp[2]);
                 Some(Bytes::from(buf))
             } else if self.is_radio {
                 let mut buf = Vec::new();
@@ -263,9 +263,9 @@ impl MumbleVoipClient {
 
     fn spatialize(&self, mono: &[f32], source_pos: Option<[f32; 3]>, state: &Arc<Mutex<CockpitState>>, remote_sid: u32) -> Vec<f32> {
         // Read listener state: pos is already in Mumble space (+Z forward, -pilots_head_z)
-        let (lx, ly, lz, h_psi, h_the, h_phi) = {
+        let (lx, ly, lz, h_psi, h_the, h_phi, door, door_lav) = {
             let s = state.lock().unwrap();
-            (s.pos[0], s.pos[1], -s.pos[2], s.rot[0], s.rot[1], s.rot[2])
+            (s.pos[0], s.pos[1], -s.pos[2], s.rot[0], s.rot[1], s.rot[2], s.door, s.door_lav)
         };
 
         // Default: centered mono. Only changes when position data arrives.
@@ -346,10 +346,34 @@ impl MumbleVoipClient {
                     t * t
                 };
 
-                gains = (calc_gain(dot_l) * datt, calc_gain(dot_r) * datt);
+                // Door attenuation: each door blocks sound when source and listener are
+                // on opposite sides of it and the door is not fully open.
+                // Mumble z = -pilots_head_z, so cabin door z=4.1, lavatory door z=-0.43.
+                let door_att = {
+                    // Cabin door: pilots_head_z=-4.1 → Mumble z=4.1
+                    // 0=closed→0.15, 0.95=panel removed→1.0, 1.0=stored→1.0
+                    const CABIN_Z: f32 = 4.1;
+                    let cabin_att = if (lz - CABIN_Z) * (sz - CABIN_Z) < 0.0 {
+                        let t = (door / 0.95).min(1.0);
+                        0.15 + 0.85 * t
+                    } else {
+                        1.0
+                    };
+                    // Lavatory door: pilots_head_z=0.43 → Mumble z=-0.43
+                    // 0=closed→0.15, 1=open→1.0
+                    const LAV_Z: f32 = -0.43;
+                    let lav_att = if (lz - LAV_Z) * (sz - LAV_Z) < 0.0 {
+                        0.15 + 0.85 * door_lav
+                    } else {
+                        1.0
+                    };
+                    cabin_att * lav_att
+                };
+
+                gains = (calc_gain(dot_l) * datt * door_att, calc_gain(dot_r) * datt * door_att);
                 debug_line = format!(
-                    "[Spatial:{}] dist={:.2}m dX={:.2} dY={:.2} dZ={:.2} headPsi={:.1}° dot_R={:.3} L={:.3} R={:.3}",
-                    remote_sid, dist, dx, dy, dz, h_psi, dot_r, gains.0, gains.1
+                    "[Spatial:{}] dist={:.2}m dX={:.2} dY={:.2} dZ={:.2} headPsi={:.1}° dot_R={:.3} door={:.2} lav={:.2} L={:.3} R={:.3}",
+                    remote_sid, dist, dx, dy, dz, h_psi, dot_r, door, door_lav, gains.0, gains.1
                 );
             }
         }

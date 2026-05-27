@@ -10,6 +10,8 @@ pub enum DataRefId {
     PilotSeat,
     Acp1Ic, Acp1Mic, Acp1Spkr,
     Acp2Ic, Acp2Mic, Acp2Spkr,
+    DoorCabin,
+    DoorLavatory,
 }
 
 impl DataRefId {
@@ -29,6 +31,8 @@ impl DataRefId {
             DataRefId::Acp2Ic => "CL650/ACP/2/ic",
             DataRefId::Acp2Mic => "CL650/ACP/2/mic_value",
             DataRefId::Acp2Spkr => "CL650/ACP/2/spkr_tog",
+            DataRefId::DoorCabin => "CL650/doors/cabin/door",
+            DataRefId::DoorLavatory => "CL650/doors/cabin/lavatory",
         }
     }
 
@@ -40,6 +44,8 @@ impl DataRefId {
             DataRefId::PilotSeat,
             DataRefId::Acp1Ic, DataRefId::Acp1Mic, DataRefId::Acp1Spkr,
             DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
+            DataRefId::DoorCabin,
+            DataRefId::DoorLavatory,
         ]
     }
 
@@ -57,6 +63,10 @@ pub struct CockpitState {
     pub ic: bool,
     pub pa: bool,
     pub spkr: bool,
+    /// CL650/doors/cabin/door: 0.0 = closed, 0.95 = panel removed, 1.0 = stored
+    pub door: f32,
+    /// CL650/doors/cabin/lavatory: 0.0 = closed, 1.0 = open
+    pub door_lav: f32,
 }
 
 impl CockpitState {
@@ -96,6 +106,8 @@ impl CockpitState {
             DataRefId::Acp2Ic => if !is_pilot { self.ic = Self::val_to_bool(val) },
             DataRefId::Acp2Mic => if !is_pilot { self.pa = Self::val_to_int(val) == 7 },
             DataRefId::Acp2Spkr => if !is_pilot { self.spkr = Self::val_to_bool(val) },
+            DataRefId::DoorCabin => self.door = val.as_f64().unwrap_or(1.0) as f32,
+            DataRefId::DoorLavatory => self.door_lav = val.as_f64().unwrap_or(1.0) as f32,
         }
 
         if self.ic != old_state.ic || self.pa != old_state.pa || self.seat != old_state.seat {
