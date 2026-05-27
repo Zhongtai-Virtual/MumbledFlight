@@ -33,14 +33,15 @@ pub fn start(ps: &mut PluginState) {
     let state_clone   = Arc::clone(&cockpit_state);
     let user_name     = ps.gui.user_name.clone();
     let flight_id     = ps.gui.flight_id.clone();
-    let gain                    = ps.gui.gain;
-    let output_device           = ps.gui.output_device();
+    let gain                      = ps.gui.gain;
+    let denoise                   = ps.gui.denoise;
+    let output_device             = ps.gui.output_device();
     let (radio_source, auto_sink) = ps.gui.radio_params();
 
     runtime.spawn(async move {
         mumble::run_mumble_stack(
             state_clone, user_name, flight_id, gain,
-            false, radio_source, auto_sink, false, None,
+            denoise, radio_source, auto_sink, false, None,
             server_addr, output_device,
         ).await;
     });

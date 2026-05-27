@@ -11,6 +11,7 @@ pub struct PluginConfig {
     pub flight_id: String,
     pub user_name: String,
     pub gain: f32,
+    pub denoise: bool,
     pub output_device: String,
     pub log_level: String,
     /// "" = disabled, "__auto__" = MumblingRadio auto-sink, anything else = device name.
@@ -24,6 +25,7 @@ impl Default for PluginConfig {
             flight_id: String::new(),
             user_name: String::new(),
             gain: 1.0,
+            denoise: false,
             output_device: String::new(),
             log_level: "info".to_string(),
             radio_source: String::new(),

@@ -58,6 +58,7 @@ impl GuiState {
         let mut flight_id        = self.flight_id.clone();
         let mut user_name        = self.user_name.clone();
         let mut gain             = self.gain;
+        let mut denoise          = self.denoise;
         let mut selected_device  = self.selected_device;
         let mut log_level        = self.log_level;
         let mut should_connect   = false;
@@ -115,6 +116,13 @@ impl GuiState {
                     ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                     ui.set_next_item_width(fw);
                     ui.slider_config("##gain", 0.1_f32, 4.0_f32).build(&mut gain);
+
+                    ui.text("Denoise");
+                    ui.same_line();
+                    ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                    let _dis = ui.begin_disabled(is_connected);
+                    ui.checkbox("##denoise", &mut denoise);
+                    drop(_dis);
 
                     if !output_devices.is_empty() {
                         let preview = output_device_labels
@@ -235,6 +243,7 @@ impl GuiState {
         self.gain            = gain;
         self.selected_device = selected_device;
         self.selected_radio  = selected_radio;
+        self.denoise         = denoise;
         if log_level != self.log_level {
             self.log_level = log_level;
             log::set_max_level(log_level);
