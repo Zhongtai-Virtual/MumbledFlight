@@ -1,14 +1,15 @@
-//! Audio engine with strict 48kHz hardware enforcement and high-fidelity downmixing.
+//! High-Stability Audio Engine with Hysteresis Jitter Management.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 
 pub fn list_audio_devices() {
     println!("\n--- [ Audio Host & Device Discovery ] ---");
     for host_id in cpal::available_hosts() {
         println!("\nHost: {:?}", host_id);
-        if let Ok(host) = cpal::host_from_id(host_id) {
+        if let Ok(host) = host_from_id(host_id) {
             println!("  [ Input Devices ]:");
             if let Ok(devices) = host.input_devices() {
                 for dev in devices { println!("    - {}", dev.name().unwrap_or_default()); }
@@ -20,6 +21,10 @@ pub fn list_audio_devices() {
         }
     }
     println!("------------------------------------------\n");
+}
+
+fn host_from_id(id: cpal::HostId) -> Result<cpal::Host, cpal::HostUnavailable> {
+    cpal::host_from_id(id)
 }
 
 pub fn create_linux_sink() -> Option<String> {
@@ -50,49 +55,6 @@ pub fn create_linux_sink() -> Option<String> {
     { None }
 }
 
-#[cfg(target_os = "linux")]
-fn get_all_source_outputs() -> std::collections::HashSet<String> {
-    let mut ids = std::collections::HashSet::new();
-    if let Ok(output) = std::process::Command::new("pactl").args(&["list", "short", "source-outputs"]).output() {
-        let s = String::from_utf8_lossy(&output.stdout);
-        for line in s.lines() {
-            if let Some(id) = line.split_whitespace().next() {
-                ids.insert(id.to_string());
-            }
-        }
-    }
-    ids
-}
-
-#[cfg(not(target_os = "linux"))]
-fn get_all_source_outputs() -> std::collections::HashSet<String> { std::collections::HashSet::new() }
-
-use std::io::Read;
-pub fn start_parec_capture(tx: mpsc::Sender<Vec<f32>>, device_name: String) {
-    std::thread::spawn(move || {
-        println!("[Audio:Capture] Using 'parec' for loopback device: {}", device_name);
-        let mut child = std::process::Command::new("parec")
-            .args(&["--device", &device_name, "--format=float32le", "--rate=48000", "--channels=1"])
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("Failed to start parec.");
-        let mut stdout = child.stdout.take().unwrap();
-        let mut buffer = [0u8; 960 * 4];
-        loop {
-            match stdout.read_exact(&mut buffer) {
-                Ok(_) => {
-                    let mut frame = Vec::with_capacity(960);
-                    for chunk in buffer.chunks_exact(4) {
-                        frame.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).clamp(-1.0, 1.0));
-                    }
-                    let _ = tx.try_send(frame);
-                }
-                Err(_) => break,
-            }
-        }
-    });
-}
-
 pub fn start_capture(
     tx: mpsc::Sender<Vec<f32>>, 
     _denoise: bool, 
@@ -103,37 +65,23 @@ pub fn start_capture(
 ) {
     std::thread::spawn(move || {
         let host = cpal::default_host();
-        let mut needs_linux_move = false;
-        let mut target_name = String::new();
-        let pre_stream_ids = get_all_source_outputs();
-
-        let device = if let Some(ref filter) = device_name_filter {
-            target_name = filter.clone();
-            if filter == "MumblingRadio.monitor" && cfg!(target_os = "linux") {
-                needs_linux_move = true;
-                host.default_input_device().expect("No default input found")
-            } else {
-                let mut found = None;
-                for host_id in cpal::available_hosts() {
-                    if let Ok(h) = cpal::host_from_id(host_id) {
-                        if let Ok(devices) = h.input_devices() {
-                            for d in devices {
-                                if d.name().unwrap_or_default().to_lowercase().contains(&filter.to_lowercase()) {
-                                    found = Some(d); break;
-                                }
+        let mut found = None;
+        if let Some(ref filter) = device_name_filter {
+            for host_id in cpal::available_hosts() {
+                if let Ok(h) = cpal::host_from_id(host_id) {
+                    if let Ok(devices) = h.input_devices() {
+                        for d in devices {
+                            if d.name().unwrap_or_default().to_lowercase().contains(&filter.to_lowercase()) {
+                                found = Some(d); break;
                             }
                         }
                     }
-                    if found.is_some() { break; }
                 }
-                found.expect(&format!("Could not find device: {}", filter))
+                if found.is_some() { break; }
             }
-        } else {
-            host.default_input_device().expect("No default input found")
-        };
+        }
+        let device = found.unwrap_or_else(|| host.default_input_device().expect("No default input found"));
 
-        // --- ENFORCE STRICT 48kHz HARDWARE CAPTURE ---
-        // This avoids low-quality nearest-neighbor resampling.
         let supported_configs = device.supported_input_configs().expect("Failed to get configs");
         let config = supported_configs
             .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
@@ -148,7 +96,6 @@ pub fn start_capture(
         let stream = device.build_input_stream(
             &config.into(),
             move |data: &[f32], _| {
-                // High-Fidelity Downmix
                 if num_channels > 1 {
                     for chunk in data.chunks_exact(num_channels) {
                         let mut sum = 0.0;
@@ -159,7 +106,6 @@ pub fn start_capture(
                     for &s in data { capture_buffer.push(s * gain); }
                 }
 
-                // Packetize into exactly 20ms chunks (960 samples)
                 while capture_buffer.len() >= 960 {
                     let frame: Vec<f32> = capture_buffer.drain(..960).collect();
                     let _ = tx.try_send(frame);
@@ -170,22 +116,6 @@ pub fn start_capture(
         ).expect("Failed to build input stream");
 
         stream.play().expect("Failed to start input stream");
-
-        if needs_linux_move {
-            std::thread::spawn(move || {
-                for _ in 0..10 {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let post_stream_ids = get_all_source_outputs();
-                    for id in post_stream_ids {
-                        if !pre_stream_ids.contains(&id) {
-                            let _ = std::process::Command::new("pactl").args(&["move-source-output", &id, &target_name]).status();
-                            return;
-                        }
-                    }
-                }
-            });
-        }
-
         std::mem::forget(stream);
         loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
     });
@@ -195,7 +125,6 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
     let host = cpal::default_host();
     let device = host.default_output_device().expect("No output device found");
     
-    // Enforce 48kHz on Playback too
     let supported_configs = device.supported_output_configs().expect("Failed to get configs");
     let config = supported_configs
         .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
@@ -204,30 +133,51 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
         .with_sample_rate(cpal::SampleRate(48000));
         
     let device_channels = config.channels() as usize;
-    println!("[Audio:Out] Sink: {} (Strict 48kHz, {} channels)", device.name().unwrap_or_default(), device_channels);
+    println!("[Audio:Out] Sink: {} ({:?} Host, Strict 48kHz, {} channels)", 
+        device.name().unwrap_or_default(), host.id(), device_channels);
 
-    let pending_samples = Arc::new(Mutex::new(Vec::<f32>::new()));
+    // High-Performance Ring Buffer
+    let pending_samples = Arc::new(Mutex::new(VecDeque::<f32>::new()));
     let pending_samples_cb = Arc::clone(&pending_samples);
 
+    // HYSTERESIS BUFFER CONFIG:
+    // We wait for 400ms of audio (channel-aware) before starting/resuming.
+    let prime_threshold = 19200 * device_channels; 
+    let is_playing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let is_playing_cb = Arc::clone(&is_playing);
+
     std::thread::spawn(move || {
+        let mut last_log = std::time::Instant::now();
         while let Some(stereo_frame_48k) = rx.blocking_recv() {
             let mut lock = pending_samples.lock().unwrap();
             
-            // Stereo input to hardware channels
             if device_channels == 2 {
-                lock.extend_from_slice(&stereo_frame_48k);
+                lock.extend(stereo_frame_48k);
             } else {
                 for chunk in stereo_frame_48k.chunks_exact(2) {
                     let mono = (chunk[0] + chunk[1]) * 0.5;
-                    for _ in 0..device_channels { lock.push(mono); }
+                    for _ in 0..device_channels { lock.push_back(mono); }
                 }
             }
 
-            // Cap buffer at 100ms to keep latency low
-            let max_buffered = 4800 * device_channels;
+            // Start playing once we hit the threshold
+            if !is_playing.load(std::sync::atomic::Ordering::SeqCst) && lock.len() >= prime_threshold {
+                is_playing.store(true, std::sync::atomic::Ordering::SeqCst);
+                println!("[Audio:Out] Buffer primed (400ms). Stream active.");
+            }
+
+            // High-Stability Buffer Cap (1 second)
+            let max_buffered = 48000 * device_channels;
             if lock.len() > max_buffered {
-                let to_drain = lock.len() - (max_buffered / 2);
-                let _ = lock.drain(..to_drain);
+                let to_drain = lock.len() - max_buffered;
+                let aligned_drain = to_drain - (to_drain % device_channels);
+                for _ in 0..aligned_drain { lock.pop_front(); }
+            }
+
+            if last_log.elapsed().as_secs() >= 5 {
+                let ms = lock.len() as f32 / (48.0 * device_channels as f32);
+                println!("[Audio:Out] Buffer Level: {:.1}ms", ms);
+                last_log = std::time::Instant::now();
             }
         }
     });
@@ -236,12 +186,25 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
         &config.into(),
         move |data: &mut [f32], _| {
             let mut lock = pending_samples_cb.lock().unwrap();
-            let available = lock.len();
-            let to_write = std::cmp::min(available, data.len());
-            if to_write > 0 {
-                for (i, sample) in lock.drain(..to_write).enumerate() { data[i] = sample; }
+            
+            // HYSTERESIS BLOCK LOGIC:
+            // 1. Only play if we are in 'playing' state.
+            // 2. Only play if we have enough for the WHOLE hardware block.
+            // This turns "shredding" into clean, rare drops.
+            if !is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) || lock.len() < data.len() {
+                for x in data.iter_mut() { *x = 0.0; }
+                
+                // If we ran out while playing, stop and wait for a full refill
+                if is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) {
+                    is_playing_cb.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                return;
             }
-            for i in to_write..data.len() { data[i] = 0.0; }
+
+            // O(K) Removal (Atomic Alignment)
+            for i in 0..data.len() {
+                data[i] = lock.pop_front().unwrap_or(0.0);
+            }
         },
         |err| eprintln!("[Audio:Out] Error: {}", err),
         None

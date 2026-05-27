@@ -19,9 +19,9 @@ static REQ_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 struct WsResponse {
     #[serde(rename = "type")]
     msg_type: String,
+    #[allow(dead_code)]
     req_id: Option<u64>,
     data: Option<serde_json::Value>,
-    error: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

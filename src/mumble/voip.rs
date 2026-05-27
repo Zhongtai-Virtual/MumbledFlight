@@ -1,7 +1,7 @@
-//! Core VoIP implementation with Studio-Grade Opus and Plugin Identity.
+//! Core VoIP implementation with Studio-Grade Opus and Managed Jitter Buffer.
 
 use anyhow::{Result, anyhow};
-use audiopus::{coder::Encoder, coder::Decoder, Application, Bitrate, Channels, SampleRate, packet::Packet, MutSignals, Bandwidth};
+use audiopus::{coder::Encoder, coder::Decoder, packet::Packet, Application, Bitrate, Channels, SampleRate, MutSignals, Bandwidth};
 use byteorder::{LittleEndian, WriteBytesExt, ReadBytesExt};
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
@@ -34,7 +34,9 @@ pub struct MumbleVoipClient {
     pub is_ic: bool,
     pub is_radio: bool,
     pub target_channel: String,
+    #[allow(dead_code)]
     pub denoise: bool,
+    pub test_mode: bool,
 }
 
 impl MumbleVoipClient {
@@ -55,7 +57,18 @@ impl MumbleVoipClient {
         let tls_stream = connector.connect(&domain, tcp_stream).await?;
         
         let mut control = Framed::new(tls_stream, ClientControlCodec::new());
-        self.perform_handshake(&mut control).await?;
+
+        // 1. Version Handshake
+        let mut version = msgs::Version::new();
+        version.set_version(MUMBLE_VERSION);
+        version.set_release("MumblingCockpit".to_string());
+        control.send(ControlPacket::Version(Box::new(version))).await?;
+
+        // 2. Authenticate
+        let mut auth = msgs::Authenticate::new();
+        auth.set_username(self.username.clone());
+        auth.set_opus(true);
+        control.send(ControlPacket::Authenticate(Box::new(auth))).await?;
 
         let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
         udp_socket.connect(&server_addr).await?;
@@ -67,10 +80,9 @@ impl MumbleVoipClient {
         let mut moved_to_channel = false;
 
         // --- STUDIO-GRADE OPUS SETTINGS ---
-        let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Audio)?;
-        encoder.set_bitrate(Bitrate::BitsPerSecond(128000))?;
-        encoder.set_bandwidth(Bandwidth::Fullband)?; // 20Hz to 20kHz
-        encoder.set_complexity(10)?; // Max complexity for best quality
+        let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
+        encoder.set_bitrate(Bitrate::BitsPerSecond(64000))?;
+        encoder.set_bandwidth(Bandwidth::Fullband)?;
         
         let mut voice_seq = 0u64;
         let mut was_transmitting = false;
@@ -110,13 +122,18 @@ impl MumbleVoipClient {
                             let mut src = BytesMut::from(&udp_recv_buf[..len]);
                             match cs.decrypt(&mut src) {
                                 Ok(Ok(VoicePacket::Audio { session_id, payload, position_info, .. })) => {
+                                    // --- SELF-AUDIO FILTER ---
+                                    if let Some(me) = my_session {
+                                        if session_id == me { continue; }
+                                    }
+
                                     if self.is_radio { continue; }
+
                                     if let VoicePacketPayload::Opus(data, _) = payload {
                                         let decoder = decoders.entry(session_id).or_insert_with(|| {
                                             Decoder::new(SampleRate::Hz48000, Channels::Mono).expect("Failed to create decoder")
                                         });
 
-                                        // Mumble clients can send Opus frames up to 120ms (5760 samples at 48kHz)
                                         let mut output_pcm = vec![0i16; 5760];
                                         if let Ok(packet) = Packet::try_from(&data[..]) {
                                             if let Ok(len) = decoder.decode(Some(packet), MutSignals::try_from(&mut output_pcm[..]).unwrap(), false) {
@@ -176,8 +193,8 @@ impl MumbleVoipClient {
                             ControlPacket::ServerSync(sync) => {
                                 my_session = Some(sync.get_session());
                                 let mut user_state = msgs::UserState::new();
+                                user_state.set_session(sync.get_session());
                                 user_state.set_plugin_context(self.context.as_bytes().to_vec());
-                                // --- SYNCED IDENTITY METADATA ---
                                 user_state.set_plugin_identity(self.username.clone());
                                 control.send(ControlPacket::UserState(Box::new(user_state))).await?;
                                 
@@ -202,8 +219,8 @@ impl MumbleVoipClient {
                     }
                 }
 
-                result = audio_rx.recv() => {
-                    match result {
+                pcm_result = audio_rx.recv() => {
+                    match pcm_result {
                         Ok(pcm) => {
                             if let Some(ref mut cs) = crypt_state {
                                 let is_active = {
@@ -237,23 +254,52 @@ impl MumbleVoipClient {
         Ok(())
     }
 
-    fn spatialize(&self, mono: &[f32], source_pos: Option<[f32; 3]>, state: &Arc<Mutex<CockpitState>>) -> Vec<f32> {
-        let mut output = Vec::with_capacity(mono.len() * 2);
-        let (lx, ly, lz, psi) = {
-            let s = state.lock().unwrap();
-            (s.pos[0], s.pos[1], s.pos[2], s.rot[0])
+    async fn process_audio_packet(&self, pcm: &[f32], encoder: &mut Encoder, voice_seq: &mut u64, udp_socket: &UdpSocket, crypt: &mut CryptState<Serverbound, Clientbound>, _state: &Arc<Mutex<CockpitState>>, last_bit: bool) -> Result<()> {
+        let pcm_i16: Vec<i16> = pcm.iter().map(|&x| (x.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+        let mut opus_out = vec![0u8; 1024];
+        let len = encoder.encode(&pcm_i16, &mut opus_out)?;
+        opus_out.truncate(len);
+
+        let pos_bytes = {
+            let s = _state.lock().unwrap();
+            if self.is_ic { 
+                None 
+            } else if self.test_mode {
+                let mut buf = Vec::new();
+                let _ = buf.write_f32::<LittleEndian>(2.0);
+                let _ = buf.write_f32::<LittleEndian>(0.0);
+                let _ = buf.write_f32::<LittleEndian>(7.0);
+                Some(Bytes::from(buf))
+            } else if self.is_radio {
+                let mut buf = Vec::new();
+                let _ = buf.write_f32::<LittleEndian>(0.0);
+                let _ = buf.write_f32::<LittleEndian>(0.0);
+                let _ = buf.write_f32::<LittleEndian>(0.0);
+                Some(Bytes::from(buf))
+            } else {
+                let mut buf = Vec::new();
+                let x = s.pos[0]; let y = s.pos[1]; let z = -s.pos[2];
+                let _ = buf.write_f32::<LittleEndian>(x);
+                let _ = buf.write_f32::<LittleEndian>(y);
+                let _ = buf.write_f32::<LittleEndian>(z);
+                Some(Bytes::from(buf))
+            }
         };
-        let (left_gain, right_gain) = if let Some([sx, sy, sz]) = source_pos {
-            let dx = sx - lx; let dy = sy - ly; let dz = sz - (-lz); 
-            let dist = (dx*dx + dy*dy + dz*dz).sqrt().max(0.1);
-            let volume = (1.0 / dist).min(1.0);
-            let head_rad = psi.to_radians();
-            let angle_to_source = dx.atan2(dz);
-            let relative_angle = angle_to_source - head_rad;
-            let pan = relative_angle.sin();
-            ((1.0 - pan).min(1.0) * volume, (1.0 + pan).min(1.0) * volume)
-        } else { (1.0, 1.0) };
-        for &sample in mono { output.push(sample * left_gain); output.push(sample * right_gain); }
+
+        let voice_packet = VoicePacket::<Serverbound>::Audio { _dst: PhantomData, target: 0, session_id: (), seq_num: *voice_seq, payload: VoicePacketPayload::Opus(Bytes::from(opus_out), last_bit), position_info: pos_bytes };
+        let mut dest = BytesMut::new();
+        crypt.encrypt(voice_packet, &mut dest);
+        let _ = udp_socket.send(&dest).await;
+        *voice_seq += 2;
+        Ok(())
+    }
+
+    fn spatialize(&self, mono: &[f32], _source_pos: Option<[f32; 3]>, _state: &Arc<Mutex<CockpitState>>) -> Vec<f32> {
+        let mut output = Vec::with_capacity(mono.len() * 2);
+        for &s in mono {
+            output.push(s); // L
+            output.push(s); // R
+        }
         output
     }
 
@@ -277,63 +323,5 @@ impl MumbleVoipClient {
         let p12 = Pkcs12::builder().build("", &self.username, &pkey, &cert)?;
         let der = p12.to_der()?;
         Identity::from_pkcs12(&der, "").map_err(|e| anyhow!("Identity error: {}", e))
-    }
-
-    async fn perform_handshake<S>(&self, control: &mut Framed<S, ClientControlCodec>) -> Result<()> 
-    where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin 
-    {
-        let mut version = msgs::Version::new();
-        version.set_version(MUMBLE_VERSION);
-        version.set_release("MumblingCockpit".to_string());
-        control.send(ControlPacket::Version(Box::new(version))).await?;
-        let mut auth = msgs::Authenticate::new();
-        auth.set_username(self.username.clone());
-        auth.set_opus(true);
-        control.send(ControlPacket::Authenticate(Box::new(auth))).await?;
-        Ok(())
-    }
-
-    async fn process_audio_packet(
-        &self,
-        pcm: &[f32],
-        encoder: &mut Encoder,
-        voice_seq: &mut u64,
-        udp_socket: &UdpSocket,
-        crypt: &mut CryptState<Serverbound, Clientbound>,
-        _state: &Arc<Mutex<CockpitState>>,
-        last_bit: bool,
-    ) -> Result<()> {
-        // MUST CLAMP! Any value outside [-1.0, 1.0] will cause severe integer overflow/wrap-around distortion when cast to i16.
-        let pcm_i16: Vec<i16> = pcm.iter().map(|&x| (x.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
-        let mut opus_out = vec![0u8; 1024];
-        let len = encoder.encode(&pcm_i16, &mut opus_out)?;
-        opus_out.truncate(len);
-        let pos_bytes = {
-            let s = _state.lock().unwrap();
-            if self.is_ic { 
-                None 
-            } else if self.is_radio {
-                // Radio is fixed at aircraft CG [0, 0, 0]
-                let mut buf = Vec::new();
-                let _ = buf.write_f32::<LittleEndian>(0.0);
-                let _ = buf.write_f32::<LittleEndian>(0.0);
-                let _ = buf.write_f32::<LittleEndian>(0.0);
-                Some(Bytes::from(buf))
-            } else {
-                let mut buf = Vec::new();
-                let _ = buf.write_f32::<LittleEndian>(s.pos[0]);
-                let _ = buf.write_f32::<LittleEndian>(s.pos[1]);
-                let _ = buf.write_f32::<LittleEndian>(-s.pos[2]);
-                Some(Bytes::from(buf))
-            }
-        };
-        let voice_packet = VoicePacket::<Serverbound>::Audio { _dst: PhantomData, target: 0, session_id: (), seq_num: *voice_seq, payload: VoicePacketPayload::Opus(Bytes::from(opus_out), last_bit), position_info: pos_bytes };
-        let mut dest = BytesMut::new();
-        crypt.encrypt(voice_packet, &mut dest);
-        let _ = udp_socket.send(&dest).await;
-        // Mumble sequence numbers are in 10ms units.
-        // We are sending 960 samples at 48kHz, which is exactly 20ms.
-        *voice_seq += 2;
-        Ok(())
     }
 }

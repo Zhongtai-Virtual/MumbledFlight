@@ -56,6 +56,10 @@ struct Args {
     /// Debugging: Only spawn a single Ambient client (no Intercom or Radio).
     #[arg(long, default_value_t = false)]
     single_client: bool,
+
+    /// Test Mode: Fixed source at X=2 (Right side)
+    #[arg(long, default_value_t = false)]
+    test_mode: bool,
 }
 
 #[tokio::main]
@@ -105,6 +109,7 @@ async fn main() -> Result<()> {
             args.radio_source,
             args.auto_sink,
             args.single_client,
+            args.test_mode,
             server_addr
         ).await;
     });
