@@ -4,7 +4,9 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataRefId {
-    HeadX, HeadY, HeadZ, HeadPsi, HeadThe, HeadPhi,
+    HeadX, HeadY, HeadZ, 
+    HeadPsi, HeadThe, HeadPhi,
+    PlanePsi,
     PilotSeat,
     Acp1Ic, Acp1Mic, Acp1Spkr,
     Acp2Ic, Acp2Mic, Acp2Spkr,
@@ -19,6 +21,7 @@ impl DataRefId {
             DataRefId::HeadPsi => "sim/graphics/view/pilots_head_psi",
             DataRefId::HeadThe => "sim/graphics/view/pilots_head_the",
             DataRefId::HeadPhi => "sim/graphics/view/pilots_head_phi",
+            DataRefId::PlanePsi => "sim/flightmodel/position/psi",
             DataRefId::PilotSeat => "CL650/pilot_seat",
             DataRefId::Acp1Ic => "CL650/ACP/1/ic",
             DataRefId::Acp1Mic => "CL650/ACP/1/mic_value",
@@ -33,6 +36,7 @@ impl DataRefId {
         &[
             DataRefId::HeadX, DataRefId::HeadY, DataRefId::HeadZ,
             DataRefId::HeadPsi, DataRefId::HeadThe, DataRefId::HeadPhi,
+            DataRefId::PlanePsi,
             DataRefId::PilotSeat,
             DataRefId::Acp1Ic, DataRefId::Acp1Mic, DataRefId::Acp1Spkr,
             DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
@@ -48,6 +52,7 @@ impl DataRefId {
 pub struct CockpitState {
     pub pos: [f32; 3],
     pub rot: [f32; 3],
+    pub plane_rot: [f32; 3],
     pub seat: i32,
     pub ic: bool,
     pub pa: bool,
@@ -57,7 +62,7 @@ pub struct CockpitState {
 impl CockpitState {
     fn val_to_bool(val: &Value) -> bool {
         if let Some(f) = val.as_f64() {
-            f > 0.1 // Use a small epsilon to catch 1.0 vs 0.0
+            f > 0.1
         } else if let Some(i) = val.as_i64() {
             i != 0
         } else {
@@ -81,6 +86,7 @@ impl CockpitState {
             DataRefId::HeadPsi => self.rot[0] = val.as_f64().unwrap_or(0.0) as f32,
             DataRefId::HeadThe => self.rot[1] = val.as_f64().unwrap_or(0.0) as f32,
             DataRefId::HeadPhi => self.rot[2] = val.as_f64().unwrap_or(0.0) as f32,
+            DataRefId::PlanePsi => self.plane_rot[0] = val.as_f64().unwrap_or(0.0) as f32,
             DataRefId::PilotSeat => self.seat = Self::val_to_int(val),
             
             DataRefId::Acp1Ic => if is_pilot { self.ic = Self::val_to_bool(val) },
@@ -92,10 +98,14 @@ impl CockpitState {
             DataRefId::Acp2Spkr => if !is_pilot { self.spkr = Self::val_to_bool(val) },
         }
 
-        // Log if a logical switch changed
         if self.ic != old_state.ic || self.pa != old_state.pa || self.seat != old_state.seat {
             println!("[State:Change] Seat: {}, IC: {}, PA: {} (Triggered by {:?})", 
                 self.seat, self.ic, self.pa, id);
+        }
+
+        if self.pos != old_state.pos && id == DataRefId::HeadZ {
+             // Only log Z changes as they are the most frequent
+             // println!("[State:Pos] Z: {:.3}", self.pos[2]);
         }
     }
 }

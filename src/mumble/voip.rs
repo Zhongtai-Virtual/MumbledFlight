@@ -1,4 +1,4 @@
-//! Core VoIP implementation with Studio-Grade Opus and Managed Jitter Buffer.
+//! Core VoIP implementation with Mumble's Official Spatial Algorithm.
 
 use anyhow::{Result, anyhow};
 use audiopus::{coder::Encoder, coder::Decoder, packet::Packet, Application, Bitrate, Channels, SampleRate, MutSignals, Bandwidth};
@@ -58,13 +58,12 @@ impl MumbleVoipClient {
         
         let mut control = Framed::new(tls_stream, ClientControlCodec::new());
 
-        // 1. Version Handshake
+        // Handshake
         let mut version = msgs::Version::new();
         version.set_version(MUMBLE_VERSION);
         version.set_release("MumblingCockpit".to_string());
         control.send(ControlPacket::Version(Box::new(version))).await?;
 
-        // 2. Authenticate
         let mut auth = msgs::Authenticate::new();
         auth.set_username(self.username.clone());
         auth.set_opus(true);
@@ -79,7 +78,6 @@ impl MumbleVoipClient {
         let mut channels: HashMap<String, u32> = HashMap::new();
         let mut moved_to_channel = false;
 
-        // --- STUDIO-GRADE OPUS SETTINGS ---
         let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
         encoder.set_bitrate(Bitrate::BitsPerSecond(64000))?;
         encoder.set_bandwidth(Bandwidth::Fullband)?;
@@ -111,8 +109,6 @@ impl MumbleVoipClient {
                         let mut dest = BytesMut::new();
                         cs.encrypt(ping_packet, &mut dest);
                         let _ = udp_socket.send(&dest).await;
-                    } else {
-                        let _ = udp_socket.send(&[0; 12]).await;
                     }
                 }
 
@@ -122,15 +118,12 @@ impl MumbleVoipClient {
                             let mut src = BytesMut::from(&udp_recv_buf[..len]);
                             match cs.decrypt(&mut src) {
                                 Ok(Ok(VoicePacket::Audio { session_id, payload, position_info, .. })) => {
-                                    // --- SELF-AUDIO FILTER ---
-                                    if let Some(me) = my_session {
-                                        if session_id == me { continue; }
-                                    }
-
+                                    if let Some(me) = my_session { if session_id == me { continue; } }
                                     if self.is_radio { continue; }
 
                                     if let VoicePacketPayload::Opus(data, _) = payload {
                                         let decoder = decoders.entry(session_id).or_insert_with(|| {
+                                            println!("[VoIP:{}] Detected remote speaker (Session: {})", self.username, session_id);
                                             Decoder::new(SampleRate::Hz48000, Channels::Mono).expect("Failed to create decoder")
                                         });
 
@@ -147,7 +140,7 @@ impl MumbleVoipClient {
                                                     } else { None }
                                                 } else { None };
 
-                                                let stereo_frame = self.spatialize(&mono_f32, source_pos, &state);
+                                                let stereo_frame = self.spatialize(&mono_f32, source_pos, &state, session_id);
                                                 let _ = playback_tx.send(stereo_frame).await;
                                             }
                                         }
@@ -170,24 +163,11 @@ impl MumbleVoipClient {
                                     let s_nonce: [u8; 16] = setup.get_server_nonce().try_into().unwrap();
                                     last_key = Some(key);
                                     crypt_state = Some(CryptState::new_from(key, c_nonce, s_nonce));
-                                } else if let Some(key) = last_key {
-                                    let c_nonce: [u8; 16] = setup.get_client_nonce().try_into().unwrap_or([0; 16]);
-                                    let s_nonce: [u8; 16] = setup.get_server_nonce().try_into().unwrap_or([0; 16]);
-                                    crypt_state = Some(CryptState::new_from(key, c_nonce, s_nonce));
                                 }
                             }
                             ControlPacket::ChannelState(cs) => {
                                 if cs.has_name() && cs.has_channel_id() {
                                     channels.insert(cs.get_name().to_string(), cs.get_channel_id());
-                                    if !moved_to_channel && cs.get_name() == self.target_channel {
-                                        if let Some(session) = my_session {
-                                            let mut move_msg = msgs::UserState::new();
-                                            move_msg.set_session(session);
-                                            move_msg.set_channel_id(cs.get_channel_id());
-                                            let _ = control.send(ControlPacket::UserState(Box::new(move_msg))).await;
-                                            moved_to_channel = true;
-                                        }
-                                    }
                                 }
                             }
                             ControlPacket::ServerSync(sync) => {
@@ -196,6 +176,7 @@ impl MumbleVoipClient {
                                 user_state.set_session(sync.get_session());
                                 user_state.set_plugin_context(self.context.as_bytes().to_vec());
                                 user_state.set_plugin_identity(self.username.clone());
+                                println!("[VoIP:{}] Context active: '{}'", self.username, self.context);
                                 control.send(ControlPacket::UserState(Box::new(user_state))).await?;
                                 
                                 if let Some(&cid) = channels.get(&self.target_channel) {
@@ -204,13 +185,6 @@ impl MumbleVoipClient {
                                     move_msg.set_channel_id(cid);
                                     control.send(ControlPacket::UserState(Box::new(move_msg))).await?;
                                     moved_to_channel = true;
-                                    println!("[VoIP:{}] Joined channel: {}", self.username, self.target_channel);
-                                } else {
-                                    let mut create_msg = msgs::ChannelState::new();
-                                    create_msg.set_parent(0);
-                                    create_msg.set_name(self.target_channel.clone());
-                                    create_msg.set_temporary(true);
-                                    control.send(ControlPacket::ChannelState(Box::new(create_msg))).await?;
                                 }
                             }
                             _ => {}
@@ -231,22 +205,15 @@ impl MumbleVoipClient {
                                 };
 
                                 if is_active {
-                                    if !was_transmitting {
-                                        println!("[VoIP:{}] Start Transmission", self.username);
-                                    }
                                     self.process_audio_packet(&pcm, &mut encoder, &mut voice_seq, &udp_socket, cs, &state, false).await?;
                                     was_transmitting = true;
                                 } else if was_transmitting {
-                                    println!("[VoIP:{}] Stop Transmission", self.username);
                                     self.process_audio_packet(&pcm, &mut encoder, &mut voice_seq, &udp_socket, cs, &state, true).await?;
                                     was_transmitting = false;
                                 }
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("[VoIP:{}] WARNING: Audio channel lagged by {} frames.", self.username, n);
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(_) => break,
                     }
                 }
             }
@@ -266,18 +233,18 @@ impl MumbleVoipClient {
                 None 
             } else if self.test_mode {
                 let mut buf = Vec::new();
-                let _ = buf.write_f32::<LittleEndian>(2.0);
+                let _ = buf.write_f32::<LittleEndian>(2.0); // 2m Right
                 let _ = buf.write_f32::<LittleEndian>(0.0);
-                let _ = buf.write_f32::<LittleEndian>(7.0);
+                let _ = buf.write_f32::<LittleEndian>(7.0); // Forward
                 Some(Bytes::from(buf))
             } else if self.is_radio {
                 let mut buf = Vec::new();
-                let _ = buf.write_f32::<LittleEndian>(0.0);
-                let _ = buf.write_f32::<LittleEndian>(0.0);
-                let _ = buf.write_f32::<LittleEndian>(0.0);
+                for _ in 0..3 { let _ = buf.write_f32::<LittleEndian>(0.0); }
                 Some(Bytes::from(buf))
             } else {
                 let mut buf = Vec::new();
+                // Mumble Space: +X Right, +Y Up, +Z Forward.
+                // X-Plane Space: +X Right, +Y Up, -Z Forward.
                 let x = s.pos[0]; let y = s.pos[1]; let z = -s.pos[2];
                 let _ = buf.write_f32::<LittleEndian>(x);
                 let _ = buf.write_f32::<LittleEndian>(y);
@@ -294,11 +261,108 @@ impl MumbleVoipClient {
         Ok(())
     }
 
-    fn spatialize(&self, mono: &[f32], _source_pos: Option<[f32; 3]>, _state: &Arc<Mutex<CockpitState>>) -> Vec<f32> {
+    fn spatialize(&self, mono: &[f32], source_pos: Option<[f32; 3]>, state: &Arc<Mutex<CockpitState>>, remote_sid: u32) -> Vec<f32> {
+        // Read listener state: pos is already in Mumble space (+Z forward, -pilots_head_z)
+        let (lx, ly, lz, h_psi, h_the, h_phi) = {
+            let s = state.lock().unwrap();
+            (s.pos[0], s.pos[1], -s.pos[2], s.rot[0], s.rot[1], s.rot[2])
+        };
+
+        // Default: centered mono. Only changes when position data arrives.
+        let mut gains = (0.5f32, 0.5f32);
+        let mut debug_line = format!("[Spatial:{}] no pos data", remote_sid);
+
+        if let Some([sx, sy, sz]) = source_pos {
+            let dx = sx - lx;
+            let dy = sy - ly;
+            let dz = sz - lz;
+            let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+
+            if dist < 0.01 {
+                // Source and listener at the same point — full volume, centered.
+                gains = (1.0, 1.0);
+            } else {
+                // Normalized direction vector from listener to source (Mumble aircraft-local space).
+                let nx = dx / dist;
+                let ny = dy / dist;
+                let nz = dz / dist;
+
+                // pilots_head_psi/the/phi are relative to the aircraft body axes (0 = forward),
+                // the same frame as pilots_head_x/y/z positions.  Using h_psi directly keeps
+                // the orientation vectors in aircraft-local space — consistent with [nx,ny,nz].
+                // (Subtracting plane_psi would rotate the basis into world space, making the
+                // dot product with aircraft-local positions meaningless.)
+                let hh = h_psi.to_radians();
+                let hp = h_the.to_radians();
+                let hr = h_phi.to_radians();
+
+                // Build listener orientation vectors in Mumble/aircraft-local space.
+                // These are the same formulas used by the X-Plane plugin to populate
+                // the Mumble Link shared memory (fCameraFront / fCameraTop).
+                let fwd = [
+                    hp.cos() * hh.sin(),   // x
+                    hp.sin(),               // y
+                    hp.cos() * hh.cos(),   // z  (+Z = aircraft-forward in Mumble space)
+                ];
+                let top = [
+                    -hr.sin() * hh.cos() + hp.sin() * hr.cos() * hh.sin(),
+                    hp.cos() * hr.cos(),
+                    hr.sin() * hh.sin()  + hp.sin() * hr.cos() * hh.cos(),
+                ];
+
+                // right = top × fwd   (matches Mumble: right = cameraAxis.crossProduct(cameraDir))
+                let right = [
+                    top[1] * fwd[2] - top[2] * fwd[1],
+                    top[2] * fwd[0] - top[0] * fwd[2],
+                    top[0] * fwd[1] - top[1] * fwd[0],
+                ];
+
+                // In headphone mode Mumble places speakers at (±1, 0, 0) in listener-local
+                // space, which after head-orientation rotation become ±right in world/cockpit
+                // space.  dot_r = how much the source direction aligns with the right ear.
+                let dot_r =  nx * right[0] + ny * right[1] + nz * right[2];
+                let dot_l = -dot_r;
+
+                // Mumble's calcGain: maps dot ∈ [-1, 1] → gain ∈ [0.25, 1.0].
+                // Derived from AudioOutput.cpp::calcGain() for the near-field case
+                // (distance < fAudioMinDistance, bloom = 0):
+                //   dotfactor = (dot + 1) / 2
+                //   gain = dotfactor + (1 - dotfactor) * 0.25   = 0.75*dotfactor + 0.25
+                let calc_gain = |dot: f32| -> f32 {
+                    let df = (dot + 1.0) * 0.5;
+                    df + (1.0 - df) * 0.25
+                };
+
+                // Distance attenuation: full volume up to 1.5 m, fades to zero at 8 m.
+                // Power-law curve mirrors Mumble's log-distance model at cockpit scale.
+                const MIN_DIST: f32 = 1.5;
+                const MAX_DIST: f32 = 8.0;
+                let datt = if dist <= MIN_DIST {
+                    1.0
+                } else if dist >= MAX_DIST {
+                    0.0
+                } else {
+                    let t = 1.0 - (dist - MIN_DIST) / (MAX_DIST - MIN_DIST);
+                    t * t
+                };
+
+                gains = (calc_gain(dot_l) * datt, calc_gain(dot_r) * datt);
+                debug_line = format!(
+                    "[Spatial:{}] dist={:.2}m dX={:.2} dY={:.2} dZ={:.2} headPsi={:.1}° dot_R={:.3} L={:.3} R={:.3}",
+                    remote_sid, dist, dx, dy, dz, h_psi, dot_r, gains.0, gains.1
+                );
+            }
+        }
+
+        static PACKET_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if PACKET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 400 == 0 {
+            println!("{}", debug_line);
+        }
+
         let mut output = Vec::with_capacity(mono.len() * 2);
         for &s in mono {
-            output.push(s); // L
-            output.push(s); // R
+            output.push(s * gains.0);
+            output.push(s * gains.1);
         }
         output
     }

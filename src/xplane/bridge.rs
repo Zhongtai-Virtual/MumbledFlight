@@ -56,7 +56,12 @@ async fn run_bridge(state: Arc<Mutex<CockpitState>>) -> Result<()> {
     for dr in rest_resp.data {
         if let Some(enum_id) = DataRefId::from_name(&dr.name) {
             id_to_enum.insert(dr.id, enum_id);
-            if dr.name.contains("head") { pos_ids.push(dr.id); } else { switch_ids.push(dr.id); }
+            // Track positional DataRefs separately for high-speed polling
+            if dr.name.contains("head") || dr.name.contains("position/psi") { 
+                pos_ids.push(dr.id); 
+            } else { 
+                switch_ids.push(dr.id); 
+            }
         }
     }
 
@@ -68,11 +73,10 @@ async fn run_bridge(state: Arc<Mutex<CockpitState>>) -> Result<()> {
     let sub_req = serde_json::json!({"req_id": my_req_id, "type": "dataref_subscribe_values", "params": {"datarefs": sub_params}});
     write.send(Message::Text(sub_req.to_string().into())).await?;
 
-    // --- NON-BLOCKING INITIAL SYNC ---
-    println!("Fetching initial state (with timeout)...");
+    // --- INITIAL SYNC ---
+    println!("Fetching initial state...");
     for (&id, &enum_id) in &id_to_enum {
         let val_url = format!("{}/datarefs/{}/value", XPLANE_WEB_REST, id);
-        // Use timeout to prevent hanging the bridge
         if let Ok(Ok(resp)) = timeout(Duration::from_millis(500), client.get(val_url).send()).await {
             if let Ok(val_json) = resp.json::<serde_json::Value>().await {
                 if let Some(val) = val_json.get("data") {
@@ -85,21 +89,42 @@ async fn run_bridge(state: Arc<Mutex<CockpitState>>) -> Result<()> {
 
     let state_poll = Arc::clone(&state);
     let switch_ids_poll = switch_ids.clone();
+    let pos_ids_poll = pos_ids.clone();
     let client_poll = client.clone();
     let id_to_enum_poll = id_to_enum.clone();
     
+    // HYBRID POLLING: WebSocket for events, high-speed REST for coordinates
     tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_millis(200));
+        let mut pos_ticker = interval(Duration::from_millis(50)); // 20Hz for Smooth Spatial
+        let mut sw_ticker = interval(Duration::from_millis(200)); // 5Hz for Switches
         loop {
-            ticker.tick().await;
-            for &id in &switch_ids_poll {
-                let url = format!("{}/datarefs/{}/value", XPLANE_WEB_REST, id);
-                if let Ok(Ok(resp)) = timeout(Duration::from_millis(100), client_poll.get(url).send()).await {
-                    if let Ok(val_json) = resp.json::<serde_json::Value>().await {
-                        if let Some(val) = val_json.get("data") {
-                            if let Some(enum_id) = id_to_enum_poll.get(&id) {
-                                let mut s = state_poll.lock().unwrap();
-                                s.update_from_dataref(*enum_id, val);
+            tokio::select! {
+                _ = pos_ticker.tick() => {
+                    for &id in &pos_ids_poll {
+                        let url = format!("{}/datarefs/{}/value", XPLANE_WEB_REST, id);
+                        if let Ok(Ok(resp)) = timeout(Duration::from_millis(30), client_poll.get(url).send()).await {
+                            if let Ok(val_json) = resp.json::<serde_json::Value>().await {
+                                if let Some(val) = val_json.get("data") {
+                                    if let Some(enum_id) = id_to_enum_poll.get(&id) {
+                                        let mut s = state_poll.lock().unwrap();
+                                        s.update_from_dataref(*enum_id, val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ = sw_ticker.tick() => {
+                    for &id in &switch_ids_poll {
+                        let url = format!("{}/datarefs/{}/value", XPLANE_WEB_REST, id);
+                        if let Ok(Ok(resp)) = timeout(Duration::from_millis(100), client_poll.get(url).send()).await {
+                            if let Ok(val_json) = resp.json::<serde_json::Value>().await {
+                                if let Some(val) = val_json.get("data") {
+                                    if let Some(enum_id) = id_to_enum_poll.get(&id) {
+                                        let mut s = state_poll.lock().unwrap();
+                                        s.update_from_dataref(*enum_id, val);
+                                    }
+                                }
                             }
                         }
                     }
@@ -109,17 +134,22 @@ async fn run_bridge(state: Arc<Mutex<CockpitState>>) -> Result<()> {
     });
 
     while let Some(msg_result) = read.next().await {
-        let msg = match msg_result { Ok(Message::Text(t)) => t, _ => continue };
-        let resp: WsResponse = match serde_json::from_str(&msg) { Ok(r) => r, Err(_) => continue };
-        if resp.msg_type != "dataref_values" && resp.msg_type != "dataref_update_values" { continue; }
-        let updates = match resp.data.and_then(|d| d.as_array().cloned()) { Some(u) => u, None => continue };
-
-        let mut s = state.lock().unwrap();
-        for update in updates {
-            let id = update["id"].as_u64().unwrap();
-            let val = &update["value"];
-            if let Some(enum_id) = id_to_enum.get(&id) {
-                s.update_from_dataref(*enum_id, val);
+        if let Ok(Message::Text(text)) = msg_result {
+            if let Ok(update_resp) = serde_json::from_str::<WsResponse>(&text) {
+                if update_resp.msg_type == "dataref_update_values" || update_resp.msg_type == "dataref_values" {
+                    if let Some(data) = update_resp.data {
+                        if let Some(updates) = data.as_array() {
+                            let mut s = state.lock().unwrap();
+                            for update in updates {
+                                if let (Some(id), Some(val)) = (update["id"].as_u64(), update.get("value")) {
+                                    if let Some(enum_id) = id_to_enum.get(&id) {
+                                        s.update_from_dataref(*enum_id, val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

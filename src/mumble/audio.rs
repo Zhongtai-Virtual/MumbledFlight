@@ -1,4 +1,4 @@
-//! High-Stability Audio Engine with Hysteresis Jitter Management.
+//! High-Performance Audio Engine for MumblingCockpit.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
@@ -9,7 +9,7 @@ pub fn list_audio_devices() {
     println!("\n--- [ Audio Host & Device Discovery ] ---");
     for host_id in cpal::available_hosts() {
         println!("\nHost: {:?}", host_id);
-        if let Ok(host) = host_from_id(host_id) {
+        if let Ok(host) = cpal::host_from_id(host_id) {
             println!("  [ Input Devices ]:");
             if let Ok(devices) = host.input_devices() {
                 for dev in devices { println!("    - {}", dev.name().unwrap_or_default()); }
@@ -21,10 +21,6 @@ pub fn list_audio_devices() {
         }
     }
     println!("------------------------------------------\n");
-}
-
-fn host_from_id(id: cpal::HostId) -> Result<cpal::Host, cpal::HostUnavailable> {
-    cpal::host_from_id(id)
 }
 
 pub fn create_linux_sink() -> Option<String> {
@@ -41,7 +37,7 @@ pub fn create_linux_sink() -> Option<String> {
             }
         });
 
-        println!("[Audio:Linux] Creating MumblingRadio virtual device (48kHz float32le)...");
+        println!("[Audio:Linux] Creating MumblingRadio virtual device...");
         let status = std::process::Command::new("pactl")
             .args(&["load-module", "module-null-sink", "sink_name=MumblingRadio", "format=float32le", "rate=48000", "channels=2", "sink_properties=device.description=MumblingRadio"])
             .status();
@@ -67,17 +63,12 @@ pub fn start_capture(
         let host = cpal::default_host();
         let mut found = None;
         if let Some(ref filter) = device_name_filter {
-            for host_id in cpal::available_hosts() {
-                if let Ok(h) = cpal::host_from_id(host_id) {
-                    if let Ok(devices) = h.input_devices() {
-                        for d in devices {
-                            if d.name().unwrap_or_default().to_lowercase().contains(&filter.to_lowercase()) {
-                                found = Some(d); break;
-                            }
-                        }
+            if let Ok(devices) = host.input_devices() {
+                for d in devices {
+                    if d.name().unwrap_or_default().to_lowercase().contains(&filter.to_lowercase()) {
+                        found = Some(d); break;
                     }
                 }
-                if found.is_some() { break; }
             }
         }
         let device = found.unwrap_or_else(|| host.default_input_device().expect("No default input found"));
@@ -123,26 +114,35 @@ pub fn start_capture(
 
 pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
     let host = cpal::default_host();
-    let device = host.default_output_device().expect("No output device found");
+    
+    // Explicitly prefer "pulse" or "default" to ensure we hit the user's actual audio stack
+    let device = host.output_devices().expect("No output devices found")
+        .find(|d| {
+            let name = d.name().unwrap_or_default().to_lowercase();
+            (name == "default" || name == "pulse" || name == "pipewire") &&
+            d.supported_output_configs().map(|mut configs| configs.any(|c| c.channels() == 2)).unwrap_or(false)
+        })
+        .or_else(|| host.default_output_device())
+        .expect("No suitable output device found");
     
     let supported_configs = device.supported_output_configs().expect("Failed to get configs");
     let config = supported_configs
         .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
-        .next()
-        .expect("HARDWARE ERROR: Your playback device does not support 48,000Hz.")
+        .find(|c| c.channels() == 2)
+        .or_else(|| device.supported_output_configs().unwrap().next())
+        .expect("HARDWARE ERROR: Could not find a valid output config.")
         .with_sample_rate(cpal::SampleRate(48000));
         
     let device_channels = config.channels() as usize;
-    println!("[Audio:Out] Sink: {} ({:?} Host, Strict 48kHz, {} channels)", 
-        device.name().unwrap_or_default(), host.id(), device_channels);
+    println!("[Audio:Out] Sink: {} (Strict 48kHz, {} channels)", 
+        device.name().unwrap_or_default(), device_channels);
 
-    // High-Performance Ring Buffer
+    // REAL-TIME RING BUFFER: Optimized for O(1) removals.
     let pending_samples = Arc::new(Mutex::new(VecDeque::<f32>::new()));
     let pending_samples_cb = Arc::clone(&pending_samples);
 
-    // HYSTERESIS BUFFER CONFIG:
-    // We wait for 400ms of audio (channel-aware) before starting/resuming.
-    let prime_threshold = 19200 * device_channels; 
+    // Initial Prime: Wait for 150ms of audio (channel-aware)
+    let hwm = 7200 * device_channels; 
     let is_playing = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let is_playing_cb = Arc::clone(&is_playing);
 
@@ -160,23 +160,20 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
                 }
             }
 
-            // Start playing once we hit the threshold
-            if !is_playing.load(std::sync::atomic::Ordering::SeqCst) && lock.len() >= prime_threshold {
+            if lock.len() >= hwm {
                 is_playing.store(true, std::sync::atomic::Ordering::SeqCst);
-                println!("[Audio:Out] Buffer primed (400ms). Stream active.");
             }
 
-            // High-Stability Buffer Cap (1 second)
-            let max_buffered = 48000 * device_channels;
+            // High-Stability Buffer Cap (500ms)
+            let max_buffered = 24000 * device_channels;
             if lock.len() > max_buffered {
                 let to_drain = lock.len() - max_buffered;
                 let aligned_drain = to_drain - (to_drain % device_channels);
-                for _ in 0..aligned_drain { lock.pop_front(); }
+                let _ = lock.drain(..aligned_drain);
             }
 
             if last_log.elapsed().as_secs() >= 5 {
-                let ms = lock.len() as f32 / (48.0 * device_channels as f32);
-                println!("[Audio:Out] Buffer Level: {:.1}ms", ms);
+                println!("[Audio:Out] Buffer: {:.1}ms", lock.len() as f32 / (48.0 * device_channels as f32));
                 last_log = std::time::Instant::now();
             }
         }
@@ -186,24 +183,22 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
         &config.into(),
         move |data: &mut [f32], _| {
             let mut lock = pending_samples_cb.lock().unwrap();
+            let available = lock.len();
             
             // HYSTERESIS BLOCK LOGIC:
-            // 1. Only play if we are in 'playing' state.
-            // 2. Only play if we have enough for the WHOLE hardware block.
-            // This turns "shredding" into clean, rare drops.
-            if !is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) || lock.len() < data.len() {
+            // Only play if we have hit the high water mark AND can fulfill the whole request.
+            // This prevents the high-frequency clicking (shredding).
+            if !is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) || available < data.len() {
                 for x in data.iter_mut() { *x = 0.0; }
-                
-                // If we ran out while playing, stop and wait for a full refill
-                if is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) {
+                if is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) && available < data.len() {
                     is_playing_cb.store(false, std::sync::atomic::Ordering::SeqCst);
                 }
                 return;
             }
 
-            // O(K) Removal (Atomic Alignment)
-            for i in 0..data.len() {
-                data[i] = lock.pop_front().unwrap_or(0.0);
+            // Bulk copy from buffer
+            for (i, sample) in lock.drain(..data.len()).enumerate() {
+                data[i] = sample;
             }
         },
         |err| eprintln!("[Audio:Out] Error: {}", err),
