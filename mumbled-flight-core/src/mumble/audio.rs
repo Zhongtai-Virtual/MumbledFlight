@@ -113,18 +113,27 @@ pub fn start_capture(
     });
 }
 
-pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>) {
+pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option<String>) {
     let host = cpal::default_host();
-    
-    // Explicitly prefer "pulse" or "default" to ensure we hit the user's actual audio stack
-    let device = host.output_devices().expect("No output devices found")
-        .find(|d| {
-            let name = d.name().unwrap_or_default().to_lowercase();
-            (name == "default" || name == "pulse" || name == "pipewire") &&
-            d.supported_output_configs().map(|mut configs| configs.any(|c| c.channels() == 2)).unwrap_or(false)
-        })
-        .or_else(|| host.default_output_device())
-        .expect("No suitable output device found");
+
+    let device = if let Some(ref name_filter) = preferred_device {
+        host.output_devices().ok()
+            .and_then(|mut devs| devs.find(|d| {
+                d.name().unwrap_or_default().to_lowercase().contains(&name_filter.to_lowercase())
+            }))
+            .or_else(|| host.default_output_device())
+    } else {
+        // Prefer a named virtual/real sink over the ALSA "default" shim so Mumble
+        // audio ends up on its own PipeWire/PA stream, separate from X-Plane's.
+        host.output_devices().expect("No output devices found")
+            .find(|d| {
+                let name = d.name().unwrap_or_default().to_lowercase();
+                (name == "pulse" || name == "pipewire") &&
+                d.supported_output_configs().map(|mut c| c.any(|cfg| cfg.channels() == 2)).unwrap_or(false)
+            })
+            .or_else(|| host.default_output_device())
+    }
+    .expect("No suitable output device found");
     
     let supported_configs = device.supported_output_configs().expect("Failed to get configs");
     let config = supported_configs

@@ -115,7 +115,8 @@ async fn main() -> Result<()> {
             args.auto_sink,
             args.single_client,
             test_pos,
-            server_addr
+            server_addr,
+            None,
         ).await;
     });
 

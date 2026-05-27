@@ -118,6 +118,7 @@ impl MumbleVoipClient {
         let mut crypt_state: Option<CryptState<Serverbound, Clientbound>> = None;
         let mut my_session: Option<u32> = None;
         let mut channels: HashMap<String, u32> = HashMap::new();
+        let mut channel_joined = false;
 
         let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
         encoder.set_bitrate(Bitrate::BitsPerSecond(64000))?;
@@ -184,7 +185,21 @@ impl MumbleVoipClient {
                             }
                             ControlPacket::ChannelState(cs) => {
                                 if cs.has_name() && cs.has_channel_id() {
-                                    channels.insert(cs.get_name().to_string(), cs.get_channel_id());
+                                    let name = cs.get_name().to_string();
+                                    let cid  = cs.get_channel_id();
+                                    channels.insert(name.clone(), cid);
+                                    // Join if this is the confirmation of our target channel
+                                    // arriving after ServerSync (i.e. we requested creation).
+                                    if !channel_joined && name == self.target_channel {
+                                        if let Some(sess) = my_session {
+                                            let mut move_msg = msgs::UserState::new();
+                                            move_msg.set_session(sess);
+                                            move_msg.set_channel_id(cid);
+                                            control.send(ControlPacket::UserState(Box::new(move_msg))).await?;
+                                            channel_joined = true;
+                                            info!("[VoIP:{}] Joined channel '{}' (id {})", self.username, name, cid);
+                                        }
+                                    }
                                 }
                             }
                             ControlPacket::ServerSync(sync) => {
@@ -195,12 +210,22 @@ impl MumbleVoipClient {
                                 user_state.set_plugin_identity(self.username.clone());
                                 info!("[VoIP:{}] Context active: '{}'", self.username, self.context);
                                 control.send(ControlPacket::UserState(Box::new(user_state))).await?;
-                                
+
                                 if let Some(&cid) = channels.get(&self.target_channel) {
                                     let mut move_msg = msgs::UserState::new();
                                     move_msg.set_session(sync.get_session());
                                     move_msg.set_channel_id(cid);
                                     control.send(ControlPacket::UserState(Box::new(move_msg))).await?;
+                                    channel_joined = true;
+                                    info!("[VoIP:{}] Joined existing channel '{}'", self.username, self.target_channel);
+                                } else {
+                                    // Channel doesn't exist yet — request creation.
+                                    info!("[VoIP:{}] Channel '{}' not found, requesting creation", self.username, self.target_channel);
+                                    let mut ch = msgs::ChannelState::new();
+                                    ch.set_parent(0);
+                                    ch.set_name(self.target_channel.clone());
+                                    ch.set_temporary(true);
+                                    control.send(ControlPacket::ChannelState(Box::new(ch))).await?;
                                 }
                             }
                             _ => {}

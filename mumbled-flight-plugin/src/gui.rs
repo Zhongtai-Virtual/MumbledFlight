@@ -1,0 +1,426 @@
+//! ImGui configuration window rendered into an XPLMCreateWindowEx floating panel.
+
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_void};
+use std::time::Instant;
+
+use cpal::traits::{DeviceTrait, HostTrait};
+use xplane_sys::{
+    XPLMCreateWindowEx, XPLMGetScreenBoundsGlobal, XPLMGetScreenSize, XPLMGetWindowGeometry,
+    XPLMMouseStatus, XPLMSetGraphicsState, XPLMSetWindowPositioningMode, XPLMSetWindowTitle,
+    XPLMTakeKeyboardFocus, XPLMWindowDecoration, XPLMWindowID, XPLMWindowLayer,
+    XPLMWindowPositioningMode,
+};
+
+// ── Public state ──────────────────────────────────────────────────────────────
+
+pub struct GuiState {
+    pub window_id: XPLMWindowID,
+
+    // Lazily initialised on first draw call (GL context guaranteed active then).
+    imgui_ctx: Option<imgui::Context>,
+    imgui_renderer: Option<imgui_glow_renderer::AutoRenderer>,
+
+    last_time: Instant,
+    screen_h: i32,       // cached for Y-flip in mouse coord conversion
+    logged_coords: bool, // emit coordinate-space diagnostics once on first draw
+    mouse_pos: [f32; 2],
+    mouse_down: [bool; 5],
+
+    // Config fields
+    pub server: String,
+    pub flight_id: String,
+    pub user_name: String,
+    pub gain: f32,
+    pub output_devices: Vec<String>,
+    pub selected_device: i32,
+
+    // Actions / status
+    pub should_connect: bool,
+    pub should_disconnect: bool,
+    pub is_connected: bool,
+    pub status: String,
+}
+
+// XPLMWindowID is *mut c_void; all XPLM + GL access is on the X-Plane main thread.
+unsafe impl Send for GuiState {}
+
+impl GuiState {
+    pub fn new(auto_user: Option<String>) -> Self {
+        let output_devices: Vec<String> = cpal::default_host()
+            .output_devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default();
+
+        let window_id = unsafe { create_xplm_window() };
+
+        Self {
+            window_id,
+            imgui_ctx: None,
+            imgui_renderer: None,
+            last_time: Instant::now(),
+            screen_h: 0,
+            logged_coords: false,
+            mouse_pos: [0.0; 2],
+            mouse_down: [false; 5],
+            server: "127.0.0.1:64738".to_string(),
+            flight_id: String::new(),
+            user_name: auto_user.unwrap_or_default(),
+            gain: 1.0,
+            output_devices,
+            selected_device: 0,
+            should_connect: false,
+            should_disconnect: false,
+            is_connected: false,
+            status: String::new(),
+        }
+    }
+
+    pub fn output_device(&self) -> Option<String> {
+        self.output_devices
+            .get(self.selected_device as usize)
+            .cloned()
+    }
+
+    fn make_gl() -> glow::Context {
+        unsafe {
+            glow::Context::from_loader_function(|s| {
+                // X-Plane has already loaded libGL; RTLD_DEFAULT (null) finds it.
+                let cstr = CString::new(s).unwrap_or_default();
+                libc::dlsym(std::ptr::null_mut(), cstr.as_ptr()) as *const c_void
+            })
+        }
+    }
+
+    fn init_renderer(&mut self) {
+        let mut ctx = imgui::Context::create();
+        ctx.set_ini_filename(None);
+        ctx.style_mut().use_dark_colors();
+        ctx.fonts().add_font(&[imgui::FontSource::DefaultFontData {
+            config: Some(imgui::FontConfig {
+                size_pixels: 15.0,
+                ..Default::default()
+            }),
+        }]);
+
+        match imgui_glow_renderer::AutoRenderer::initialize(Self::make_gl(), &mut ctx) {
+            Ok(renderer) => {
+                self.imgui_ctx = Some(ctx);
+                self.imgui_renderer = Some(renderer);
+            }
+            Err(e) => crate::xp_log(&format!("MumbledFlight: renderer init failed: {e}\n")),
+        }
+    }
+
+    // ── Draw callback ─────────────────────────────────────────────────────────
+
+    pub fn draw(&mut self, win: XPLMWindowID) {
+        if self.imgui_ctx.is_none() {
+            self.init_renderer();
+        }
+
+        let (mut left, mut top, mut right, mut bottom) = (0i32, 0i32, 0i32, 0i32);
+        unsafe { XPLMGetWindowGeometry(win, &mut left, &mut top, &mut right, &mut bottom) };
+        let width = (right - left).max(1);
+        let height = (top - bottom).max(1);
+
+        // Virtual desktop bounds — same coordinate space as XPLMGetWindowGeometry.
+        let (mut virt_l, mut virt_t, mut virt_r, mut virt_b) = (0i32, 0i32, 0i32, 0i32);
+        unsafe { XPLMGetScreenBoundsGlobal(&mut virt_l, &mut virt_t, &mut virt_r, &mut virt_b) };
+        let virt_w = (virt_r - virt_l).max(1);
+        let virt_h = (virt_t - virt_b).max(1); // Y-up: top > bottom
+
+        // Physical framebuffer size — may differ from virtual on HiDPI / UI-scale setups.
+        let (mut phys_w, mut phys_h) = (0i32, 0i32);
+        unsafe { XPLMGetScreenSize(&mut phys_w, &mut phys_h) };
+        let scale_x = phys_w as f32 / virt_w as f32;
+        let scale_y = phys_h as f32 / virt_h as f32;
+
+        // Cache virtual height for Y-flip in mouse coordinate conversion.
+        self.screen_h = virt_h;
+
+        // XPLM Y-up → ImGui Y-down, all in virtual pixel units.
+        let win_imgui_x = (left - virt_l) as f32;
+        let win_imgui_y = (virt_h - (top - virt_b)) as f32;
+
+        if !self.logged_coords {
+            self.logged_coords = true;
+            crate::xp_log(&format!(
+                "MumbledFlight: virt={virt_w}x{virt_h} phys={phys_w}x{phys_h} \
+                 scale={scale_x:.2}x{scale_y:.2} win=({left},{bottom})-({right},{top}) \
+                 imgui_pos=({win_imgui_x},{win_imgui_y})\n"
+            ));
+        }
+
+        let dt = {
+            let now = Instant::now();
+            let d = (now - self.last_time).as_secs_f32().max(1e-6);
+            self.last_time = now;
+            d
+        };
+
+        // Snapshot mutable config into locals — avoids a borrow conflict between
+        // the imgui Context borrow (through Ui) and the config field borrows.
+        let mut server = self.server.clone();
+        let mut flight_id = self.flight_id.clone();
+        let mut user_name = self.user_name.clone();
+        let mut gain = self.gain;
+        let mut selected_device = self.selected_device;
+        let mut should_connect = false;
+        let mut should_disconnect = false;
+        let is_connected = self.is_connected;
+        let status = self.status.clone();
+        let output_devices = self.output_devices.clone();
+        let mouse_pos = self.mouse_pos;
+        let mouse_down = self.mouse_down;
+
+        let (Some(ctx), Some(renderer)) = (self.imgui_ctx.as_mut(), self.imgui_renderer.as_mut())
+        else {
+            return;
+        };
+
+        {
+            let io = ctx.io_mut();
+            // Virtual-pixel canvas; framebuffer_scale tells the renderer the physical size.
+            io.display_size = [virt_w as f32, virt_h as f32];
+            io.display_framebuffer_scale = [scale_x, scale_y];
+            io.delta_time = dt;
+            io.mouse_pos = mouse_pos;
+            io.mouse_down = mouse_down;
+        }
+
+        {
+            let ui = ctx.frame();
+            let fw = (width as f32 - 115.0).max(80.0);
+
+            ui.window("##main")
+                .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
+                .size([width as f32, height as f32], imgui::Condition::Always)
+                .title_bar(false)
+                .resizable(false)
+                .movable(false)
+                .scroll_bar(false)
+                .build(|| {
+                    let row = |label: &str, id: &str, buf: &mut String| {
+                        ui.text(label);
+                        ui.same_line();
+                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                        ui.set_next_item_width(fw);
+                        ui.input_text(id, buf).build();
+                    };
+
+                    row("Server", "##srv", &mut server);
+                    row("Flight ID", "##fid", &mut flight_id);
+                    row("Username", "##usr", &mut user_name);
+
+                    ui.text("Gain");
+                    ui.same_line();
+                    ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                    ui.set_next_item_width(fw);
+                    ui.slider_config("##gain", 0.1_f32, 4.0_f32)
+                        .build(&mut gain);
+
+                    if !output_devices.is_empty() {
+                        let preview = output_devices
+                            .get(selected_device as usize)
+                            .map(|s| s.as_str())
+                            .unwrap_or("(default)");
+                        ui.text("Output");
+                        ui.same_line();
+                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                        ui.set_next_item_width(fw);
+                        if let Some(_tok) = ui.begin_combo("##dev", preview) {
+                            for (i, name) in output_devices.iter().enumerate() {
+                                if ui
+                                    .selectable_config(name)
+                                    .selected(selected_device == i as i32)
+                                    .build()
+                                {
+                                    selected_device = i as i32;
+                                }
+                            }
+                        }
+                    }
+
+                    ui.spacing();
+                    ui.separator();
+                    ui.spacing();
+
+                    if is_connected {
+                        if ui.button("Disconnect") {
+                            should_disconnect = true;
+                        }
+                        ui.same_line();
+                        ui.text_colored([0.3, 1.0, 0.3, 1.0], "● Connected");
+                    } else {
+                        if ui.button("Connect") {
+                            crate::xp_log(&format!(
+                                "MumbledFlight: Connect pressed — \
+                                 flight_id='{}' user='{}'\n",
+                                flight_id.trim(),
+                                user_name.trim()
+                            ));
+                            if !flight_id.trim().is_empty() && !user_name.trim().is_empty() {
+                                should_connect = true;
+                            } else {
+                                crate::xp_log(
+                                    "MumbledFlight: Connect blocked — \
+                                     flight_id or username is empty\n",
+                                );
+                            }
+                        }
+                        ui.same_line();
+                        ui.text_colored([0.8, 0.3, 0.3, 1.0], "○ Disconnected");
+                    }
+
+                    if !status.is_empty() {
+                        ui.spacing();
+                        ui.text_disabled(&status);
+                    }
+                });
+        } // ui borrow ends here
+        let draw_data = ctx.render();
+
+        // Sync X-Plane's GL state cache before the renderer touches raw GL.
+        unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
+        renderer.render(draw_data).ok();
+
+        // Write back modified config locals.
+        self.server = server;
+        self.flight_id = flight_id;
+        self.user_name = user_name;
+        self.gain = gain;
+        self.selected_device = selected_device;
+        if should_connect {
+            self.should_connect = true;
+        }
+        if should_disconnect {
+            self.should_disconnect = true;
+        }
+    }
+
+    // ── Input ─────────────────────────────────────────────────────────────────
+
+    pub fn on_mouse(&mut self, win: XPLMWindowID, x: c_int, y: c_int, status: XPLMMouseStatus) {
+        // XPLM gives global coords with Y-up; ImGui expects Y-down to match display_size.
+        self.mouse_pos = [x as f32, (self.screen_h - y) as f32];
+        if status == XPLMMouseStatus::Down {
+            self.mouse_down[0] = true;
+            unsafe {
+                XPLMTakeKeyboardFocus(win);
+            }
+            crate::xp_log(&format!(
+                "MumbledFlight: mouse down xplm=({x},{y}) \
+                 imgui=({:.0},{:.0}) screen_h={}\n",
+                self.mouse_pos[0], self.mouse_pos[1], self.screen_h
+            ));
+        } else if status == XPLMMouseStatus::Up {
+            self.mouse_down[0] = false;
+        }
+    }
+
+    pub fn on_char(&mut self, key: u8) {
+        let Some(ctx) = &mut self.imgui_ctx else {
+            return;
+        };
+        let io = ctx.io_mut();
+        match key {
+            8 => {
+                io.add_key_event(imgui::Key::Backspace, true);
+                io.add_key_event(imgui::Key::Backspace, false);
+            }
+            32.. => io.add_input_character(key as char),
+            _ => {}
+        }
+    }
+}
+
+// ── XPLM window creation ──────────────────────────────────────────────────────
+
+unsafe fn create_xplm_window() -> XPLMWindowID {
+    unsafe extern "C-unwind" fn draw_cb(win: XPLMWindowID, _: *mut c_void) {
+        let Ok(mut g) = crate::plugin_cell().lock() else {
+            return;
+        };
+        if let Some(ps) = g.as_mut() {
+            ps.gui.draw(win);
+        }
+    }
+    unsafe extern "C-unwind" fn mouse_cb(
+        win: XPLMWindowID,
+        x: c_int,
+        y: c_int,
+        s: XPLMMouseStatus,
+        _: *mut c_void,
+    ) -> c_int {
+        let Ok(mut g) = crate::plugin_cell().lock() else {
+            return 1;
+        };
+        if let Some(ps) = g.as_mut() {
+            ps.gui.on_mouse(win, x, y, s);
+        }
+        1
+    }
+    unsafe extern "C-unwind" fn cursor_cb(
+        _: XPLMWindowID,
+        _: c_int,
+        _: c_int,
+        _: *mut c_void,
+    ) -> xplane_sys::XPLMCursorStatus {
+        xplane_sys::XPLMCursorStatus::Default
+    }
+    unsafe extern "C-unwind" fn wheel_cb(
+        _: XPLMWindowID,
+        _: c_int,
+        _: c_int,
+        _: c_int,
+        _: c_int,
+        _: *mut c_void,
+    ) -> c_int {
+        0
+    }
+    unsafe extern "C-unwind" fn key_cb(
+        _: XPLMWindowID,
+        key: c_char,
+        flags: xplane_sys::XPLMKeyFlags,
+        _vk: c_char,
+        _: *mut c_void,
+        losing: c_int,
+    ) {
+        // ignore up-events and focus-loss notifications
+        if losing != 0 || (flags & xplane_sys::XPLMKeyFlags::Down).0 == 0 {
+            return;
+        }
+        if key > 0 {
+            let Ok(mut g) = crate::plugin_cell().lock() else {
+                return;
+            };
+            if let Some(ps) = g.as_mut() {
+                ps.gui.on_char(key as u8);
+            }
+        }
+    }
+
+    let mut params = xplane_sys::XPLMCreateWindow_t {
+        structSize: std::mem::size_of::<xplane_sys::XPLMCreateWindow_t>() as c_int,
+        left: 60,
+        top: 460,
+        right: 480,
+        bottom: 60,
+        visible: 0,
+        drawWindowFunc: Some(draw_cb),
+        handleMouseClickFunc: Some(mouse_cb),
+        handleKeyFunc: Some(key_cb),
+        handleCursorFunc: Some(cursor_cb),
+        handleMouseWheelFunc: Some(wheel_cb),
+        refcon: std::ptr::null_mut(),
+        decorateAsFloatingWindow: XPLMWindowDecoration::RoundRectangle,
+        layer: XPLMWindowLayer::FloatingWindows,
+        handleRightClickFunc: None,
+    };
+
+    let win = XPLMCreateWindowEx(&mut params);
+    XPLMSetWindowTitle(win, b"MumbledFlight\0".as_ptr() as *const c_char);
+    XPLMSetWindowPositioningMode(win, XPLMWindowPositioningMode::PositionFree, -1);
+    win
+}

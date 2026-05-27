@@ -21,6 +21,7 @@ pub async fn run_mumble_stack(
     single_client: bool,
     test_pos: Option<[f32; 3]>,
     server_addr: SocketAddr,
+    output_device: Option<String>,
 ) {
     // 1. MIC Chain
     let (mic_tx, _) = broadcast::channel::<Vec<f32>>(128);
@@ -60,7 +61,7 @@ pub async fn run_mumble_stack(
 
     // 3. Playback Mixer
     let (playback_tx, playback_rx) = mpsc::channel(1024);
-    start_playback(playback_rx);
+    start_playback(playback_rx, output_device);
 
     // 4. Ambient Client
     let st_a = Arc::clone(&state);

@@ -55,7 +55,7 @@ impl DataRefId {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CockpitState {
     pub pos: [f32; 3],
     pub rot: [f32; 3],
@@ -68,6 +68,22 @@ pub struct CockpitState {
     pub door: f32,
     /// CL650/doors/cabin/lavatory: 0.0 = closed, 1.0 = open
     pub door_lav: f32,
+}
+
+impl Default for CockpitState {
+    fn default() -> Self {
+        Self {
+            pos: [0.0; 3],
+            rot: [0.0; 3],
+            plane_rot: [0.0; 3],
+            seat: 0,
+            ic: false,
+            pa: false,
+            spkr: false,
+            door: 1.0,      // open by default — no spurious attenuation before DataRefs are read
+            door_lav: 1.0,
+        }
+    }
 }
 
 impl CockpitState {
