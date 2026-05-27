@@ -83,8 +83,8 @@ pub unsafe extern "C" fn XPluginStart(
     out_desc: *mut c_char,
 ) -> c_int {
     write_cstr(out_name, "MumbledFlight");
-    write_cstr(out_sig, "dev.mumbling.flight");
-    write_cstr(out_desc, "Spatial audio bridge for Mumble VoIP");
+    write_cstr(out_sig, "app.mzt.mumbled-flight");
+    write_cstr(out_desc, "Spatial audio with Mumble");
     logger::init();
     info!("XPluginStart");
     1
