@@ -2,8 +2,10 @@
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
+use std::path::PathBuf;
 use std::time::Instant;
 use log::{debug, warn, LevelFilter};
+use serde::{Deserialize, Serialize};
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use xplane_sys::{
@@ -13,10 +15,97 @@ use xplane_sys::{
     XPLMWindowPositioningMode,
 };
 
+// ── Persisted config ──────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct PluginConfig {
+    server: String,
+    flight_id: String,
+    user_name: String,
+    gain: f32,
+    output_device: String,
+    log_level: String,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            server: "127.0.0.1:64738".to_string(),
+            flight_id: String::new(),
+            user_name: String::new(),
+            gain: 1.0,
+            output_device: String::new(),
+            log_level: "info".to_string(),
+        }
+    }
+}
+
+impl PluginConfig {
+    fn load(path: &PathBuf) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &PathBuf) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match toml::to_string_pretty(self) {
+            Ok(s) => { let _ = std::fs::write(path, s); }
+            Err(e) => warn!("config save failed: {e}"),
+        }
+    }
+}
+
+// ── Draw helpers ─────────────────────────────────────────────────────────────
+
+/// Truncate `text` with `...` so it fits within `max_px` using ImGui's font metrics.
+fn fit_label<'a>(ui: &imgui::Ui, text: &'a str, max_px: f32) -> std::borrow::Cow<'a, str> {
+    if ui.calc_text_size(text)[0] <= max_px {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let ell_w = ui.calc_text_size("...")[0];
+    let avail = (max_px - ell_w).max(0.0);
+    let mut end = text.len();
+    while end > 0 {
+        while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+        if ui.calc_text_size(&text[..end])[0] <= avail { break; }
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}...", &text[..end]))
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn pactl_sink_descriptions() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(out) = std::process::Command::new("pactl").args(["list", "sinks"]).output() else {
+        return map;
+    };
+    let Ok(s) = std::str::from_utf8(&out.stdout) else { return map };
+    let mut current_name: Option<String> = None;
+    for line in s.lines() {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix("Name: ") {
+            current_name = Some(name.to_string());
+        } else if let Some(desc) = line.strip_prefix("Description: ") {
+            if let Some(name) = current_name.take() {
+                map.insert(name, desc.to_string());
+            }
+        }
+    }
+    map
+}
+
 // ── Public state ──────────────────────────────────────────────────────────────
 
 pub struct GuiState {
     pub window_id: XPLMWindowID,
+    config_path: PathBuf,
 
     // Lazily initialised on first draw call (GL context guaranteed active then).
     imgui_ctx: Option<imgui::Context>,
@@ -34,6 +123,7 @@ pub struct GuiState {
     pub user_name: String,
     pub gain: f32,
     pub output_devices: Vec<String>,
+    pub output_device_labels: Vec<String>,
     pub selected_device: i32,
     pub log_level: LevelFilter,
 
@@ -48,16 +138,60 @@ pub struct GuiState {
 unsafe impl Send for GuiState {}
 
 impl GuiState {
-    pub fn new(auto_user: Option<String>) -> Self {
-        let output_devices: Vec<String> = cpal::default_host()
+    pub fn new(auto_user: Option<String>, config_path: PathBuf) -> Self {
+        let mut output_devices: Vec<String> = cpal::default_host()
             .output_devices()
             .map(|it| it.filter_map(|d| d.name().ok()).collect())
             .unwrap_or_default();
+
+        // Append PipeWire/PulseAudio sinks not visible to ALSA (e.g. Bluetooth, virtual sinks).
+        // Also collect descriptions for friendlier display names.
+        #[cfg(target_os = "linux")]
+        let descriptions = {
+            let d = pactl_sink_descriptions();
+            if let Ok(out) = std::process::Command::new("pactl").args(["list", "short", "sinks"]).output() {
+                if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                    for sink in s.lines().filter_map(|l| l.split_whitespace().nth(1)) {
+                        if !output_devices.iter().any(|d| d == sink) {
+                            output_devices.push(sink.to_string());
+                        }
+                    }
+                }
+            }
+            d
+        };
+        #[cfg(not(target_os = "linux"))]
+        let descriptions = std::collections::HashMap::<String, String>::new();
+        let output_device_labels: Vec<String> = output_devices.iter()
+            .map(|name| descriptions.get(name).cloned().unwrap_or_else(|| name.clone()))
+            .collect();
+
+        let cfg = PluginConfig::load(&config_path);
+
+        let selected_device = output_devices.iter()
+            .position(|d| d == &cfg.output_device)
+            .map(|i| i as i32)
+            .unwrap_or(0);
+
+        let log_level = match cfg.log_level.to_lowercase().as_str() {
+            "error" => LevelFilter::Error,
+            "warn"  => LevelFilter::Warn,
+            "debug" => LevelFilter::Debug,
+            _       => LevelFilter::Info,
+        };
+        log::set_max_level(log_level);
+
+        let user_name = if cfg.user_name.is_empty() {
+            auto_user.unwrap_or_default()
+        } else {
+            cfg.user_name
+        };
 
         let window_id = unsafe { create_xplm_window() };
 
         Self {
             window_id,
+            config_path,
             imgui_ctx: None,
             imgui_renderer: None,
             last_time: Instant::now(),
@@ -65,18 +199,35 @@ impl GuiState {
             logged_coords: false,
             mouse_pos: [0.0; 2],
             mouse_down: [false; 5],
-            server: "127.0.0.1:64738".to_string(),
-            flight_id: String::new(),
-            user_name: auto_user.unwrap_or_default(),
-            gain: 1.0,
+            server: cfg.server,
+            flight_id: cfg.flight_id,
+            user_name,
+            gain: cfg.gain,
             output_devices,
-            selected_device: 0,
-            log_level: LevelFilter::Info,
+            output_device_labels,
+            selected_device,
+            log_level,
             should_connect: false,
             should_disconnect: false,
             is_connected: false,
             status: String::new(),
         }
+    }
+
+    pub fn save_config(&self) {
+        let output_device = self.output_devices
+            .get(self.selected_device as usize)
+            .cloned()
+            .unwrap_or_default();
+        let cfg = PluginConfig {
+            server: self.server.clone(),
+            flight_id: self.flight_id.clone(),
+            user_name: self.user_name.clone(),
+            gain: self.gain,
+            output_device,
+            log_level: self.log_level.to_string().to_lowercase(),
+        };
+        cfg.save(&self.config_path);
     }
 
     pub fn output_device(&self) -> Option<String> {
@@ -173,6 +324,7 @@ impl GuiState {
         let is_connected = self.is_connected;
         let status = self.status.clone();
         let output_devices = self.output_devices.clone();
+        let output_device_labels = self.output_device_labels.clone();
         let mouse_pos = self.mouse_pos;
         let mouse_down = self.mouse_down;
 
@@ -223,7 +375,7 @@ impl GuiState {
                         .build(&mut gain);
 
                     if !output_devices.is_empty() {
-                        let preview = output_devices
+                        let preview = output_device_labels
                             .get(selected_device as usize)
                             .map(|s| s.as_str())
                             .unwrap_or("(default)");
@@ -231,10 +383,13 @@ impl GuiState {
                         ui.same_line();
                         ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                         ui.set_next_item_width(fw);
+                        let _dis = ui.begin_disabled(is_connected);
                         if let Some(_tok) = ui.begin_combo("##dev", preview) {
-                            for (i, name) in output_devices.iter().enumerate() {
+                            let avail_w = ui.content_region_avail()[0];
+                            for (i, label) in output_device_labels.iter().enumerate() {
+                                let display = fit_label(ui, label, avail_w);
                                 if ui
-                                    .selectable_config(name)
+                                    .selectable_config(&*display)
                                     .selected(selected_device == i as i32)
                                     .build()
                                 {
@@ -242,6 +397,7 @@ impl GuiState {
                                 }
                             }
                         }
+                        drop(_dis);
                     }
 
                     const LOG_LEVELS: &[LevelFilter] = &[
@@ -308,6 +464,7 @@ impl GuiState {
         if log_level != self.log_level {
             self.log_level = log_level;
             log::set_max_level(log_level);
+            self.save_config();
         }
         if should_connect {
             self.should_connect = true;
@@ -331,6 +488,21 @@ impl GuiState {
                 self.mouse_pos[0], self.mouse_pos[1], self.screen_h);
         } else if status == XPLMMouseStatus::Up {
             self.mouse_down[0] = false;
+        }
+    }
+
+    pub fn on_mouse_move(&mut self, x: i32, y: i32) {
+        self.mouse_pos = [x as f32, (self.screen_h - y) as f32];
+    }
+
+    pub fn on_wheel(&mut self, x: i32, y: i32, axis: i32, clicks: i32) {
+        self.on_mouse_move(x, y);
+        let Some(ctx) = &mut self.imgui_ctx else { return };
+        let io = ctx.io_mut();
+        if axis == 0 {
+            io.mouse_wheel += clicks as f32;
+        } else {
+            io.mouse_wheel_h += clicks as f32;
         }
     }
 
@@ -377,22 +549,32 @@ unsafe fn create_xplm_window() -> XPLMWindowID {
         1
     }
     unsafe extern "C-unwind" fn cursor_cb(
-        _: XPLMWindowID,
-        _: c_int,
-        _: c_int,
+        _win: XPLMWindowID,
+        x: c_int,
+        y: c_int,
         _: *mut c_void,
     ) -> xplane_sys::XPLMCursorStatus {
+        let Ok(mut g) = crate::plugin_cell().lock() else {
+            return xplane_sys::XPLMCursorStatus::Default;
+        };
+        if let Some(ps) = g.as_mut() {
+            ps.gui.on_mouse_move(x, y);
+        }
         xplane_sys::XPLMCursorStatus::Default
     }
     unsafe extern "C-unwind" fn wheel_cb(
-        _: XPLMWindowID,
-        _: c_int,
-        _: c_int,
-        _: c_int,
-        _: c_int,
+        _win: XPLMWindowID,
+        x: c_int,
+        y: c_int,
+        wheel: c_int,
+        clicks: c_int,
         _: *mut c_void,
     ) -> c_int {
-        0
+        let Ok(mut g) = crate::plugin_cell().lock() else { return 1 };
+        if let Some(ps) = g.as_mut() {
+            ps.gui.on_wheel(x, y, wheel, clicks);
+        }
+        1
     }
     unsafe extern "C-unwind" fn key_cb(
         _: XPLMWindowID,

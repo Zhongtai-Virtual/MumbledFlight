@@ -67,16 +67,26 @@ fn select_input_device(filter: Option<&str>) -> cpal::Device {
 fn select_output_device(preferred: Option<&str>) -> cpal::Device {
     let host = cpal::default_host();
     if let Some(f) = preferred {
+        // First: try an exact ALSA device name match.
         if let Ok(mut devs) = host.output_devices() {
-            if let Some(d) = devs.find(|d| d.name().unwrap_or_default().to_lowercase().contains(f)) {
+            if let Some(d) = devs.find(|d| d.name().unwrap_or_default().to_lowercase().contains(&f.to_lowercase())) {
                 return d;
             }
         }
+        // Not an ALSA device — treat as a PipeWire/PulseAudio sink name.
+        // Set both routing env vars so the selected sink is honoured regardless
+        // of whether we open the `pipewire` or `pulse` ALSA bridge device.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            std::env::set_var("PIPEWIRE_NODE", f); // native PipeWire ALSA plugin
+            std::env::set_var("PULSE_SINK", f);    // pipewire-pulse compat layer
+        }
     }
+    // Prefer the pipewire ALSA bridge, fall back to pulse, then system default.
     host.output_devices().ok()
         .and_then(|mut d| d.find(|d| {
             let name = d.name().unwrap_or_default().to_lowercase();
-            (name == "pulse" || name == "pipewire") &&
+            (name == "pipewire" || name == "pulse") &&
             d.supported_output_configs().map(|mut c| c.any(|cfg| cfg.channels() == 2)).unwrap_or(false)
         }))
         .or_else(|| host.default_output_device())

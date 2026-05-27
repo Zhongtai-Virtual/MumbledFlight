@@ -128,14 +128,16 @@ unsafe fn find_dataref(id: DataRefId) -> Option<(XPLMDataRef, DataRefId, bool)> 
 pub unsafe extern "C" fn XPluginEnable() -> c_int {
     info!("XPluginEnable");
 
+    let mut buf = vec![0i8; 512];
+    XPLMGetSystemPath(buf.as_mut_ptr());
+    let xp_path = CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_string();
+
     // Auto-detect username from CL650 config; user can override in the GUI.
-    let auto_user = {
-        let mut buf = vec![0i8; 512];
-        XPLMGetSystemPath(buf.as_mut_ptr());
-        let xp_path = CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_string();
-        Config::read_cl60_config(PathBuf::from(&xp_path).as_path())
-            .map(|c| c.user_name)
-    };
+    let auto_user = Config::read_cl60_config(PathBuf::from(&xp_path).as_path())
+        .map(|c| c.user_name);
+
+    let config_path = PathBuf::from(&xp_path)
+        .join("Resources/plugins/MumbledFlight/config.toml");
 
     let mut datarefs: Vec<(XPLMDataRef, DataRefId, bool)> = Vec::new();
     let mut pending_datarefs: Vec<DataRefId> = Vec::new();
@@ -173,7 +175,7 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
     XPLMCheckMenuItem(menu_id, 0, XPLMMenuCheck::Unchecked);
     debug!("menu created");
 
-    let gui = gui::GuiState::new(auto_user);
+    let gui = gui::GuiState::new(auto_user, config_path);
 
     *plugin_cell().lock().unwrap() = Some(PluginState {
         datarefs,
@@ -194,6 +196,7 @@ pub unsafe extern "C" fn XPluginDisable() {
     XPLMUnregisterFlightLoopCallback(Some(flight_loop_cb), std::ptr::null_mut());
     let mut guard = plugin_cell().lock().unwrap();
     if let Some(ps) = guard.as_ref() {
+        ps.gui.save_config();
         XPLMDestroyMenu(ps.menu_id);
     }
     *guard = None;
@@ -289,6 +292,7 @@ fn start_connection(ps: &mut PluginState) {
     ps.connection = Some(MumbleConnection { cockpit_state, _runtime: runtime });
     ps.gui.is_connected = true;
     ps.gui.status = format!("Connected to {}", ps.gui.server);
+    ps.gui.save_config();
     info!("connected — user={} flight={}", ps.gui.user_name, ps.gui.flight_id);
 }
 
