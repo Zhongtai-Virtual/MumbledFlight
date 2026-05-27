@@ -9,8 +9,8 @@ use log::{info, error};
 use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use mumbling_cockpit_standalone::state::CockpitState;
-use mumbling_cockpit_standalone::mumble;
+use mumbled_flight_core::state::CockpitState;
+use mumbled_flight_core::mumble;
 use crate::config::Config;
 
 #[derive(Parser, Debug)]

@@ -1,0 +1,20 @@
+[package]
+name = "mumbled-flight-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = { version = "0.6", features = ["codec"] }
+tokio-native-tls = "0.3"
+futures = "0.3"
+openssl = "0.10"
+native-tls = "0.2"
+mumble-protocol = "0.4"
+cpal = "0.15"
+audiopus = { version = "0.3.0-rc.0" }
+byteorder = "1.5"
+bytes = "1.0"
+serde_json = "1.0"
+anyhow = "1.0"
+log = "0.4"

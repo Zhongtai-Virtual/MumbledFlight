@@ -1,0 +1,19 @@
+[package]
+name = "mumbled-flight-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mumbled-flight"
+path = "src/main.rs"
+
+[dependencies]
+mumbled-flight-core = { path = "../mumbled-flight-core" }
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
