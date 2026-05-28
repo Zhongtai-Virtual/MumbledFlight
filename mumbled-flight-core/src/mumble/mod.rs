@@ -6,7 +6,7 @@ pub mod voip;
 use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
 use tokio::sync::{broadcast, mpsc};
-use crate::state::CockpitState;
+use crate::state::{CockpitState, SharedCockpitZone};
 use self::voip::MumbleVoipClient;
 use self::audio::{start_capture, start_playback, create_linux_sink};
 
@@ -66,7 +66,14 @@ pub async fn run_mumble_stack(
     let (playback_tx, playback_rx) = mpsc::channel(1024);
     start_playback(playback_rx, output_device);
 
-    // 4. Ambient Client
+    // 4. Ambient Client — joins zone-specific channel, switches on zone change
+    let fbo_ch      = format!("{}_ambient_fbo",      session_id);
+    let aircraft_ch = format!("{}_ambient_aircraft", session_id);
+    let initial_zone = state.lock().unwrap().zone;
+    let initial_ambient_ch = match initial_zone {
+        SharedCockpitZone::InFbo              => fbo_ch.clone(),
+        SharedCockpitZone::AroundOrInAircraft => aircraft_ch.clone(),
+    };
     let st_a = Arc::clone(&state);
     let mic_rx_a = mic_tx.subscribe();
     let pb_tx_a = playback_tx.clone();
@@ -78,7 +85,8 @@ pub async fn run_mumble_stack(
             context: format!("{}_ambient", sid_a),
             is_ic: false,
             is_radio: false,
-            target_channel: format!("{}_ambient", sid_a),
+            target_channel: initial_ambient_ch,
+            zone_channels: Some((fbo_ch, aircraft_ch)),
             denoise,
             test_pos,
         };
@@ -102,6 +110,7 @@ pub async fn run_mumble_stack(
             is_ic: true,
             is_radio: false,
             target_channel: format!("{}_ic", sid_i),
+            zone_channels: None,
             denoise,
             test_pos,
         };
@@ -122,6 +131,7 @@ pub async fn run_mumble_stack(
                 is_ic: false,
                 is_radio: true,
                 target_channel: format!("{}_radio", sid_r),
+                zone_channels: None,
                 denoise,
                 test_pos,
             };

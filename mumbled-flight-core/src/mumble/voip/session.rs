@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio_native_tls::TlsStream;
 use tokio_util::codec::Framed;
 
-use crate::state::CockpitState;
+use crate::state::{CockpitState, SharedCockpitZone};
 use super::client::MumbleVoipClient;
 use super::spatial::{decode_opus_packet, parse_position};
 
@@ -33,6 +33,9 @@ pub struct Session {
     pub voice_seq:        u64,
     pub was_transmitting: bool,
     pub decoders:         HashMap<u32, Decoder>,
+    // Zone-channel tracking for ambient clients (None on IC/radio clients).
+    current_zone:         Option<SharedCockpitZone>,
+    pending_channel:      Option<(String, SharedCockpitZone)>,
 }
 
 impl Session {
@@ -49,6 +52,8 @@ impl Session {
             voice_seq: 0,
             was_transmitting: false,
             decoders: HashMap::new(),
+            current_zone: None,
+            pending_channel: None,
         })
     }
 
@@ -72,15 +77,105 @@ impl Session {
         let cid  = cs.get_channel_id();
         self.channels.insert(name.clone(), cid);
 
-        if self.channel_joined || name != target { return Ok(()); }
+        // Initial join on first discovery of the target channel.
+        if !self.channel_joined && name == target {
+            let Some(sess) = self.my_session else { return Ok(()) };
+            let mut msg = msgs::UserState::new();
+            msg.set_session(sess);
+            msg.set_channel_id(cid);
+            control.send(ControlPacket::UserState(Box::new(msg))).await?;
+            self.channel_joined = true;
+            info!("[VoIP] Joined channel '{}' (id {})", name, cid);
+        }
+
+        // Pending zone-channel move — channel was just created by the server.
+        if let Some((ref pending_name, _)) = self.pending_channel.clone() {
+            if name == *pending_name {
+                self.send_channel_move(cid, control).await?;
+                self.pending_channel = None;
+                // current_zone is updated when the server echoes back our UserState.
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Sends a UserState channel-move request. Does NOT update current_zone —
+    /// that only happens when the server echoes the move back via on_user_state.
+    async fn send_channel_move(&mut self, cid: u32, control: &mut Control) -> Result<()> {
         let Some(sess) = self.my_session else { return Ok(()) };
         let mut msg = msgs::UserState::new();
         msg.set_session(sess);
         msg.set_channel_id(cid);
         control.send(ControlPacket::UserState(Box::new(msg))).await?;
-        self.channel_joined = true;
-        info!("[VoIP] Joined channel '{}' (id {})", name, cid);
         Ok(())
+    }
+
+    /// Server echoed our own UserState — confirm current_zone if we moved to a zone channel.
+    fn on_user_state(&mut self, us: &msgs::UserState, client: &MumbleVoipClient) {
+        if self.my_session != Some(us.get_session()) { return; }
+        if !us.has_channel_id() { return; }
+        let cid = us.get_channel_id();
+
+        let Some((ref fbo_ch, ref aircraft_ch)) = client.zone_channels else { return };
+        let confirmed = if self.channels.get(fbo_ch) == Some(&cid) {
+            Some(SharedCockpitZone::InFbo)
+        } else if self.channels.get(aircraft_ch) == Some(&cid) {
+            Some(SharedCockpitZone::AroundOrInAircraft)
+        } else {
+            None
+        };
+
+        if let Some(zone) = confirmed {
+            if self.current_zone != Some(zone) {
+                self.current_zone = Some(zone);
+                info!("[VoIP:{}] Zone channel confirmed: {:?}", client.username, zone);
+            }
+        }
+    }
+
+    /// Called periodically for ambient clients. Retries on every tick until the server
+    /// confirms the move via UserState — no silent failure, unlimited retry.
+    pub async fn check_zone_channel(
+        &mut self,
+        client: &MumbleVoipClient,
+        state: &Arc<Mutex<CockpitState>>,
+        control: &mut Control,
+    ) -> Result<()> {
+        let Some((ref fbo_ch, ref aircraft_ch)) = client.zone_channels else { return Ok(()) };
+        let zone = state.lock().unwrap().zone;
+        if self.current_zone == Some(zone) { return Ok(()); }
+
+        let ch_name = match zone {
+            SharedCockpitZone::InFbo              => fbo_ch.clone(),
+            SharedCockpitZone::AroundOrInAircraft => aircraft_ch.clone(),
+        };
+
+        // Retry the move via cached channel ID on every tick.
+        if let Some(&cid) = self.channels.get(&ch_name) {
+            self.send_channel_move(cid, control).await?;
+        }
+
+        // Send a creation request only once per target channel to avoid spamming.
+        // pending_channel is cleared either when ChannelState arrives (creation confirmed)
+        // or when the zone target changes (a different ch_name is needed).
+        let already_pending = self.pending_channel.as_ref().map(|(n, _)| n.as_str()) == Some(ch_name.as_str());
+        if !already_pending {
+            self.pending_channel = Some((ch_name.clone(), zone));
+            let mut ch = msgs::ChannelState::new();
+            ch.set_parent(0);
+            ch.set_name(ch_name.clone());
+            ch.set_temporary(true);
+            control.send(ControlPacket::ChannelState(Box::new(ch))).await?;
+            info!("[VoIP:{}] Requesting zone channel '{}' ({:?})", client.username, ch_name, zone);
+        }
+        Ok(())
+    }
+
+    fn on_channel_remove(&mut self, cr: &msgs::ChannelRemove) {
+        let cid = cr.get_channel_id();
+        self.channels.retain(|_, v| *v != cid);
+        debug!("[VoIP] Channel {} removed", cid);
     }
 
     pub async fn on_server_sync(
@@ -123,9 +218,14 @@ impl Session {
         control: &mut Control,
     ) -> Result<()> {
         match msg {
-            ControlPacket::CryptSetup(s)   => self.on_crypt_setup(&s),
-            ControlPacket::ChannelState(c) => self.on_channel_state(&c, &client.target_channel, control).await?,
-            ControlPacket::ServerSync(s)   => self.on_server_sync(&s, client, control).await?,
+            ControlPacket::CryptSetup(s)       => self.on_crypt_setup(&s),
+            ControlPacket::ChannelState(c)     => self.on_channel_state(&c, &client.target_channel, control).await?,
+            ControlPacket::ChannelRemove(c)    => self.on_channel_remove(&c),
+            ControlPacket::ServerSync(s)       => self.on_server_sync(&s, client, control).await?,
+            ControlPacket::UserState(u)        => self.on_user_state(&u, client),
+            // PermissionDenied on zone-channel creation means the channel already exists.
+            // The move retry via cached ID will fire on the next check_zone_channel tick.
+            ControlPacket::PermissionDenied(_) => {}
             _ => {}
         }
         Ok(())

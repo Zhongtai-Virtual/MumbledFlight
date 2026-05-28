@@ -36,6 +36,9 @@ pub struct MumbleVoipClient {
     pub is_ic: bool,
     pub is_radio: bool,
     pub target_channel: String,
+    /// For ambient clients: (fbo_channel_name, aircraft_channel_name).
+    /// None for IC and radio clients — they never switch channels.
+    pub zone_channels: Option<(String, String)>,
     #[allow(dead_code)]
     pub denoise: bool,
     pub test_pos: Option<[f32; 3]>,
@@ -54,16 +57,18 @@ impl MumbleVoipClient {
         let udp = UdpSocket::bind("0.0.0.0:0").await?;
         udp.connect(&server_addr).await?;
 
-        let mut session  = Session::new()?;
-        let mut udp_buf  = vec![0u8; 2048];
-        let mut tcp_ping = tokio::time::interval(Duration::from_secs(5));
-        let mut udp_ping = tokio::time::interval(Duration::from_secs(1));
+        let mut session    = Session::new()?;
+        let mut udp_buf    = vec![0u8; 2048];
+        let mut tcp_ping   = tokio::time::interval(Duration::from_secs(5));
+        let mut udp_ping   = tokio::time::interval(Duration::from_secs(1));
+        let mut zone_check = tokio::time::interval(Duration::from_secs(5));
 
         info!("[VoIP:{}] Listening for voice...", self.username);
         loop {
             tokio::select! {
-                _ = tcp_ping.tick() => session.send_tcp_ping(&mut control).await,
-                _ = udp_ping.tick() => session.send_udp_ping(&udp),
+                _ = tcp_ping.tick()   => session.send_tcp_ping(&mut control).await,
+                _ = udp_ping.tick()   => session.send_udp_ping(&udp),
+                _ = zone_check.tick() => session.check_zone_channel(self, &state, &mut control).await?,
                 result = udp.recv_from(&mut udp_buf) => {
                     let Ok((len, _)) = result else { continue };
                     session.on_udp_recv(&udp_buf, len, self, &state, &playback_tx).await;
