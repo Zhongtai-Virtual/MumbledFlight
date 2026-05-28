@@ -21,6 +21,23 @@ impl CockpitSeat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SharedCockpitZone {
+    #[default]
+    InFbo            = 0,
+    AroundOrInAircraft = 2,
+}
+
+impl SharedCockpitZone {
+    pub fn from_int(n: i32) -> Result<Self, i32> {
+        match n {
+            0 => Ok(Self::InFbo),
+            2 => Ok(Self::AroundOrInAircraft),
+            _ => Err(n),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SharedCockpitRole {
     #[default]
     Pilot      = 0,
@@ -48,6 +65,7 @@ pub enum DataRefId {
     PlanePsi,
     PilotSeat,
     SharedCkptRole,
+    SharedCkptZone,
     Acp1Ic, Acp1Mic, Acp1Spkr,
     Acp2Ic, Acp2Mic, Acp2Spkr,
     DoorCabin,
@@ -66,6 +84,7 @@ impl DataRefId {
             DataRefId::PlanePsi => "sim/flightmodel/position/psi",
             DataRefId::PilotSeat => "CL650/pilot_seat",
             DataRefId::SharedCkptRole => "CL650/shared_ckpt/my_role",
+            DataRefId::SharedCkptZone => "CL650/shared_ckpt/my_zone",
             DataRefId::Acp1Ic => "CL650/ACP/1/ic",
             DataRefId::Acp1Mic => "CL650/ACP/1/mic_value",
             DataRefId::Acp1Spkr => "CL650/ACP/1/spkr_tog",
@@ -84,6 +103,7 @@ impl DataRefId {
             DataRefId::PlanePsi,
             DataRefId::PilotSeat,
             DataRefId::SharedCkptRole,
+            DataRefId::SharedCkptZone,
             DataRefId::Acp1Ic, DataRefId::Acp1Mic, DataRefId::Acp1Spkr,
             DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
             DataRefId::DoorCabin,
@@ -103,6 +123,7 @@ pub struct CockpitState {
     pub plane_rot: [f32; 3],
     pub seat: CockpitSeat,
     pub role: SharedCockpitRole,
+    pub zone: SharedCockpitZone,
     pub ic: bool,
     pub pa: bool,
     pub spkr: bool,
@@ -120,6 +141,7 @@ impl Default for CockpitState {
             plane_rot: [0.0; 3],
             seat: CockpitSeat::Captain,
             role: SharedCockpitRole::Pilot,
+            zone: SharedCockpitZone::InFbo,
             ic: false,
             pa: false,
             spkr: false,
@@ -165,6 +187,10 @@ impl CockpitState {
                 Ok(r)  => self.role = r,
                 Err(n) => warn!("[State] unknown shared cockpit role value {n}"),
             },
+            DataRefId::SharedCkptZone => match SharedCockpitZone::from_int(Self::val_to_int(val)) {
+                Ok(z)  => self.zone = z,
+                Err(n) => warn!("[State] unknown shared cockpit zone value {n}"),
+            },
 
             DataRefId::Acp1Ic => if is_pilot { self.ic = Self::val_to_bool(val) },
             DataRefId::Acp1Mic => if is_pilot { self.pa = Self::val_to_int(val) == 7 },
@@ -177,8 +203,11 @@ impl CockpitState {
             DataRefId::DoorLavatory => self.door_lav = val.as_f64().unwrap_or(1.0) as f32,
         }
 
-        if self.ic != old_state.ic || self.pa != old_state.pa || self.seat != old_state.seat || self.role != old_state.role {
-            debug!("[State] seat={:?} role={:?} ic={} pa={} (via {:?})", self.seat, self.role, self.ic, self.pa, id);
+        if self.ic != old_state.ic || self.pa != old_state.pa
+            || self.seat != old_state.seat || self.role != old_state.role || self.zone != old_state.zone
+        {
+            debug!("[State] seat={:?} role={:?} zone={:?} ic={} pa={} (via {:?})",
+                self.seat, self.role, self.zone, self.ic, self.pa, id);
         }
     }
 
