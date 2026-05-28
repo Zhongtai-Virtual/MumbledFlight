@@ -7,8 +7,15 @@ mod window;
 
 use std::os::raw::c_int;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use log::{debug, LevelFilter};
+
+struct DeviceSnapshot {
+    output_names:  Vec<String>,
+    output_labels: Vec<String>,
+    input_names:   Vec<String>,
+}
 
 use xplane_sys::{XPLMMouseStatus, XPLMTakeKeyboardFocus, XPLMWindowID};
 
@@ -24,7 +31,7 @@ pub struct GuiState {
     imgui_renderer: Option<imgui_glow_renderer::AutoRenderer>,
 
     last_time: Instant,
-    last_device_refresh: Instant,
+    pending_devices: Arc<Mutex<Option<DeviceSnapshot>>>,
     screen_h: i32,
     logged_coords: bool,
     mouse_pos: [f32; 2],
@@ -90,13 +97,27 @@ impl GuiState {
 
         let window_id = unsafe { window::create_xplm_window() };
 
+        let pending_devices: Arc<Mutex<Option<DeviceSnapshot>>> = Arc::new(Mutex::new(None));
+        {
+            // Background thread refreshes the device list every 2 s off the main thread.
+            // Holds a Weak ref — exits automatically when GuiState (and the Arc) is dropped.
+            let weak = Arc::downgrade(&pending_devices);
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(2));
+                let Some(arc) = weak.upgrade() else { return };
+                let (output_names, output_labels) = devices::enumerate_output_devices();
+                let input_names = devices::enumerate_input_devices();
+                *arc.lock().unwrap() = Some(DeviceSnapshot { output_names, output_labels, input_names });
+            });
+        }
+
         Self {
             window_id,
             config_path,
             imgui_ctx: None,
             imgui_renderer: None,
             last_time: Instant::now(),
-            last_device_refresh: Instant::now() - Duration::from_secs(10),
+            pending_devices,
             screen_h: 0,
             logged_coords: false,
             mouse_pos: [0.0; 2],
@@ -145,35 +166,32 @@ impl GuiState {
             .cloned()
     }
 
-    /// Re-enumerate output and input devices, preserving current selections by name.
-    /// Throttled to at most once every 2 seconds; first call is always immediate.
+    /// Apply a pending device snapshot produced by the background refresh thread.
+    /// Non-blocking — the flight loop calls this at 20 Hz with no pactl overhead.
     pub fn refresh_output_devices(&mut self) {
-        if self.last_device_refresh.elapsed() < Duration::from_secs(2) {
-            return;
-        }
-        self.last_device_refresh = Instant::now();
+        let snap = self.pending_devices.lock().unwrap().take();
+        let Some(snap) = snap else { return };
+
+        debug!("device refresh: {} sinks = {:?}", snap.output_names.len(), snap.output_names);
 
         let current_out = self.output_device();
-        let (devices, labels) = devices::enumerate_output_devices();
-        debug!("device refresh: {} sinks = {:?}", devices.len(), devices);
         self.selected_device = current_out
-            .and_then(|name| devices.iter().position(|d| *d == name))
+            .and_then(|name| snap.output_names.iter().position(|d| *d == name))
             .map(|i| i as i32)
             .unwrap_or(0);
-        self.output_devices = devices;
-        self.output_device_labels = labels;
+        self.output_devices  = snap.output_names;
+        self.output_device_labels = snap.output_labels;
 
         let current_radio = self.radio_source_str().to_string();
-        let input_devices = devices::enumerate_input_devices();
         self.selected_radio = match current_radio.as_str() {
             ""              => 0,
             RADIO_AUTO_SINK => 1,
-            name            => input_devices.iter()
+            name            => snap.input_names.iter()
                 .position(|d| d == name)
                 .map(|i| i as i32 + 2)
                 .unwrap_or(0),
         };
-        self.radio_input_devices = input_devices;
+        self.radio_input_devices = snap.input_names;
     }
 
     /// Returns `(radio_source, auto_sink)` for passing to `run_mumble_stack`.
