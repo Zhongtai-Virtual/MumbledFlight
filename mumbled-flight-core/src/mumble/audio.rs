@@ -84,12 +84,18 @@ fn pipewire_device(node: Option<&str>, input: bool) -> cpal::Device {
     if input {
         host.input_devices().ok()
             .and_then(|mut d| d.find(is_pw))
-            .or_else(|| host.default_input_device())
+            .or_else(|| {
+                warn!("[Audio] 'pipewire' input device not found, falling back to system default");
+                host.default_input_device()
+            })
             .expect("No PipeWire input device")
     } else {
         host.output_devices().ok()
             .and_then(|mut d| d.find(is_pw))
-            .or_else(|| host.default_output_device())
+            .or_else(|| {
+                warn!("[Audio] 'pipewire' output device not found, falling back to system default");
+                host.default_output_device()
+            })
             .expect("No PipeWire output device")
     }
 }
