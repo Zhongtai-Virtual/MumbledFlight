@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
-use mumbled_flight_core::{mumble, mumble::{TestClient, VoipStatuses}, state::CockpitState};
+use mumbled_flight_core::{mumble, mumble::{MicSource, TestClient, VoipStatuses}, state::CockpitState};
 
 use crate::PluginState;
 
@@ -33,7 +33,15 @@ pub fn start(ps: &mut PluginState) {
     };
 
     let cockpit_state = Arc::new(Mutex::new(CockpitState::default()));
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            let msg = format!("Failed to start async runtime: {e}");
+            warn!("{msg}");
+            ps.gui.status = msg;
+            return;
+        }
+    };
 
     let state_clone = Arc::clone(&cockpit_state);
     let user_name = ps.gui.user_name.clone();
@@ -58,7 +66,7 @@ pub fn start(ps: &mut PluginState) {
             radio_source,
             auto_sink,
             TestClient::default(),
-            false,
+            MicSource::Real,
             None,
             server_addr,
             ambient_output,

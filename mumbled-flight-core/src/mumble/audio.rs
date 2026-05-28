@@ -338,43 +338,74 @@ fn pipewire_device(node: Option<&str>, input: bool) -> cpal::Device {
 /// Generates a 500 Hz sine tone via ffmpeg and feeds it into the mic pipeline.
 /// Requires ffmpeg on PATH. Intended for CLI test/debug mode only.
 pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, mic_gain: Arc<AtomicU32>) {
+    run_ffmpeg_capture(
+        vec![
+            "-f".into(), "lavfi".into(),
+            "-i".into(), "sine=f=500:r=48000".into(),
+        ],
+        "[Audio:Sine]",
+        true,
+        tx,
+        mic_gain,
+    );
+}
+
+/// Decodes an audio file via ffmpeg and feeds it into the mic pipeline, looping on EOF.
+/// Requires ffmpeg on PATH. Intended for CLI test/debug mode only.
+pub fn start_file_capture(path: std::path::PathBuf, tx: mpsc::Sender<Vec<f32>>, mic_gain: Arc<AtomicU32>) {
+    run_ffmpeg_capture(
+        vec!["-i".into(), path.to_string_lossy().into_owned()],
+        "[Audio:File]",
+        true,
+        tx,
+        mic_gain,
+    );
+}
+
+/// Spawns ffmpeg with the given input args, piping decoded f32le mono 48 kHz audio into `tx`.
+/// Loops from the beginning on EOF when `loop_on_eof` is true.
+fn run_ffmpeg_capture(
+    input_args: Vec<String>,
+    log_tag: &'static str,
+    loop_on_eof: bool,
+    tx: mpsc::Sender<Vec<f32>>,
+    mic_gain: Arc<AtomicU32>,
+) {
     std::thread::spawn(move || {
-        let mut child = match std::process::Command::new("ffmpeg")
-            .args([
-                "-f", "lavfi",
-                "-i", "sine=f=500:r=48000",
-                "-f", "f32le", "-ar", "48000", "-ac", "1",
-                "-",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => { error!("[Audio:Sine] ffmpeg spawn failed: {e}"); return; }
-        };
-
-        info!("[Audio:Sine] 500 Hz sine tone active");
-
-        let mut stdout = child.stdout.take().unwrap();
-        const SAMPLES: usize = 960; // 20 ms @ 48 kHz
+        const SAMPLES: usize = 960;
         const FRAME_DUR: std::time::Duration = std::time::Duration::from_millis(20);
-        let mut buf = [0u8; SAMPLES * 4]; // f32le = 4 bytes/sample
         let mut next = std::time::Instant::now();
         loop {
-            if stdout.read_exact(&mut buf).is_err() { break; }
-            let gain = f32::from_bits(mic_gain.load(Ordering::Relaxed));
-            let frame: Vec<f32> = buf.chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * gain)
-                .collect();
-            let _ = tx.try_send(frame);
-            // Sleep until the next 20 ms boundary to match real capture pacing.
-            next += FRAME_DUR;
-            if let Some(remaining) = next.checked_duration_since(std::time::Instant::now()) {
-                std::thread::sleep(remaining);
+            let mut cmd = std::process::Command::new("ffmpeg");
+            for arg in &input_args { cmd.arg(arg); }
+            cmd.args(["-f", "f32le", "-ar", "48000", "-ac", "1", "-"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => { error!("{log_tag} ffmpeg spawn failed: {e}"); return; }
+            };
+
+            info!("{log_tag} ffmpeg active");
+
+            let mut stdout = child.stdout.take().unwrap();
+            let mut buf = [0u8; SAMPLES * 4];
+            loop {
+                if stdout.read_exact(&mut buf).is_err() { break; }
+                let gain = f32::from_bits(mic_gain.load(Ordering::Relaxed));
+                let frame: Vec<f32> = buf.chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * gain)
+                    .collect();
+                let _ = tx.try_send(frame);
+                next += FRAME_DUR;
+                if let Some(rem) = next.checked_duration_since(std::time::Instant::now()) {
+                    std::thread::sleep(rem);
+                }
             }
+            let _ = child.wait();
+            if !loop_on_eof { break; }
         }
-        let _ = child.wait(); // reap so it doesn't linger as a zombie
     });
 }
 
@@ -482,11 +513,12 @@ fn pw_capture_loop(
         id:    ParamType::EnumFormat.as_raw(),
         properties: audio_info.into(),
     };
+    // Serialising a fixed AudioInfoRaw into a Cursor<Vec> is infallible.
     let values: Vec<u8> = PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &Value::Object(obj),
-    ).unwrap().0.into_inner();
-    let mut params = [Pod::from_bytes(&values).unwrap()];
+    ).expect("SPA pod serialize").0.into_inner();
+    let mut params = [Pod::from_bytes(&values).expect("SPA pod deserialize")];
 
     stream.connect(
         Direction::Input,
@@ -515,16 +547,21 @@ pub fn start_capture(
         let _stream = {
             let _guard = pipewire_env_lock().lock().unwrap();
             let device = pipewire_device(device_name_filter.as_deref(), true);
-            let config = device.supported_input_configs()
-                .expect("Failed to get configs")
-                .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
-                .next()
-                .expect("HARDWARE ERROR: Your device does not natively support 48,000Hz.")
-                .with_sample_rate(cpal::SampleRate(48000));
+            let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
+            let config = match device.supported_input_configs() {
+                Ok(cfgs) => cfgs
+                    .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
+                    .next(),
+                Err(e) => { error!("[Audio:Capture] failed to query configs for '{device_name}': {e}"); return; }
+            };
+            let config = match config {
+                Some(c) => c.with_sample_rate(cpal::SampleRate(48000)),
+                None => { error!("[Audio:Capture] '{device_name}' does not support 48 kHz — microphone unavailable"); return; }
+            };
             let num_channels = config.channels() as usize;
-            info!("[Audio:Capture] Active: {} (48kHz, {} ch)", device.name().unwrap_or_default(), num_channels);
+            info!("[Audio:Capture] Active: {device_name} (48kHz, {num_channels} ch)");
             let mut capture_buffer = Vec::new();
-            let s = device.build_input_stream(
+            let s = match device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
                     let gain = f32::from_bits(mic_gain.load(Ordering::Relaxed));
@@ -542,10 +579,16 @@ pub fn start_capture(
                         let _ = tx.try_send(frame);
                     }
                 },
-                |err| error!("[Audio:Capture] {}", err),
+                |err| error!("[Audio:Capture] stream error: {err}"),
                 None,
-            ).expect("Failed to build input stream");
-            s.play().expect("Failed to start input stream");
+            ) {
+                Ok(s) => s,
+                Err(e) => { error!("[Audio:Capture] failed to build input stream for '{device_name}': {e}"); return; }
+            };
+            if let Err(e) = s.play() {
+                error!("[Audio:Capture] failed to start stream for '{device_name}': {e}");
+                return;
+            }
             s
         }; // PIPEWIRE_NODE lock released — stream is already connected
         loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
@@ -564,19 +607,28 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
         let (stream, device_channels) = {
             let _guard = pipewire_env_lock().lock().unwrap();
             let device = pipewire_device(preferred_device.as_deref(), false);
+            let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
 
-            let supported_configs = device.supported_output_configs().expect("Failed to get configs");
-            let config = supported_configs
-                .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
-                .find(|c| c.channels() == 2)
-                .or_else(|| device.supported_output_configs().unwrap().next())
-                .expect("HARDWARE ERROR: Could not find a valid output config.")
-                .with_sample_rate(cpal::SampleRate(48000));
+            let config = match device.supported_output_configs() {
+                Ok(cfgs) => {
+                    let preferred = cfgs
+                        .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
+                        .find(|c| c.channels() == 2);
+                    match preferred {
+                        Some(c) => c,
+                        None => match device.supported_output_configs().ok().and_then(|mut it| it.next()) {
+                            Some(c) => c,
+                            None => { error!("[Audio:Out] no usable output config for '{device_name}'"); return; }
+                        }
+                    }
+                }
+                Err(e) => { error!("[Audio:Out] failed to query configs for '{device_name}': {e}"); return; }
+            }.with_sample_rate(cpal::SampleRate(48000));
 
             let device_channels = config.channels() as usize;
-            info!("[Audio:Out] Sink: {} (48kHz, {} ch)", device.name().unwrap_or_default(), device_channels);
+            info!("[Audio:Out] Sink: {device_name} (48kHz, {device_channels} ch)");
 
-            let s = device.build_output_stream(
+            let s = match device.build_output_stream(
                 &config.into(),
                 move |data: &mut [f32], _| {
                     let mut lock = pending_samples_cb.lock().unwrap();
@@ -592,10 +644,16 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
                         data[i] = sample;
                     }
                 },
-                |err| error!("[Audio:Out] {}", err),
+                |err| error!("[Audio:Out] stream error: {err}"),
                 None,
-            ).expect("Failed to build output stream");
-            s.play().expect("Failed to start output stream");
+            ) {
+                Ok(s) => s,
+                Err(e) => { error!("[Audio:Out] failed to build output stream for '{device_name}': {e}"); return; }
+            };
+            if let Err(e) = s.play() {
+                error!("[Audio:Out] failed to start stream for '{device_name}': {e}");
+                return;
+            }
             (s, device_channels)
         }; // PIPEWIRE_NODE lock released — stream is already connected
 

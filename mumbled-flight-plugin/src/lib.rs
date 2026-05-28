@@ -4,7 +4,7 @@ mod connection;
 mod gui;
 mod logger;
 
-use log::{debug, info};
+use log::info;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::path::PathBuf;
@@ -102,17 +102,21 @@ pub unsafe extern "C" fn XPluginStop() {
 
 #[no_mangle]
 pub unsafe extern "C" fn XPluginEnable() -> c_int {
-    info!("XPluginEnable");
+    info!("XPluginEnable start");
 
     let mut buf = vec![0i8; 512];
     XPLMGetSystemPath(buf.as_mut_ptr());
     let xp_path = CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_string();
+    info!("XP path: {xp_path}");
 
     let auto_user =
         Config::read_cl60_config(PathBuf::from(&xp_path).as_path()).map(|c| c.user_name);
+    info!("auto_user: {:?}", auto_user);
 
     let config_path = PathBuf::from(&xp_path).join("Resources/plugins/MumbledFlight/config.toml");
+    info!("config path: {}", config_path.display());
 
+    info!("resolving DataRefs...");
     let mut datarefs: Vec<(XPLMDataRef, DataRefId, bool)> = Vec::new();
     let mut pending_datarefs: Vec<DataRefId> = Vec::new();
     for &id in DataRefId::all() {
@@ -128,13 +132,19 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
         pending_datarefs.len()
     );
 
+    info!("creating menu...");
     let plugins_menu = XPLMFindPluginsMenu();
+    if plugins_menu.is_null() {
+        // Non-fatal — menu will be absent but the plugin continues.
+        log::error!("XPLMFindPluginsMenu returned null — no Plugins menu available");
+    }
     let sub_idx = XPLMAppendMenuItem(
         plugins_menu,
         b"MumbledFlight\0".as_ptr() as *const c_char,
         std::ptr::null_mut(),
         0,
     );
+    info!("menu sub_idx: {sub_idx}");
     let menu_id = XPLMCreateMenu(
         b"MumbledFlight\0".as_ptr() as *const c_char,
         plugins_menu,
@@ -142,6 +152,9 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
         Some(menu_handler),
         std::ptr::null_mut(),
     );
+    if menu_id.is_null() {
+        log::error!("XPLMCreateMenu returned null — plugin menu will not appear");
+    }
     XPLMAppendMenuItem(
         menu_id,
         b"Show Window\0".as_ptr() as *const c_char,
@@ -149,10 +162,13 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
         0,
     );
     XPLMCheckMenuItem(menu_id, 0, XPLMMenuCheck::Unchecked);
-    debug!("menu created");
+    info!("menu created (id={menu_id:?})");
 
+    info!("creating GUI state...");
     let gui = gui::GuiState::new(auto_user, config_path);
+    info!("GUI state created, window_id={:?}", gui.window_id);
 
+    info!("storing plugin state...");
     *plugin_cell().lock().unwrap() = Some(PluginState {
         datarefs,
         pending_datarefs,
@@ -162,7 +178,9 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
         retry_ticks: 0,
     });
 
+    info!("registering flight loop...");
     XPLMRegisterFlightLoopCallback(Some(flight_loop_cb), 1.0 / 20.0, std::ptr::null_mut());
+    info!("XPluginEnable done");
     1
 }
 

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicU32;
 use std::time::{Duration, Instant};
-use log::{debug, LevelFilter};
+use log::{debug, info, warn, LevelFilter};
 
 struct DeviceSnapshot {
     output_names:  Vec<String>,
@@ -76,7 +76,10 @@ unsafe impl Send for GuiState {}
 
 impl GuiState {
     pub fn new(auto_user: Option<String>, config_path: PathBuf) -> Self {
+        info!("GuiState::new: loading config from {}", config_path.display());
         let cfg = config::PluginConfig::load(&config_path);
+        info!("GuiState::new: config loaded (server={})", cfg.server);
+
         // Device lists start empty — the background thread populates them immediately
         // off the XPLM main thread to avoid blocking XPluginEnable.
         let output_devices       = vec![];
@@ -100,7 +103,9 @@ impl GuiState {
             cfg.user_name
         };
 
+        info!("GuiState::new: creating XPLM window...");
         let window_id = unsafe { window::create_xplm_window() };
+        info!("GuiState::new: XPLM window created ({window_id:?})");
 
         let pending_devices: Arc<Mutex<Option<DeviceSnapshot>>> = Arc::new(Mutex::new(None));
         {
@@ -108,26 +113,46 @@ impl GuiState {
             // Holds a Weak ref — exits automatically when GuiState (and the Arc) is dropped.
             let weak = Arc::downgrade(&pending_devices);
             std::thread::spawn(move || loop {
-                let Some(arc) = weak.upgrade() else { return };
-                #[cfg(target_os = "linux")]
-                let (output_names, output_labels, input_names) = {
-                    use mumbled_flight_core::mumble::audio::VIRTUAL_SINK_NAME;
-                    // Single PW round-trip for both sinks and sources on Linux.
-                    let (sinks, sources) = enumerate_pw_devices();
-                    let sinks: Vec<_> = sinks.into_iter()
-                        .filter(|s| s.name != VIRTUAL_SINK_NAME)
-                        .collect();
-                    let names  = sinks.iter().map(|s| s.name.clone()).collect();
-                    let labels = sinks.into_iter().map(|s| s.description).collect();
-                    (names, labels, sources)
-                };
-                #[cfg(not(target_os = "linux"))]
-                let (output_names, output_labels, input_names) = {
-                    let (names, labels) = devices::enumerate_output_devices();
-                    let inputs = devices::enumerate_input_devices();
-                    (names, labels, inputs)
-                };
-                *arc.lock().unwrap() = Some(DeviceSnapshot { output_names, output_labels, input_names });
+                // Catch panics so a device-enumeration failure never kills the background thread.
+                let result = std::panic::catch_unwind(|| {
+                    #[cfg(target_os = "linux")]
+                    {
+                        use mumbled_flight_core::mumble::audio::VIRTUAL_SINK_NAME;
+                        // Single PW round-trip for both sinks and sources on Linux.
+                        info!("[DeviceEnum] enumerating PipeWire devices...");
+                        let (sinks, sources) = enumerate_pw_devices();
+                        info!("[DeviceEnum] found {} sinks, {} sources", sinks.len(), sources.len());
+                        let sinks: Vec<_> = sinks.into_iter()
+                            .filter(|s| s.name != VIRTUAL_SINK_NAME)
+                            .collect();
+                        let names  = sinks.iter().map(|s| s.name.clone()).collect();
+                        let labels = sinks.into_iter().map(|s| s.description).collect();
+                        (names, labels, sources)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let (names, labels) = devices::enumerate_output_devices();
+                        let inputs = devices::enumerate_input_devices();
+                        (names, labels, inputs)
+                    }
+                });
+                match result {
+                    Ok((output_names, output_labels, input_names)) => {
+                        let Some(arc) = weak.upgrade() else { return };
+                        *arc.lock().unwrap() = Some(DeviceSnapshot { output_names, output_labels, input_names });
+                    }
+                    Err(e) => {
+                        let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                            (*s).to_string()
+                        } else if let Some(s) = e.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic payload".to_string()
+                        };
+                        warn!("[DeviceEnum] panic during device enumeration: {msg}");
+                    }
+                }
+                let Some(_arc) = weak.upgrade() else { return };
                 std::thread::sleep(Duration::from_secs(2));
             });
         }

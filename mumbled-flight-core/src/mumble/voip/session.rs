@@ -344,13 +344,24 @@ impl Session {
             return;
         };
 
-        let decoder = self.decoders.entry(session_id).or_insert_with(|| {
-            debug!(
-                "[VoIP:{}] Detected remote speaker (session {})",
-                client.username, session_id
-            );
-            Decoder::new(SampleRate::Hz48000, Channels::Mono).expect("decoder")
-        });
+        let decoder = if !self.decoders.contains_key(&session_id) {
+            match Decoder::new(SampleRate::Hz48000, Channels::Mono) {
+                Ok(d) => {
+                    debug!(
+                        "[VoIP:{}] Detected remote speaker (session {session_id})",
+                        client.username
+                    );
+                    self.decoders.insert(session_id, d);
+                    self.decoders.get_mut(&session_id).unwrap()
+                }
+                Err(e) => {
+                    log::error!("[VoIP:{}] failed to create Opus decoder for session {session_id}: {e}", client.username);
+                    return;
+                }
+            }
+        } else {
+            self.decoders.get_mut(&session_id).unwrap()
+        };
         let Some(mono) = decode_opus_packet(decoder, &data) else {
             return;
         };
