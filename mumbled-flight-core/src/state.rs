@@ -249,12 +249,30 @@ impl CockpitState {
         v.round() as i32
     }
 
+    /// Whether a seat-specific DataRef belongs to the seat currently occupied. ACP1 and
+    /// contwheel0 are the Captain's (left seat); ACP2 and contwheel1 the First Officer's
+    /// (right seat). This is the one place that resolves "which physical control is mine."
+    /// Non-seat-specific DataRefs always apply, so they are not listed here.
+    fn owns(&self, id: DataRefId) -> bool {
+        use DataRefId::*;
+        let is_left = self.seat == CockpitSeat::Captain;
+        match id {
+            Acp1Ic | Acp1Rt | Acp1Mic | Acp1SpkrTog | Acp1SpkrVol | Acp1IntSvcTog
+            | Acp1IntSvcVol | Contwheel0Ic | Contwheel0Rt => is_left,
+            Acp2Ic | Acp2Rt | Acp2Mic | Acp2SpkrTog | Acp2SpkrVol | Acp2IntSvcTog
+            | Acp2IntSvcVol | Contwheel1Ic | Contwheel1Rt => !is_left,
+            _ => true,
+        }
+    }
+
     /// Applies a raw f32 DataRef value to the cockpit state. This is the single update path:
     /// the plugin reads f32/i32 XPLM handles directly, and the CLI bridge converts its JSON
     /// values to f32 at the bridge boundary (see `cli/src/xplane/bridge.rs`).
     pub fn update_from_float(&mut self, id: DataRefId, val: f32) {
-        let is_left_seat = self.seat == CockpitSeat::Captain; // pilot_seat 0 = left, 1 = right
         let old_state = self.clone();
+
+        // Seat-specific controls (ACP*, contwheel*) only apply when `owns(id)` is true.
+        let mine = self.owns(id);
 
         match id {
             DataRefId::HeadX => self.pos[0] = val,
@@ -277,35 +295,21 @@ impl CockpitState {
                 Err(n) => warn!("[State] unknown shared cockpit zone value {n}"),
             },
 
-            DataRefId::Acp1Ic          => if  is_left_seat { self.acp_ic = Self::f32_to_bool(val) },
-            DataRefId::Acp1Rt          => if  is_left_seat { self.acp_rt = Self::f32_to_bool(val) },
-            DataRefId::Acp1Mic         => if is_left_seat {
+            DataRefId::Acp1Ic        | DataRefId::Acp2Ic        => if mine { self.acp_ic   = Self::f32_to_bool(val) },
+            DataRefId::Acp1Rt        | DataRefId::Acp2Rt        => if mine { self.acp_rt   = Self::f32_to_bool(val) },
+            DataRefId::Acp1Mic       | DataRefId::Acp2Mic       => if mine {
                 match AcpMicSelection::from_int(Self::f32_to_int(val)) {
                     Ok(m)  => self.mic = m,
-                    Err(n) => warn!("[State] unknown ACP1 mic value {n}"),
+                    Err(n) => warn!("[State] unknown ACP mic value {n}"),
                 }
             },
-            DataRefId::Acp1SpkrTog     => if is_left_seat { self.spkr_tog = Self::f32_to_bool(val) },
-            DataRefId::Acp1SpkrVol     => if is_left_seat { self.spkr_vol = val },
-            DataRefId::Acp1IntSvcTog   => if is_left_seat { self.ic_tog   = Self::f32_to_bool(val) },
-            DataRefId::Acp1IntSvcVol   => if is_left_seat { self.ic_vol   = val },
+            DataRefId::Acp1SpkrTog   | DataRefId::Acp2SpkrTog   => if mine { self.spkr_tog = Self::f32_to_bool(val) },
+            DataRefId::Acp1SpkrVol   | DataRefId::Acp2SpkrVol   => if mine { self.spkr_vol = val },
+            DataRefId::Acp1IntSvcTog | DataRefId::Acp2IntSvcTog => if mine { self.ic_tog   = Self::f32_to_bool(val) },
+            DataRefId::Acp1IntSvcVol | DataRefId::Acp2IntSvcVol => if mine { self.ic_vol   = val },
+            DataRefId::Contwheel0Ic  | DataRefId::Contwheel1Ic  => if mine { self.contwheel_ic = Self::f32_to_bool(val) },
+            DataRefId::Contwheel0Rt  | DataRefId::Contwheel1Rt  => if mine { self.contwheel_rt = Self::f32_to_bool(val) },
 
-            DataRefId::Acp2Ic          => if !is_left_seat { self.acp_ic = Self::f32_to_bool(val) },
-            DataRefId::Acp2Rt          => if !is_left_seat { self.acp_rt = Self::f32_to_bool(val) },
-            DataRefId::Acp2Mic         => if !is_left_seat {
-                match AcpMicSelection::from_int(Self::f32_to_int(val)) {
-                    Ok(m)  => self.mic = m,
-                    Err(n) => warn!("[State] unknown ACP2 mic value {n}"),
-                }
-            },
-            DataRefId::Acp2SpkrTog     => if !is_left_seat { self.spkr_tog = Self::f32_to_bool(val) },
-            DataRefId::Acp2SpkrVol     => if !is_left_seat { self.spkr_vol = val },
-            DataRefId::Acp2IntSvcTog   => if !is_left_seat { self.ic_tog   = Self::f32_to_bool(val) },
-            DataRefId::Acp2IntSvcVol   => if !is_left_seat { self.ic_vol   = val },
-            DataRefId::Contwheel0Ic    => if  is_left_seat { self.contwheel_ic = Self::f32_to_bool(val) },
-            DataRefId::Contwheel1Ic    => if !is_left_seat { self.contwheel_ic = Self::f32_to_bool(val) },
-            DataRefId::Contwheel0Rt    => if  is_left_seat { self.contwheel_rt = Self::f32_to_bool(val) },
-            DataRefId::Contwheel1Rt    => if !is_left_seat { self.contwheel_rt = Self::f32_to_bool(val) },
             DataRefId::DoorCabin    => self.door     = val,
             DataRefId::DoorLavatory => self.door_lav = val,
             DataRefId::XpilotCom1Rx     => self.com1_rx  = Self::f32_to_bool(val),
