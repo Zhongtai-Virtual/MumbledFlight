@@ -10,6 +10,7 @@ pub struct PluginConfig {
     pub server: String,
     pub flight_id: String,
     pub user_name: String,
+    /// Microphone input gain multiplier (applies to captured audio only, not playback).
     pub gain: f32,
     pub denoise: bool,
     pub output_device: String,

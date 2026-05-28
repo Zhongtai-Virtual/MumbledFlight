@@ -18,29 +18,33 @@ use tokio::sync::mpsc;
 use tokio_native_tls::TlsStream;
 use tokio_util::codec::Framed;
 
-use crate::state::{CockpitState, SharedCockpitRole, SharedCockpitZone};
 use super::client::MumbleVoipClient;
 use super::spatial::{decode_opus_packet, parse_position};
+use crate::state::{CockpitState, SharedCockpitRole, SharedCockpitZone};
 
 pub type Control = Framed<TlsStream<TcpStream>, ClientControlCodec>;
 
 pub struct Session {
-    pub crypt:            Option<CryptState<Serverbound, Clientbound>>,
-    pub my_session:       Option<u32>,
-    pub channels:         HashMap<String, u32>,
-    pub channel_joined:   bool,
-    pub encoder:          Encoder,
-    pub voice_seq:        u64,
+    pub crypt: Option<CryptState<Serverbound, Clientbound>>,
+    pub my_session: Option<u32>,
+    pub channels: HashMap<String, u32>,
+    pub channel_joined: bool,
+    pub encoder: Encoder,
+    pub voice_seq: u64,
     pub was_transmitting: bool,
-    pub decoders:         HashMap<u32, Decoder>,
+    pub decoders: HashMap<u32, Decoder>,
     // Zone-channel tracking for ambient clients (None on IC/radio clients).
-    current_zone:         Option<SharedCockpitZone>,
-    pending_channel:      Option<(String, SharedCockpitZone)>,
+    current_zone: Option<SharedCockpitZone>,
+    pending_channel: Option<(String, SharedCockpitZone)>,
 }
 
 impl Session {
     pub fn new() -> Result<Self> {
-        let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, audiopus::Application::Voip)?;
+        let mut encoder = Encoder::new(
+            SampleRate::Hz48000,
+            Channels::Mono,
+            audiopus::Application::Voip,
+        )?;
         encoder.set_bitrate(Bitrate::BitsPerSecond(64000))?;
         encoder.set_bandwidth(Bandwidth::Fullband)?;
         Ok(Self {
@@ -59,10 +63,21 @@ impl Session {
 
     pub fn on_crypt_setup(&mut self, setup: &msgs::CryptSetup) {
         let key_raw = setup.get_key();
-        if key_raw.is_empty() { return; }
-        let key:     [u8; 16] = match key_raw.try_into()                  { Ok(k) => k, _ => return };
-        let c_nonce: [u8; 16] = match setup.get_client_nonce().try_into() { Ok(n) => n, _ => return };
-        let s_nonce: [u8; 16] = match setup.get_server_nonce().try_into() { Ok(n) => n, _ => return };
+        if key_raw.is_empty() {
+            return;
+        }
+        let key: [u8; 16] = match key_raw.try_into() {
+            Ok(k) => k,
+            _ => return,
+        };
+        let c_nonce: [u8; 16] = match setup.get_client_nonce().try_into() {
+            Ok(n) => n,
+            _ => return,
+        };
+        let s_nonce: [u8; 16] = match setup.get_server_nonce().try_into() {
+            Ok(n) => n,
+            _ => return,
+        };
         self.crypt = Some(CryptState::new_from(key, c_nonce, s_nonce));
     }
 
@@ -72,18 +87,24 @@ impl Session {
         target: &str,
         control: &mut Control,
     ) -> Result<()> {
-        if !cs.has_name() || !cs.has_channel_id() { return Ok(()); }
+        if !cs.has_name() || !cs.has_channel_id() {
+            return Ok(());
+        }
         let name = cs.get_name().to_string();
-        let cid  = cs.get_channel_id();
+        let cid = cs.get_channel_id();
         self.channels.insert(name.clone(), cid);
 
         // Initial join on first discovery of the target channel.
         if !self.channel_joined && name == target {
-            let Some(sess) = self.my_session else { return Ok(()) };
+            let Some(sess) = self.my_session else {
+                return Ok(());
+            };
             let mut msg = msgs::UserState::new();
             msg.set_session(sess);
             msg.set_channel_id(cid);
-            control.send(ControlPacket::UserState(Box::new(msg))).await?;
+            control
+                .send(ControlPacket::UserState(Box::new(msg)))
+                .await?;
             self.channel_joined = true;
             info!("[VoIP] Joined channel '{}' (id {})", name, cid);
         }
@@ -103,21 +124,31 @@ impl Session {
     /// Sends a UserState channel-move request. Does NOT update current_zone —
     /// that only happens when the server echoes the move back via on_user_state.
     async fn send_channel_move(&mut self, cid: u32, control: &mut Control) -> Result<()> {
-        let Some(sess) = self.my_session else { return Ok(()) };
+        let Some(sess) = self.my_session else {
+            return Ok(());
+        };
         let mut msg = msgs::UserState::new();
         msg.set_session(sess);
         msg.set_channel_id(cid);
-        control.send(ControlPacket::UserState(Box::new(msg))).await?;
+        control
+            .send(ControlPacket::UserState(Box::new(msg)))
+            .await?;
         Ok(())
     }
 
     /// Server echoed our own UserState — confirm current_zone if we moved to a zone channel.
     fn on_user_state(&mut self, us: &msgs::UserState, client: &MumbleVoipClient) {
-        if self.my_session != Some(us.get_session()) { return; }
-        if !us.has_channel_id() { return; }
+        if self.my_session != Some(us.get_session()) {
+            return;
+        }
+        if !us.has_channel_id() {
+            return;
+        }
         let cid = us.get_channel_id();
 
-        let Some((ref fbo_ch, ref aircraft_ch)) = client.zone_channels else { return };
+        let Some((ref fbo_ch, ref aircraft_ch)) = client.zone_channels else {
+            return;
+        };
         let confirmed = if self.channels.get(fbo_ch) == Some(&cid) {
             Some(SharedCockpitZone::InFbo)
         } else if self.channels.get(aircraft_ch) == Some(&cid) {
@@ -129,7 +160,10 @@ impl Session {
         if let Some(zone) = confirmed {
             if self.current_zone != Some(zone) {
                 self.current_zone = Some(zone);
-                info!("[VoIP:{}] Zone channel confirmed: {:?}", client.username, zone);
+                info!(
+                    "[VoIP:{}] Zone channel confirmed: {:?}",
+                    client.username, zone
+                );
             }
         }
     }
@@ -142,12 +176,16 @@ impl Session {
         state: &Arc<Mutex<CockpitState>>,
         control: &mut Control,
     ) -> Result<()> {
-        let Some((ref fbo_ch, ref aircraft_ch)) = client.zone_channels else { return Ok(()) };
+        let Some((ref fbo_ch, ref aircraft_ch)) = client.zone_channels else {
+            return Ok(());
+        };
         let zone = state.lock().unwrap().zone;
-        if self.current_zone == Some(zone) { return Ok(()); }
+        if self.current_zone == Some(zone) {
+            return Ok(());
+        }
 
         let ch_name = match zone {
-            SharedCockpitZone::InFbo              => fbo_ch.clone(),
+            SharedCockpitZone::InFbo => fbo_ch.clone(),
             SharedCockpitZone::AroundOrInAircraft => aircraft_ch.clone(),
         };
 
@@ -159,15 +197,21 @@ impl Session {
         // Send a creation request only once per target channel to avoid spamming.
         // pending_channel is cleared either when ChannelState arrives (creation confirmed)
         // or when the zone target changes (a different ch_name is needed).
-        let already_pending = self.pending_channel.as_ref().map(|(n, _)| n.as_str()) == Some(ch_name.as_str());
+        let already_pending =
+            self.pending_channel.as_ref().map(|(n, _)| n.as_str()) == Some(ch_name.as_str());
         if !already_pending {
             self.pending_channel = Some((ch_name.clone(), zone));
             let mut ch = msgs::ChannelState::new();
             ch.set_parent(0);
             ch.set_name(ch_name.clone());
             ch.set_temporary(true);
-            control.send(ControlPacket::ChannelState(Box::new(ch))).await?;
-            info!("[VoIP:{}] Requesting zone channel '{}' ({:?})", client.username, ch_name, zone);
+            control
+                .send(ControlPacket::ChannelState(Box::new(ch)))
+                .await?;
+            info!(
+                "[VoIP:{}] Requesting zone channel '{}' ({:?})",
+                client.username, ch_name, zone
+            );
         }
         Ok(())
     }
@@ -190,23 +234,38 @@ impl Session {
         state_msg.set_session(sync.get_session());
         state_msg.set_plugin_context(client.context.as_bytes().to_vec());
         state_msg.set_plugin_identity(client.username.clone());
-        control.send(ControlPacket::UserState(Box::new(state_msg))).await?;
-        info!("[VoIP:{}] Context active: '{}'", client.username, client.context);
+        control
+            .send(ControlPacket::UserState(Box::new(state_msg)))
+            .await?;
+        info!(
+            "[VoIP:{}] Context active: '{}'",
+            client.username, client.context
+        );
 
         if let Some(&cid) = self.channels.get(&client.target_channel) {
             let mut move_msg = msgs::UserState::new();
             move_msg.set_session(sync.get_session());
             move_msg.set_channel_id(cid);
-            control.send(ControlPacket::UserState(Box::new(move_msg))).await?;
+            control
+                .send(ControlPacket::UserState(Box::new(move_msg)))
+                .await?;
             self.channel_joined = true;
-            info!("[VoIP:{}] Joined existing channel '{}'", client.username, client.target_channel);
+            info!(
+                "[VoIP:{}] Joined existing channel '{}'",
+                client.username, client.target_channel
+            );
         } else {
-            info!("[VoIP:{}] Channel '{}' not found, requesting creation", client.username, client.target_channel);
+            info!(
+                "[VoIP:{}] Channel '{}' not found, requesting creation",
+                client.username, client.target_channel
+            );
             let mut ch = msgs::ChannelState::new();
             ch.set_parent(0);
             ch.set_name(client.target_channel.clone());
             ch.set_temporary(true);
-            control.send(ControlPacket::ChannelState(Box::new(ch))).await?;
+            control
+                .send(ControlPacket::ChannelState(Box::new(ch)))
+                .await?;
         }
         Ok(())
     }
@@ -218,11 +277,14 @@ impl Session {
         control: &mut Control,
     ) -> Result<()> {
         match msg {
-            ControlPacket::CryptSetup(s)       => self.on_crypt_setup(&s),
-            ControlPacket::ChannelState(c)     => self.on_channel_state(&c, &client.target_channel, control).await?,
-            ControlPacket::ChannelRemove(c)    => self.on_channel_remove(&c),
-            ControlPacket::ServerSync(s)       => self.on_server_sync(&s, client, control).await?,
-            ControlPacket::UserState(u)        => self.on_user_state(&u, client),
+            ControlPacket::CryptSetup(s) => self.on_crypt_setup(&s),
+            ControlPacket::ChannelState(c) => {
+                self.on_channel_state(&c, &client.target_channel, control)
+                    .await?
+            }
+            ControlPacket::ChannelRemove(c) => self.on_channel_remove(&c),
+            ControlPacket::ServerSync(s) => self.on_server_sync(&s, client, control).await?,
+            ControlPacket::UserState(u) => self.on_user_state(&u, client),
             // PermissionDenied on zone-channel creation means the channel already exists.
             // The move retry via cached ID will fire on the next check_zone_channel tick.
             ControlPacket::PermissionDenied(_) => {}
@@ -241,32 +303,66 @@ impl Session {
     ) {
         // Decrypt in an inner block so the crypt borrow ends before we touch decoders.
         let packet = {
-            let Some(cs) = self.crypt.as_mut() else { return };
+            let Some(cs) = self.crypt.as_mut() else {
+                return;
+            };
             let mut src = BytesMut::from(&buf[..len]);
-            match cs.decrypt(&mut src) { Ok(Ok(p)) => p, _ => return }
+            match cs.decrypt(&mut src) {
+                Ok(Ok(p)) => p,
+                _ => return,
+            }
         };
-        let VoicePacket::Audio { session_id, payload, position_info, .. } = packet else { return };
-        if self.my_session == Some(session_id) || client.is_radio { return; }
+        let VoicePacket::Audio {
+            session_id,
+            payload,
+            position_info,
+            ..
+        } = packet
+        else {
+            return;
+        };
+        if self.my_session == Some(session_id) || client.is_radio {
+            return;
+        }
 
-        // IC RX: gated by role, ic_spkr toggle, and scaled by ic_vol.
-        let ic_vol = if client.is_ic {
+        let rx_vol = if client.is_ic {
+            // IC RX: gated by role, ic_spkr toggle, and scaled by rx_vol.
             let s = state.lock().unwrap();
-            if s.role != SharedCockpitRole::Pilot || !s.ic_spkr { return; }
+            if s.role != SharedCockpitRole::Pilot || !s.ic_spkr {
+                return;
+            }
             s.ic_vol
         } else {
+            // 1.0 for ambient
             1.0
         };
 
-        let VoicePacketPayload::Opus(data, _) = payload else { return };
+        let VoicePacketPayload::Opus(data, _) = payload else {
+            return;
+        };
 
         let decoder = self.decoders.entry(session_id).or_insert_with(|| {
-            debug!("[VoIP:{}] Detected remote speaker (session {})", client.username, session_id);
+            debug!(
+                "[VoIP:{}] Detected remote speaker (session {})",
+                client.username, session_id
+            );
             Decoder::new(SampleRate::Hz48000, Channels::Mono).expect("decoder")
         });
-        let Some(mono) = decode_opus_packet(decoder, &data) else { return };
-        let mut stereo = client.spatialize(&mono, parse_position(position_info), state, session_id);
-        if ic_vol != 1.0 {
-            for s in &mut stereo { *s *= ic_vol; }
+        let Some(mono) = decode_opus_packet(decoder, &data) else {
+            return;
+        };
+        // IC simulates headphone playback — flat equal-power stereo, no spatialization.
+        let mut stereo = if client.is_ic {
+            let mut out = Vec::with_capacity(mono.len() * 2);
+            for &s in &mono { out.push(s); out.push(s); }
+            out
+        } else {
+            client.spatialize(&mono, parse_position(position_info), state, session_id)
+        };
+        if rx_vol != 1.0 {
+            for s in &mut stereo {
+                *s *= rx_vol;
+            }
         }
         let _ = playback_tx.send(stereo).await;
     }
@@ -280,16 +376,42 @@ impl Session {
     ) -> Result<()> {
         let is_active = {
             let s = state.lock().unwrap();
-            if client.is_radio   { s.spkr }
-            else if client.is_ic { s.role == SharedCockpitRole::Pilot && s.ic }
-            else                 { true }
+            if client.is_radio {
+                s.spkr
+            } else if client.is_ic {
+                s.role == SharedCockpitRole::Pilot && s.ic
+            } else {
+                true
+            }
         };
-        let Some(cs) = self.crypt.as_mut() else { return Ok(()) };
+        let Some(cs) = self.crypt.as_mut() else {
+            return Ok(());
+        };
         if is_active {
-            client.send_audio(&pcm, &mut self.encoder, &mut self.voice_seq, udp, cs, state, false).await?;
+            client
+                .send_audio(
+                    &pcm,
+                    &mut self.encoder,
+                    &mut self.voice_seq,
+                    udp,
+                    cs,
+                    state,
+                    false,
+                )
+                .await?;
             self.was_transmitting = true;
         } else if self.was_transmitting {
-            client.send_audio(&pcm, &mut self.encoder, &mut self.voice_seq, udp, cs, state, true).await?;
+            client
+                .send_audio(
+                    &pcm,
+                    &mut self.encoder,
+                    &mut self.voice_seq,
+                    udp,
+                    cs,
+                    state,
+                    true,
+                )
+                .await?;
             self.was_transmitting = false;
         }
         Ok(())
@@ -302,8 +424,12 @@ impl Session {
     }
 
     pub fn send_udp_ping(&mut self, udp: &UdpSocket) {
-        let Some(cs) = self.crypt.as_mut() else { return };
-        let pkt = VoicePacket::<Serverbound>::Ping { timestamp: unix_now_ms() };
+        let Some(cs) = self.crypt.as_mut() else {
+            return;
+        };
+        let pkt = VoicePacket::<Serverbound>::Ping {
+            timestamp: unix_now_ms(),
+        };
         let mut dest = BytesMut::new();
         cs.encrypt(pkt, &mut dest);
         let _ = udp.try_send(&dest);

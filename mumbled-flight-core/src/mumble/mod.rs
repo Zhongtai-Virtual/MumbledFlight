@@ -14,7 +14,7 @@ pub async fn run_mumble_stack(
     state: Arc<Mutex<CockpitState>>,
     user_name: String,
     session_id: String,
-    gain: f32,
+    mic_gain: f32,
     denoise: bool,
     radio_source: Option<String>,
     auto_sink: bool,
@@ -31,9 +31,9 @@ pub async fn run_mumble_stack(
     std::thread::spawn(move || {
         let (sync_tx, mut sync_rx) = mpsc::channel(128);
         if sine_input {
-            audio::start_sine_capture(sync_tx, gain);
+            audio::start_sine_capture(sync_tx, mic_gain);
         } else {
-            start_capture(sync_tx, d_mic, gain, 0.0, None, false);
+            start_capture(sync_tx, d_mic, mic_gain, 0.0, None, false);
         }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);

@@ -111,7 +111,7 @@ impl GuiState {
                     row("Flight ID", "##fid", &mut flight_id);
                     row("Username",  "##usr", &mut user_name);
 
-                    ui.text("Gain");
+                    ui.text("Mic Gain");
                     ui.same_line();
                     ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                     ui.set_next_item_width(fw);
