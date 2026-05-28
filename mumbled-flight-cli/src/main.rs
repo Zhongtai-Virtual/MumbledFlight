@@ -80,8 +80,8 @@ struct Args {
     #[arg(long, value_name = "ZONE", num_args = 0..=1, default_missing_value = "aircraft")]
     zone: Option<CliZone>,
 
-    /// Transmit from a fixed position in Mumble space (X,Y,Z meters).
-    /// Use without a value for the origin (0,0,0), or supply coordinates: --pos 2,0,7
+    /// Transmit from a fixed position given in X-Plane coordinates (X,Y,Z meters).
+    /// Use without a value for the origin (0,0,0), or supply coordinates: --pos 2,0,-6.8
     #[arg(long, value_name = "X,Y,Z", num_args = 0..=1, default_missing_value = "0,0,0")]
     pos: Option<String>,
 
@@ -136,10 +136,11 @@ async fn main() -> Result<()> {
             .split(',')
             .map(|c| c.trim().parse().unwrap_or(0.0))
             .collect();
+        // Convert X-Plane → Mumble: negate Z (XP aft-positive, Mumble forward-positive).
         [
             p.first().copied().unwrap_or(0.0),
             p.get(1).copied().unwrap_or(0.0),
-            p.get(2).copied().unwrap_or(0.0),
+            -p.get(2).copied().unwrap_or(0.0),
         ]
     });
     // Pre-configure state for single-client test mode — DataRef bridge is skipped below.

@@ -88,7 +88,10 @@ pub async fn run_mumble_stack(
     // Helper: allocate a status slot and register it in the shared map.
     let mk_status = |label: &str| -> Arc<Mutex<VoipClientStatus>> {
         let slot = Arc::new(Mutex::new(VoipClientStatus::Connecting));
-        statuses.lock().unwrap().insert(label.to_string(), Arc::clone(&slot));
+        statuses
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), Arc::clone(&slot));
         slot
     };
 
@@ -128,50 +131,54 @@ pub async fn run_mumble_stack(
 
     // 5. Intercom Client
     if !matches!(test_client, TestClient::Pa | TestClient::Radio) {
-    let st_i = Arc::clone(&state);
-    let mic_rx_i = mic_tx.subscribe();
-    let pb_tx_i = ic_pb_tx;
-    let un_i = user_name.clone();
-    let sid_i = session_id.clone();
-    let status_i = mk_status("IC");
-    tokio::spawn(async move {
-        let client = MumbleVoipClient {
-            username: format!("{}_ic", un_i),
-            context: format!("{}_ic", sid_i),
-            role: ClientRole::Ic,
-            voip_status: status_i,
-            target_channel: format!("{}_ic", sid_i),
-            zone_channels: None,
-            denoise,
-            test_pos,
-        };
-        let _ = client.run(server_addr, st_i, mic_rx_i, pb_tx_i).await;
-    });
+        let st_i = Arc::clone(&state);
+        let mic_rx_i = mic_tx.subscribe();
+        let pb_tx_i = ic_pb_tx;
+        let un_i = user_name.clone();
+        let sid_i = session_id.clone();
+        let status_i = mk_status("IC");
+        tokio::spawn(async move {
+            let client = MumbleVoipClient {
+                username: format!("{}_ic", un_i),
+                context: format!("{}_ic", sid_i),
+                role: ClientRole::Ic,
+                voip_status: status_i,
+                target_channel: format!("{}_ic", sid_i),
+                zone_channels: None,
+                denoise,
+                test_pos,
+            };
+            let _ = client.run(server_addr, st_i, mic_rx_i, pb_tx_i).await;
+        });
     } // end IC guard
 
-    // 6. PA (Public Address) Client — fixed cabin position, always in aircraft channel
-    // TODO: replace with actual cabin speaker position once confirmed
-    const PA_POSITION: [f32; 3] = [0.0, 0.0, 0.0];
+    // 6. PA (Public Address) Client — always in aircraft channel
+    // TODO: PA is broadcast from multiple speakers (PSUs above each seat, lavatory ceiling).
+    //       A single fixed point source does not accurately simulate this. Consider rendering
+    //       PA as a non-positional flat mix, or blending several source positions, to replicate
+    //       the enveloping "speakers everywhere" effect. Door attenuation should also be
+    //       bypassed since the speakers are inside the fuselage.
+    const PA_POSITION: [f32; 3] = [0.0, 0.0, 0.0]; // placeholder until rendering is redesigned
     if !matches!(test_client, TestClient::Ic | TestClient::Radio) {
-    let st_pa = Arc::clone(&state);
-    let mic_rx_pa = mic_tx.subscribe();
-    let pb_tx_pa = ambient_pb_tx.clone();
-    let un_pa = user_name.clone();
-    let sid_pa = session_id.clone();
-    let status_pa = mk_status("PA");
-    tokio::spawn(async move {
-        let client = MumbleVoipClient {
-            username: format!("{}_PA", un_pa),
-            context: format!("{}_ambient", sid_pa),
-            role: ClientRole::Pa,
-            voip_status: status_pa,
-            target_channel: format!("{}_ambient_aircraft", sid_pa),
-            zone_channels: None,
-            denoise,
-            test_pos: Some(PA_POSITION),
-        };
-        let _ = client.run(server_addr, st_pa, mic_rx_pa, pb_tx_pa).await;
-    });
+        let st_pa = Arc::clone(&state);
+        let mic_rx_pa = mic_tx.subscribe();
+        let pb_tx_pa = ambient_pb_tx.clone();
+        let un_pa = user_name.clone();
+        let sid_pa = session_id.clone();
+        let status_pa = mk_status("PA");
+        tokio::spawn(async move {
+            let client = MumbleVoipClient {
+                username: format!("{}_PA", un_pa),
+                context: format!("{}_ambient", sid_pa),
+                role: ClientRole::Pa,
+                voip_status: status_pa,
+                target_channel: format!("{}_ambient_aircraft", sid_pa),
+                zone_channels: None,
+                denoise,
+                test_pos: Some(PA_POSITION),
+            };
+            let _ = client.run(server_addr, st_pa, mic_rx_pa, pb_tx_pa).await;
+        });
     } // end PA guard
 
     // 7. Radio Relay Client + local COM monitor
@@ -183,8 +190,7 @@ pub async fn run_mumble_stack(
         let un_r = user_name.clone();
         let sid_r = session_id.clone();
         let status_r = mk_status("Radio");
-        // TODO: replace with actual radio speaker position once confirmed
-        const RADIO_SPEAKER_POSITION: [f32; 3] = [0.0, 0.0, 0.0];
+        const RADIO_SPEAKER_POSITION: [f32; 3] = [0.0, 0.9, 6.8]; // XP [0, 0.9, -6.8], Z negated
         tokio::spawn(async move {
             let client = MumbleVoipClient {
                 username: format!("{}_radio", un_r),
