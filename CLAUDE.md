@@ -171,8 +171,10 @@ combo encodes: index 0 = disabled, 1 = auto-sink (`__auto__`), 2+ = an input dev
   X-Plane use `extern "C-unwind"`. XPLM handle types are raw pointers, hand-marked `Send`, and
   must only be touched on the main thread.
 - `build.rs` in the plugin injects `BUILD_TIMESTAMP` (chrono) used in the startup log line.
-- The `--denoise` CLI flag / WebRTC audio-processing path is currently **not wired** (the param is
-  `_denoise` in `audio.rs`); don't assume noise suppression is active.
+- The `--denoise` flag enables **RNNoise** noise suppression (via `nnnoiseless`) on the capture
+  side in `audio.rs::start_capture`. It processes 480-sample (10 ms) frames scaled to the i16
+  range; the denoiser is stateful and created once per capture stream. The flag threads from both
+  frontends → `run_mumble_stack` → `start_capture` only (it is *not* a per-client concern).
 
 ## CI / release (`.github/workflows/build.yml`)
 Matrix build of the plugin on Linux/macOS/Windows on push to `main`, PRs, and manual dispatch.

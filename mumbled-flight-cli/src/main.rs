@@ -50,7 +50,7 @@ struct Args {
     #[arg(short, long, value_name = "NAME")]
     user: Option<String>,
 
-    /// Enable the WebRTC Audio Processing Suite (Noise Suppression, HPF, AGC).
+    /// Enable RNNoise noise suppression on the microphone input.
     #[arg(short, long, default_value_t = false)]
     denoise: bool,
 

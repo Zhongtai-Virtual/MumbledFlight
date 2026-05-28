@@ -55,8 +55,6 @@ pub struct MumbleVoipClient {
     /// Voice client only: (fbo_channel_name, aircraft_channel_name) for zone switching.
     /// None for IC, PA, and radio clients — they never switch channels.
     pub zone_channels: Option<(String, String)>,
-    #[allow(dead_code)]
-    pub denoise: bool,
     pub test_pos: Option<[f32; 3]>,
 }
 

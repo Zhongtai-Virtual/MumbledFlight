@@ -130,7 +130,6 @@ pub async fn run_mumble_stack(
                 voip_status: status_a,
                 target_channel: initial_ambient_ch,
                 zone_channels: Some((fbo_ch, aircraft_ch)),
-                denoise,
                 test_pos,
             };
             if let Err(e) = client.run(server_addr, st_a, mic_rx_a, pb_tx_a).await {
@@ -159,7 +158,6 @@ pub async fn run_mumble_stack(
                 voip_status: status_i,
                 target_channel: format!("{}_ic", sid_i),
                 zone_channels: None,
-                denoise,
                 test_pos,
             };
             if let Err(e) = client.run(server_addr, st_i, mic_rx_i, pb_tx_i).await {
@@ -190,7 +188,6 @@ pub async fn run_mumble_stack(
                 voip_status: status_pa,
                 target_channel: format!("{}_ambient_aircraft", sid_pa),
                 zone_channels: None,
-                denoise,
                 test_pos: Some(PA_POSITION),
             };
             if let Err(e) = client.run(server_addr, st_pa, mic_rx_pa, pb_tx_pa).await {
@@ -217,7 +214,6 @@ pub async fn run_mumble_stack(
                 voip_status: status_r,
                 target_channel: format!("{}_ambient_aircraft", sid_r),
                 zone_channels: None,
-                denoise,
                 test_pos: test_pos.or(Some(RADIO_SPEAKER_POSITION)),
             };
             if let Err(e) = client.run(server_addr, st_r, radio_rx, pb_tx_r).await {

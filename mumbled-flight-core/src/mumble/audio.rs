@@ -2,6 +2,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, debug, error, warn};
+use nnnoiseless::DenoiseState;
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -565,7 +566,7 @@ fn pw_capture_loop(
 
 pub fn start_capture(
     tx: mpsc::Sender<Vec<f32>>,
-    _denoise: bool,
+    denoise: bool,
     mic_gain: Arc<AtomicU32>,
     _gate_threshold: f32,
     device_name_filter: Option<String>,
@@ -588,8 +589,18 @@ pub fn start_capture(
                 None => { error!("[Audio:Capture] '{device_name}' does not support 48 kHz — microphone unavailable"); return; }
             };
             let num_channels = config.channels() as usize;
-            info!("[Audio:Capture] Active: {device_name} (48kHz, {num_channels} ch)");
-            let mut capture_buffer = Vec::new();
+            info!("[Audio:Capture] Active: {device_name} (48kHz, {num_channels} ch, denoise={denoise})");
+            // Downmixed + gained mono samples awaiting processing.
+            let mut capture_buffer: Vec<f32> = Vec::new();
+            // Post-denoise samples awaiting batching into 960-sample (20 ms) frames.
+            let mut output_buffer: Vec<f32> = Vec::new();
+            // RNNoise keeps internal state across frames, so the denoiser is created once
+            // and reused. None when denoise is disabled. Operates on 480-sample (10 ms) frames.
+            let mut denoiser: Option<Box<DenoiseState>> = if denoise {
+                Some(DenoiseState::new())
+            } else {
+                None
+            };
             let s = match device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
@@ -603,8 +614,23 @@ pub fn start_capture(
                     } else {
                         for &s in data { capture_buffer.push(s * gain); }
                     }
-                    while capture_buffer.len() >= 960 {
-                        let frame: Vec<f32> = capture_buffer.drain(..960).collect();
+
+                    if let Some(d) = denoiser.as_mut() {
+                        // RNNoise processes fixed 480-sample frames scaled to the i16 range.
+                        const FRAME: usize = DenoiseState::FRAME_SIZE;
+                        let mut out = [0.0f32; FRAME];
+                        while capture_buffer.len() >= FRAME {
+                            let scaled: Vec<f32> =
+                                capture_buffer.drain(..FRAME).map(|s| s * 32768.0).collect();
+                            d.process_frame(&mut out, &scaled);
+                            output_buffer.extend(out.iter().map(|s| s / 32768.0));
+                        }
+                    } else {
+                        output_buffer.append(&mut capture_buffer);
+                    }
+
+                    while output_buffer.len() >= 960 {
+                        let frame: Vec<f32> = output_buffer.drain(..960).collect();
                         let _ = tx.try_send(frame);
                     }
                 },
