@@ -25,32 +25,36 @@ pub fn list_audio_devices() {
     println!("------------------------------------------\n");
 }
 
+/// Name of the virtual PipeWire sink used for radio relay capture.
+/// Shared with the plugin's device enumeration filter — change here propagates everywhere.
+pub const VIRTUAL_SINK_NAME: &str = "MumblingRadio";
+
 pub fn create_linux_sink() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        const SINK: &str = "MumblingRadio";
+        const S: &str = VIRTUAL_SINK_NAME;
 
         // Reuse if already present — avoids accumulating duplicate modules across reconnects.
         if let Ok(out) = std::process::Command::new("pactl").args(&["list", "short", "sinks"]).output() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if s.lines().any(|l| l.split_whitespace().nth(1) == Some(SINK)) {
-                info!("[Audio:Linux] Reusing existing {SINK} virtual sink");
-                return Some(format!("{SINK}.monitor"));
+            let text = String::from_utf8_lossy(&out.stdout);
+            if text.lines().any(|l| l.split_whitespace().nth(1) == Some(S)) {
+                info!("[Audio:Linux] Reusing existing {S} virtual sink");
+                return Some(format!("{S}.monitor"));
             }
         }
 
-        info!("[Audio:Linux] Creating {SINK} virtual sink...");
+        info!("[Audio:Linux] Creating {S} virtual sink...");
         let status = std::process::Command::new("pactl")
             .args(&[
                 "load-module", "module-null-sink",
-                &format!("sink_name={SINK}"),
+                &format!("sink_name={S}"),
                 "format=float32le", "rate=48000", "channels=2",
-                &format!("sink_properties=device.description={SINK}"),
+                &format!("sink_properties=device.description={S}"),
             ])
             .status();
 
         if let Ok(s) = status {
-            if s.success() { return Some(format!("{SINK}.monitor")); }
+            if s.success() { return Some(format!("{S}.monitor")); }
         }
         None
     }

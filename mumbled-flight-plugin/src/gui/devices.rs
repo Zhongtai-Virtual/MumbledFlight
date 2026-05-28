@@ -2,6 +2,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use std::collections::HashMap;
+use mumbled_flight_core::mumble::audio::VIRTUAL_SINK_NAME;
 
 /// Returns `(names, labels)` where `names` are used for routing and `labels` for display.
 /// On Linux uses `pactl list short sinks` exclusively — avoids ALSA's process-level device cache.
@@ -16,7 +17,7 @@ pub fn enumerate_output_devices() -> (Vec<String>, Vec<String>) {
     if let Ok(out) = std::process::Command::new("pactl").args(["list", "short", "sinks"]).output() {
         if let Ok(s) = std::str::from_utf8(&out.stdout) {
             for sink in s.lines().filter_map(|l| l.split_whitespace().nth(1))
-                .filter(|name| *name != "MumblingRadio")
+                .filter(|name| *name != VIRTUAL_SINK_NAME)
             {
                 let label = descriptions.get(sink).cloned().unwrap_or_else(|| sink.to_string());
                 names.push(sink.to_string());
