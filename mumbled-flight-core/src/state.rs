@@ -257,11 +257,17 @@ impl CockpitState {
         use DataRefId::*;
         let is_left = self.seat == CockpitSeat::Captain;
         match id {
-            Acp1Ic | Acp1Rt | Acp1Mic | Acp1SpkrTog | Acp1SpkrVol | Acp1IntSvcTog
-            | Acp1IntSvcVol | Contwheel0Ic | Contwheel0Rt => is_left,
-            Acp2Ic | Acp2Rt | Acp2Mic | Acp2SpkrTog | Acp2SpkrVol | Acp2IntSvcTog
-            | Acp2IntSvcVol | Contwheel1Ic | Contwheel1Rt => !is_left,
-            _ => true,
+            // Captain (left seat) controls
+            Acp1Ic | Acp1Rt | Acp1Mic | Acp1SpkrTog | Acp1SpkrVol
+            | Acp1IntSvcTog | Acp1IntSvcVol | Contwheel0Ic | Contwheel0Rt => is_left,
+            // First Officer (right seat) controls
+            Acp2Ic | Acp2Rt | Acp2Mic | Acp2SpkrTog | Acp2SpkrVol
+            | Acp2IntSvcTog | Acp2IntSvcVol | Contwheel1Ic | Contwheel1Rt => !is_left,
+            // Non-seat-specific — always apply
+            HeadX | HeadY | HeadZ | HeadPsi | HeadThe | HeadPhi | PlanePsi
+            | PilotSeat | SharedCkptRole | SharedCkptZone
+            | DoorCabin | DoorLavatory | SharedCkptIsGuest
+            | XpilotCom1Rx | XpilotCom2Rx => true,
         }
     }
 
