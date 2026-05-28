@@ -215,7 +215,11 @@ impl GuiState {
 
     pub fn save_config(&self) {
         let out_name = |idx: i32| self.output_devices.get(idx as usize).cloned().unwrap_or_default();
-        let in_name  = |idx: i32| self.mic_input_devices.get(idx.saturating_sub(1) as usize).cloned().unwrap_or_default();
+        // Mic index 0 = system default (empty string); 1+ = mic_input_devices[idx - 1].
+        let in_name  = |idx: i32| match idx {
+            0 => String::new(),
+            i => self.mic_input_devices.get(i as usize - 1).cloned().unwrap_or_default(),
+        };
         let cfg = config::PluginConfig {
             server: self.server.clone(),
             flight_id: self.flight_id.clone(),
@@ -238,7 +242,10 @@ impl GuiState {
     pub fn ic_output(&self)      -> Option<String> { self.output_device_at(self.selected_ic) }
     /// Returns the selected mic input device name, or `None` for the system default (index 0).
     pub fn mic_input(&self) -> Option<String> {
-        self.mic_input_devices.get(self.selected_mic.saturating_sub(1) as usize).cloned()
+        match self.selected_mic {
+            0 => None,
+            i => self.mic_input_devices.get(i as usize - 1).cloned(),
+        }
     }
 
     /// Apply a pending device snapshot produced by the background refresh thread.
