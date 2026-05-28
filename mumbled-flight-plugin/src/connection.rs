@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
-use mumbled_flight_core::{mumble, mumble::{MicSource, MumbleStackConfig, TestClient, VoipStatuses}, state::CockpitState};
+use mumbled_flight_core::{mumble, mumble::{InputType, MumbleStackConfig, TestClient, VoipStatuses}, state::CockpitState};
 
 use crate::PluginState;
 
@@ -50,7 +50,8 @@ pub fn start(ps: &mut PluginState) {
     let mic_gain_for_thread = Arc::clone(&mic_gain);
     let denoise = ps.gui.denoise;
     let ambient_output = ps.gui.ambient_output();
-    let ic_output = ps.gui.ic_output();
+    let ic_output      = ps.gui.ic_output();
+    let mic_input      = ps.gui.mic_input();
     let (radio_source, auto_sink) = ps.gui.radio_params();
 
     let statuses: VoipStatuses = Arc::new(Mutex::new(HashMap::new()));
@@ -66,7 +67,8 @@ pub fn start(ps: &mut PluginState) {
             radio_source,
             auto_sink,
             test_client: TestClient::default(),
-            mic_source: MicSource::Real,
+            input_type: InputType::Real,
+            mic_device: mic_input,
             test_pos: None,
             server_addr,
             ambient_output,

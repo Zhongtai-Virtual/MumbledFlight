@@ -15,6 +15,7 @@ pub struct PluginConfig {
     pub denoise: bool,
     pub ambient_device: String,
     pub ic_device: String,
+    pub mic_device: String,
     pub log_level: String,
     /// "" = disabled, "__auto__" = MumblingRadio auto-sink, anything else = device name.
     pub radio_source: String,
@@ -30,6 +31,7 @@ impl Default for PluginConfig {
             denoise: false,
             ambient_device: String::new(),
             ic_device: String::new(),
+            mic_device: String::new(),
             log_level: "info".to_string(),
             radio_source: String::new(),
         }

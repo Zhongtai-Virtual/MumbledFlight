@@ -29,7 +29,7 @@ pub enum TestClient {
 
 /// Microphone source for the VoIP stack.
 #[derive(Debug, Default)]
-pub enum MicSource {
+pub enum InputType {
     /// Real microphone capture via CPAL.
     #[default]
     Real,
@@ -50,7 +50,9 @@ pub struct MumbleStackConfig {
     pub radio_source: Option<String>,
     pub auto_sink: bool,
     pub test_client: TestClient,
-    pub mic_source: MicSource,
+    pub input_type: InputType,
+    /// PipeWire/CPAL node name to use for microphone capture. `None` = system default.
+    pub mic_device: Option<String>,
     pub test_pos: Option<[f32; 3]>,
     pub server_addr: SocketAddr,
     pub ambient_output: Option<String>,
@@ -84,7 +86,8 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         radio_source,
         auto_sink,
         test_client,
-        mic_source,
+        input_type,
+        mic_device,
         test_pos,
         server_addr,
         ambient_output,
@@ -98,10 +101,10 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     let d_mic = denoise;
     std::thread::spawn(move || {
         let (sync_tx, mut sync_rx) = mpsc::channel(128);
-        match mic_source {
-            MicSource::Sine          => audio::start_sine_capture(sync_tx, mic_gain),
-            MicSource::File(path)    => audio::start_file_capture(path, sync_tx, mic_gain),
-            MicSource::Real          => start_capture(sync_tx, d_mic, mic_gain, 0.0, None),
+        match input_type {
+            InputType::Sine          => audio::start_sine_capture(sync_tx, mic_gain),
+            InputType::File(path)    => audio::start_file_capture(path, sync_tx, mic_gain),
+            InputType::Real          => start_capture(sync_tx, d_mic, mic_gain, 0.0, mic_device),
         }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);

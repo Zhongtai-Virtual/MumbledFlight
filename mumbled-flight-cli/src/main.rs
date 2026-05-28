@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::{error, info};
 use mumbled_flight_core::config::Config;
-use mumbled_flight_core::mumble::{self, voip::xplane_to_mumble, MicSource, MumbleStackConfig, TestClient};
+use mumbled_flight_core::mumble::{self, voip::xplane_to_mumble, InputType, MumbleStackConfig, TestClient};
 use mumbled_flight_core::state::CockpitState;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -53,6 +53,10 @@ struct Args {
     /// Enable RNNoise noise suppression on the microphone input.
     #[arg(short, long, default_value_t = false)]
     denoise: bool,
+
+    /// Microphone input device name (PipeWire node name on Linux). Defaults to system default.
+    #[arg(long, value_name = "DEVICE")]
+    mic_device: Option<String>,
 
     /// Loopback device for X-Pilot radio audio.
     #[arg(short, long, value_name = "DEVICE")]
@@ -183,12 +187,12 @@ async fn main() -> Result<()> {
             Some(CliClient::Radio)  => TestClient::Radio,
         };
         let statuses = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let mic_source = if let Some(path) = args.file {
-            MicSource::File(path)
+        let input_type = if let Some(path) = args.file {
+            InputType::File(path)
         } else if args.sine {
-            MicSource::Sine
+            InputType::Sine
         } else {
-            MicSource::Real
+            InputType::Real
         };
         mumble::run_mumble_stack(MumbleStackConfig {
             state: state_mumble,
@@ -199,7 +203,8 @@ async fn main() -> Result<()> {
             radio_source: args.radio_source,
             auto_sink: args.auto_sink,
             test_client,
-            mic_source,
+            input_type,
+            mic_device: args.mic_device,
             test_pos, // None = use real X-Plane position; Some = fixed pos
             server_addr,
             ambient_output: None,

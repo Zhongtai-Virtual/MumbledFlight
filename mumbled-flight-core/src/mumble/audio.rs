@@ -77,7 +77,7 @@ pub fn enumerate_pw_sources() -> Vec<String> { vec![] }
 /// Enumerate sinks and sources in a single PipeWire round-trip.
 /// Prefer this over calling [`enumerate_pw_sinks`] and [`enumerate_pw_sources`] separately.
 #[cfg(target_os = "linux")]
-pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<String>) {
+pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<PwSinkInfo>) {
     use pipewire as pw;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -101,7 +101,7 @@ pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<String>) {
     };
 
     let sinks:      Rc<RefCell<Vec<PwSinkInfo>>> = Rc::new(RefCell::new(Vec::new()));
-    let sources:    Rc<RefCell<Vec<String>>>     = Rc::new(RefCell::new(Vec::new()));
+    let sources:    Rc<RefCell<Vec<PwSinkInfo>>> = Rc::new(RefCell::new(Vec::new()));
     let total_seen: Rc<RefCell<u32>>             = Rc::new(RefCell::new(0));
     let sinks_cl   = sinks.clone();
     let sources_cl = sources.clone();
@@ -123,8 +123,9 @@ pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<String>) {
                 }
                 "Audio/Source" => {
                     if let Some(name) = props.get(*pw::keys::NODE_NAME) {
-                        debug!("[DeviceEnum] source: {name}");
-                        sources_cl.borrow_mut().push(name.to_string());
+                        let desc = props.get(*pw::keys::NODE_DESCRIPTION).unwrap_or(name).to_string();
+                        debug!("[DeviceEnum] source: {name} ({desc})");
+                        sources_cl.borrow_mut().push(PwSinkInfo { name: name.to_string(), description: desc });
                     }
                 }
                 other => {
@@ -163,7 +164,7 @@ pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<String>) {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<String>) { (vec![], vec![]) }
+pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<PwSinkInfo>) { (vec![], vec![]) }
 
 /// Enumerate PW globals, mapping each node's properties through `mapper`.
 /// Runs a throw-away PW mainloop that quits after the initial registry dump.

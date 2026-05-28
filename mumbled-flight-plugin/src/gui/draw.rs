@@ -72,7 +72,9 @@ impl GuiState {
         let voip_statuses = self.voip_statuses.clone();
         let output_devices = self.output_devices.clone();
         let output_device_labels = self.output_device_labels.clone();
-        let radio_input_devices = self.radio_input_devices.clone();
+        let mic_input_device_labels   = self.mic_input_device_labels.clone();
+        let mut selected_mic          = self.selected_mic;
+        let radio_input_device_labels = self.radio_input_device_labels.clone();
         let mut selected_radio = self.selected_radio;
         let mouse_pos = self.mouse_pos;
         let mouse_down = self.mouse_down;
@@ -160,13 +162,41 @@ impl GuiState {
                         drop(_dis);
                     }
 
+                    if !mic_input_device_labels.is_empty() {
+                        let mic_labels: Vec<String> = std::iter::once("(system default)".to_string())
+                            .chain(mic_input_device_labels.iter().cloned())
+                            .collect();
+                        let mic_preview = mic_labels
+                            .get(selected_mic as usize)
+                            .map(|s| s.as_str())
+                            .unwrap_or("(system default)");
+                        let _dis = ui.begin_disabled(is_connected);
+                        ui.text("Mic In");
+                        ui.same_line();
+                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                        ui.set_next_item_width(fw);
+                        if let Some(_tok) = ui.begin_combo("##mic_in", mic_preview) {
+                            let avail_w = ui.content_region_avail()[0];
+                            for (i, label) in mic_labels.iter().enumerate() {
+                                let display = fit_label(ui, label, avail_w);
+                                if ui.selectable_config(&*display)
+                                    .selected(selected_mic == i as i32)
+                                    .build()
+                                {
+                                    selected_mic = i as i32;
+                                }
+                            }
+                        }
+                        drop(_dis);
+                    }
+
                     {
                         let radio_labels: Vec<String> = {
                             let mut v = vec![
                                 "(disabled)".to_string(),
                                 "MumblingRadio (auto-sink)".to_string(),
                             ];
-                            v.extend(radio_input_devices.iter().cloned());
+                            v.extend(radio_input_device_labels.iter().cloned());
                             v
                         };
                         let radio_preview = radio_labels
@@ -288,8 +318,9 @@ impl GuiState {
             atomic.store(gain.to_bits(), Ordering::Relaxed);
         }
         self.selected_ambient = selected_ambient;
-        self.selected_ic = selected_ic;
-        self.selected_radio = selected_radio;
+        self.selected_ic      = selected_ic;
+        self.selected_mic     = selected_mic;
+        self.selected_radio   = selected_radio;
         self.denoise = denoise;
         if log_level != self.log_level {
             self.log_level = log_level;

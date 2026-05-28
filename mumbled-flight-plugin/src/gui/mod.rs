@@ -18,6 +18,7 @@ struct DeviceSnapshot {
     output_names:  Vec<String>,
     output_labels: Vec<String>,
     input_names:   Vec<String>,
+    input_labels:  Vec<String>,
 }
 
 use xplane_sys::{XPLMMouseStatus, XPLMTakeKeyboardFocus, XPLMWindowID};
@@ -51,14 +52,20 @@ pub struct GuiState {
     pub selected_ic: i32,
     pub log_level: LevelFilter,
 
+    // Mic input — index 0 = system default, 1+ = input_devices[i-1].
+    pub mic_input_devices: Vec<String>,
+    pub mic_input_device_labels: Vec<String>,
+    pub selected_mic: i32,
     // Radio relay source.
     // Index 0 = disabled, 1 = auto-sink, 2+ = input_devices[i-2].
     pub radio_input_devices: Vec<String>,
+    pub radio_input_device_labels: Vec<String>,
     pub selected_radio: i32,
     // Config-preferred device names — used on the first snapshot arrival to resolve indices
     // when the list was empty at construction time (avoids blocking the XPLM thread).
     initial_ambient_device: String,
     initial_ic_device: String,
+    initial_mic_device: String,
     initial_radio_source: String,
 
     pub should_connect: bool,
@@ -82,11 +89,15 @@ impl GuiState {
 
         // Device lists start empty — the background thread populates them immediately
         // off the XPLM main thread to avoid blocking XPluginEnable.
-        let output_devices       = vec![];
-        let output_device_labels = vec![];
-        let radio_input_devices  = vec![];
+        let output_devices             = vec![];
+        let output_device_labels       = vec![];
+        let mic_input_devices          = vec![];
+        let mic_input_device_labels    = vec![];
+        let radio_input_devices        = vec![];
+        let radio_input_device_labels  = vec![];
         let selected_ambient = 0;
         let selected_ic      = 0;
+        let selected_mic     = 0;
         let selected_radio   = 0;
 
         let log_level = match cfg.log_level.to_lowercase().as_str() {
@@ -125,23 +136,26 @@ impl GuiState {
                         let sinks: Vec<_> = sinks.into_iter()
                             .filter(|s| s.name != VIRTUAL_SINK_NAME)
                             .collect();
-                        let mut names:  Vec<String> = vec![String::new()];
-                        let mut labels: Vec<String> = vec!["(system default)".to_string()];
-                        names.extend(sinks.iter().map(|s| s.name.clone()));
-                        labels.extend(sinks.into_iter().map(|s| s.description));
-                        (names, labels, sources)
+                        let mut output_names:  Vec<String> = vec![String::new()];
+                        let mut output_labels: Vec<String> = vec!["(system default)".to_string()];
+                        output_names.extend(sinks.iter().map(|s| s.name.clone()));
+                        output_labels.extend(sinks.into_iter().map(|s| s.description));
+                        let input_names:  Vec<String> = sources.iter().map(|s| s.name.clone()).collect();
+                        let input_labels: Vec<String> = sources.into_iter().map(|s| s.description).collect();
+                        (output_names, output_labels, input_names, input_labels)
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
                         let (names, labels) = devices::enumerate_output_devices();
                         let inputs = devices::enumerate_input_devices();
-                        (names, labels, inputs)
+                        let input_labels = inputs.clone();
+                        (names, labels, inputs, input_labels)
                     }
                 });
                 match result {
-                    Ok((output_names, output_labels, input_names)) => {
+                    Ok((output_names, output_labels, input_names, input_labels)) => {
                         let Some(arc) = weak.upgrade() else { return };
-                        *arc.lock().unwrap() = Some(DeviceSnapshot { output_names, output_labels, input_names });
+                        *arc.lock().unwrap() = Some(DeviceSnapshot { output_names, output_labels, input_names, input_labels });
                     }
                     Err(e) => {
                         let msg = if let Some(s) = e.downcast_ref::<&str>() {
@@ -180,10 +194,15 @@ impl GuiState {
             selected_ambient,
             selected_ic,
             log_level,
+            mic_input_devices,
+            mic_input_device_labels,
+            selected_mic,
             radio_input_devices,
+            radio_input_device_labels,
             selected_radio,
             initial_ambient_device: cfg.ambient_device,
             initial_ic_device: cfg.ic_device,
+            initial_mic_device: cfg.mic_device,
             initial_radio_source: cfg.radio_source,
             should_connect: false,
             should_disconnect: false,
@@ -195,26 +214,32 @@ impl GuiState {
     }
 
     pub fn save_config(&self) {
-        let device_name = |idx: i32| self.output_devices.get(idx as usize).cloned().unwrap_or_default();
+        let out_name = |idx: i32| self.output_devices.get(idx as usize).cloned().unwrap_or_default();
+        let in_name  = |idx: i32| self.mic_input_devices.get(idx.saturating_sub(1) as usize).cloned().unwrap_or_default();
         let cfg = config::PluginConfig {
             server: self.server.clone(),
             flight_id: self.flight_id.clone(),
             user_name: self.user_name.clone(),
             gain: self.gain,
             denoise: self.denoise,
-            ambient_device: device_name(self.selected_ambient),
-            ic_device:      device_name(self.selected_ic),
+            ambient_device: out_name(self.selected_ambient),
+            ic_device:      out_name(self.selected_ic),
+            mic_device:     in_name(self.selected_mic),
             log_level: self.log_level.to_string().to_lowercase(),
             radio_source: self.radio_source_str().to_string(),
         };
         cfg.save(&self.config_path);
     }
 
-    fn device_at(&self, idx: i32) -> Option<String> {
+    fn output_device_at(&self, idx: i32) -> Option<String> {
         self.output_devices.get(idx as usize).filter(|s| !s.is_empty()).cloned()
     }
-    pub fn ambient_output(&self) -> Option<String> { self.device_at(self.selected_ambient) }
-    pub fn ic_output(&self)      -> Option<String> { self.device_at(self.selected_ic) }
+    pub fn ambient_output(&self) -> Option<String> { self.output_device_at(self.selected_ambient) }
+    pub fn ic_output(&self)      -> Option<String> { self.output_device_at(self.selected_ic) }
+    /// Returns the selected mic input device name, or `None` for the system default (index 0).
+    pub fn mic_input(&self) -> Option<String> {
+        self.mic_input_devices.get(self.selected_mic.saturating_sub(1) as usize).cloned()
+    }
 
     /// Apply a pending device snapshot produced by the background refresh thread.
     /// Non-blocking — the flight loop calls this at 20 Hz with no pactl overhead.
@@ -261,7 +286,25 @@ impl GuiState {
                 .map(|i| i as i32 + 2)
                 .unwrap_or(0),
         };
-        self.radio_input_devices = snap.input_names;
+        // Mic input — index 0 = system default.
+        let current_mic = if self.mic_input_devices.is_empty() {
+            self.initial_mic_device.clone()
+        } else {
+            self.mic_input().unwrap_or_default()
+        };
+        self.selected_mic = if current_mic.is_empty() {
+            0
+        } else {
+            snap.input_names.iter()
+                .position(|d| d == &current_mic)
+                .map(|i| i as i32 + 1)
+                .unwrap_or(0)
+        };
+        self.mic_input_devices       = snap.input_names.clone();
+        self.mic_input_device_labels = snap.input_labels.clone();
+
+        self.radio_input_devices        = snap.input_names;
+        self.radio_input_device_labels  = snap.input_labels;
     }
 
     /// Returns `(radio_source, auto_sink)` for passing to `run_mumble_stack`.
