@@ -8,6 +8,7 @@ mod window;
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicU32;
 use std::time::{Duration, Instant};
 use log::{debug, LevelFilter};
 
@@ -56,6 +57,8 @@ pub struct GuiState {
     pub should_disconnect: bool,
     pub is_connected: bool,
     pub status: String,
+    /// Shared with the capture thread while connected — None when disconnected.
+    pub mic_gain_live: Option<Arc<AtomicU32>>,
 }
 
 // XPLMWindowID is *mut c_void — all XPLM + GL access is on the X-Plane main thread.
@@ -137,6 +140,7 @@ impl GuiState {
             should_disconnect: false,
             is_connected: false,
             status: String::new(),
+            mic_gain_live: None,
         }
     }
 

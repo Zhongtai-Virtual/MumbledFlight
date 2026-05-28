@@ -4,6 +4,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, debug, error, warn};
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::collections::VecDeque;
 use std::io::Read;
 
@@ -102,7 +103,7 @@ fn pipewire_device(node: Option<&str>, input: bool) -> cpal::Device {
 
 /// Generates a 500 Hz sine tone via ffmpeg and feeds it into the mic pipeline.
 /// Requires ffmpeg on PATH. Intended for CLI test/debug mode only.
-pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, gain: f32) {
+pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, mic_gain: Arc<AtomicU32>) {
     std::thread::spawn(move || {
         let mut child = match std::process::Command::new("ffmpeg")
             .args([
@@ -119,7 +120,7 @@ pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, gain: f32) {
             Err(e) => { error!("[Audio:Sine] ffmpeg spawn failed: {e}"); return; }
         };
 
-        info!("[Audio:Sine] 500 Hz sine tone active (gain {gain:.1}x)");
+        info!("[Audio:Sine] 500 Hz sine tone active");
 
         let mut stdout = child.stdout.take().unwrap();
         const SAMPLES: usize = 960; // 20 ms @ 48 kHz
@@ -128,6 +129,7 @@ pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, gain: f32) {
         let mut next = std::time::Instant::now();
         loop {
             if stdout.read_exact(&mut buf).is_err() { break; }
+            let gain = f32::from_bits(mic_gain.load(Ordering::Relaxed));
             let frame: Vec<f32> = buf.chunks_exact(4)
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * gain)
                 .collect();
@@ -145,7 +147,7 @@ pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, gain: f32) {
 pub fn start_capture(
     tx: mpsc::Sender<Vec<f32>>,
     _denoise: bool,
-    gain: f32,
+    mic_gain: Arc<AtomicU32>,
     _gate_threshold: f32,
     device_name_filter: Option<String>,
     _is_loopback: bool,
@@ -168,6 +170,7 @@ pub fn start_capture(
             let s = device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
+                    let gain = f32::from_bits(mic_gain.load(Ordering::Relaxed));
                     if num_channels > 1 {
                         for chunk in data.chunks_exact(num_channels) {
                             let mut sum = 0.0;

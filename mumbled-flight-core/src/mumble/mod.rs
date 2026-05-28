@@ -4,6 +4,7 @@ pub mod audio;
 pub mod voip;
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicU32;
 use std::net::SocketAddr;
 use tokio::sync::{broadcast, mpsc};
 use crate::state::{CockpitState, SharedCockpitZone};
@@ -14,7 +15,7 @@ pub async fn run_mumble_stack(
     state: Arc<Mutex<CockpitState>>,
     user_name: String,
     session_id: String,
-    mic_gain: f32,
+    mic_gain: Arc<AtomicU32>,
     denoise: bool,
     radio_source: Option<String>,
     auto_sink: bool,
@@ -52,7 +53,8 @@ pub async fn run_mumble_stack(
         let tx_clone = tx.clone();
         std::thread::spawn(move || {
             let (sync_tx, mut sync_rx) = mpsc::channel(128);
-            crate::mumble::audio::start_capture(sync_tx, false, 1.0, 0.0, Some(source_name), true);
+            let unity = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+            crate::mumble::audio::start_capture(sync_tx, false, unity, 0.0, Some(source_name), true);
             while let Some(frame) = sync_rx.blocking_recv() {
                 let _ = tx_clone.send(frame);
             }

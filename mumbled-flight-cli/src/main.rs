@@ -109,11 +109,12 @@ async fn main() -> Result<()> {
     });
     let state_mumble = Arc::clone(&state);
     tokio::spawn(async move {
+        use std::sync::atomic::AtomicU32;
         mumble::run_mumble_stack(
             state_mumble,
             user_prefix,
             flight_id,
-            args.gain,
+            Arc::new(AtomicU32::new(args.gain.to_bits())),
             args.denoise,
             args.radio_source,
             args.auto_sink,

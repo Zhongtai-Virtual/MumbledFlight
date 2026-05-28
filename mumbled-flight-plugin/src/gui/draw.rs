@@ -5,6 +5,7 @@ use std::ffi::CString;
 use std::os::raw::c_void;
 use std::time::Instant;
 use log::{debug, warn, LevelFilter};
+use std::sync::atomic::Ordering;
 
 use xplane_sys::{
     XPLMGetScreenBoundsGlobal, XPLMGetScreenSize, XPLMGetWindowGeometry,
@@ -115,7 +116,9 @@ impl GuiState {
                     ui.same_line();
                     ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                     ui.set_next_item_width(fw);
-                    ui.slider_config("##gain", 0.1_f32, 4.0_f32).build(&mut gain);
+                    ui.slider_config("##gain", 0.1_f32, 20.0_f32)
+                        .flags(imgui::SliderFlags::LOGARITHMIC)
+                        .build(&mut gain);
 
                     ui.text("Denoise");
                     ui.same_line();
@@ -241,6 +244,9 @@ impl GuiState {
         self.flight_id       = flight_id;
         self.user_name       = user_name;
         self.gain            = gain;
+        if let Some(ref atomic) = self.mic_gain_live {
+            atomic.store(gain.to_bits(), Ordering::Relaxed);
+        }
         self.selected_device = selected_device;
         self.selected_radio  = selected_radio;
         self.denoise         = denoise;
