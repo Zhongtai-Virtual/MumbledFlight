@@ -122,7 +122,8 @@ impl GuiState {
                     ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                     ui.set_next_item_width(fw);
                     ui.slider_config("##gain", 0.1_f32, 20.0_f32)
-                        .flags(imgui::SliderFlags::LOGARITHMIC)
+                        .flags(imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT)
+                        .display_format("")
                         .build(&mut gain);
 
                     ui.text("Denoise");
