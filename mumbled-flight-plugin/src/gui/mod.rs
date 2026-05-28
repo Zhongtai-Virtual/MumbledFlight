@@ -54,6 +54,11 @@ pub struct GuiState {
     // Index 0 = disabled, 1 = auto-sink, 2+ = input_devices[i-2].
     pub radio_input_devices: Vec<String>,
     pub selected_radio: i32,
+    // Config-preferred device names — used on the first snapshot arrival to resolve indices
+    // when the list was empty at construction time (avoids blocking the XPLM thread).
+    initial_ambient_device: String,
+    initial_ic_device: String,
+    initial_radio_source: String,
 
     pub should_connect: bool,
     pub should_disconnect: bool,
@@ -70,25 +75,15 @@ unsafe impl Send for GuiState {}
 
 impl GuiState {
     pub fn new(auto_user: Option<String>, config_path: PathBuf) -> Self {
-        let (output_devices, output_device_labels) = devices::enumerate_output_devices();
-        let radio_input_devices = devices::enumerate_input_devices();
         let cfg = config::PluginConfig::load(&config_path);
-
-        let find_device = |name: &str| output_devices.iter()
-            .position(|d| d == name)
-            .map(|i| i as i32)
-            .unwrap_or(0);
-        let selected_ambient = find_device(&cfg.ambient_device);
-        let selected_ic      = find_device(&cfg.ic_device);
-
-        let selected_radio = match cfg.radio_source.as_str() {
-            ""              => 0,
-            RADIO_AUTO_SINK => 1,
-            name            => radio_input_devices.iter()
-                .position(|d| d == name)
-                .map(|i| i as i32 + 2)
-                .unwrap_or(0),
-        };
+        // Device lists start empty — the background thread populates them immediately
+        // off the XPLM main thread to avoid blocking XPluginEnable.
+        let output_devices       = vec![];
+        let output_device_labels = vec![];
+        let radio_input_devices  = vec![];
+        let selected_ambient = 0;
+        let selected_ic      = 0;
+        let selected_radio   = 0;
 
         let log_level = match cfg.log_level.to_lowercase().as_str() {
             "error" => LevelFilter::Error,
@@ -108,15 +103,15 @@ impl GuiState {
 
         let pending_devices: Arc<Mutex<Option<DeviceSnapshot>>> = Arc::new(Mutex::new(None));
         {
-            // Background thread refreshes the device list every 2 s off the main thread.
+            // Background thread enumerates devices immediately then refreshes every 2 s.
             // Holds a Weak ref — exits automatically when GuiState (and the Arc) is dropped.
             let weak = Arc::downgrade(&pending_devices);
             std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(2));
                 let Some(arc) = weak.upgrade() else { return };
                 let (output_names, output_labels) = devices::enumerate_output_devices();
                 let input_names = devices::enumerate_input_devices();
                 *arc.lock().unwrap() = Some(DeviceSnapshot { output_names, output_labels, input_names });
+                std::thread::sleep(Duration::from_secs(2));
             });
         }
 
@@ -143,6 +138,9 @@ impl GuiState {
             log_level,
             radio_input_devices,
             selected_radio,
+            initial_ambient_device: cfg.ambient_device,
+            initial_ic_device: cfg.ic_device,
+            initial_radio_source: cfg.radio_source,
             should_connect: false,
             should_disconnect: false,
             is_connected: false,
@@ -190,12 +188,27 @@ impl GuiState {
             .and_then(|name| snap.output_names.iter().position(|d| *d == name))
             .map(|i| i as i32)
             .unwrap_or(0);
-        self.selected_ambient = resolve(self.ambient_output());
-        self.selected_ic      = resolve(self.ic_output());
+        // On the first refresh the live lists are empty, so use the config-preferred names.
+        let ambient_name = if self.output_devices.is_empty() {
+            Some(self.initial_ambient_device.clone())
+        } else {
+            self.ambient_output()
+        };
+        let ic_name = if self.output_devices.is_empty() {
+            Some(self.initial_ic_device.clone())
+        } else {
+            self.ic_output()
+        };
+        self.selected_ambient = resolve(ambient_name);
+        self.selected_ic      = resolve(ic_name);
         self.output_devices       = snap.output_names;
         self.output_device_labels = snap.output_labels;
 
-        let current_radio = self.radio_source_str().to_string();
+        let current_radio = if self.radio_input_devices.is_empty() {
+            self.initial_radio_source.clone()
+        } else {
+            self.radio_source_str().to_string()
+        };
         self.selected_radio = match current_radio.as_str() {
             ""              => 0,
             RADIO_AUTO_SINK => 1,
