@@ -26,7 +26,7 @@ use tokio_util::codec::Framed;
 
 use crate::state::CockpitState;
 use super::session::{Control, Session};
-use super::spatial::{compute_stereo_gains, encode_pos};
+use super::spatial::{compute_stereo_gains, encode_pos, xplane_to_mumble};
 
 const MUMBLE_VERSION: u32 = 0x00010400;
 
@@ -166,7 +166,8 @@ impl MumbleVoipClient {
             _ => if let Some(tp) = self.test_pos {
                 Some(encode_pos(tp[0], tp[1], tp[2]))
             } else {
-                Some(encode_pos(s.pos[0], s.pos[1], -s.pos[2]))
+                let [x, y, z] = xplane_to_mumble(s.pos);
+                Some(encode_pos(x, y, z))
             },
         }
     }
@@ -180,7 +181,7 @@ impl MumbleVoipClient {
     ) -> Vec<f32> {
         let (lpos, lrot, door, door_lav) = {
             let s = state.lock().unwrap();
-            ([s.pos[0], s.pos[1], -s.pos[2]], s.rot, s.door, s.door_lav)
+            (xplane_to_mumble(s.pos), s.rot, s.door, s.door_lav)
         };
 
         let (gain_l, gain_r, debug_msg) = match source_pos {

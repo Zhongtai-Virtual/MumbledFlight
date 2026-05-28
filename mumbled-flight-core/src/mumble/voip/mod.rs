@@ -5,3 +5,4 @@ mod session;
 mod spatial;
 
 pub use client::MumbleVoipClient;
+pub use spatial::xplane_to_mumble;

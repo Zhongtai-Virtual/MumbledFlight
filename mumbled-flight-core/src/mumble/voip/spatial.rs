@@ -5,6 +5,13 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use bytes::Bytes;
 use std::io::Cursor;
 
+/// Converts a position between X-Plane (aft-positive Z) and Mumble (forward-positive Z)
+/// coordinates. The two systems differ only in the sign of the Z axis, so this is its own
+/// inverse — use it at every X-Plane↔Mumble boundary instead of negating Z by hand.
+pub const fn xplane_to_mumble(pos: [f32; 3]) -> [f32; 3] {
+    [pos[0], pos[1], -pos[2]]
+}
+
 /// Mumble's calcGain: maps dot ∈ [-1, 1] → gain ∈ [0.25, 1.0].
 pub fn calc_gain(dot: f32) -> f32 {
     let df = (dot + 1.0) * 0.5;
@@ -106,6 +113,15 @@ mod tests {
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn xplane_mumble_z_negation_is_self_inverse() {
+        let xp = [2.0, 0.9, -6.8];
+        let mumble = xplane_to_mumble(xp);
+        assert_eq!(mumble, [2.0, 0.9, 6.8]);
+        // Applying it twice returns the original (it is its own inverse).
+        assert_eq!(xplane_to_mumble(mumble), xp);
     }
 
     #[test]

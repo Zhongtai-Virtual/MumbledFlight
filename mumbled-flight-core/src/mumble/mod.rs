@@ -205,7 +205,8 @@ pub async fn run_mumble_stack(
         let un_r = user_name.clone();
         let sid_r = session_id.clone();
         let status_r = mk_status("Radio");
-        const RADIO_SPEAKER_POSITION: [f32; 3] = [0.0, 0.9, 6.8]; // XP [0, 0.9, -6.8], Z negated
+        // X-Plane cockpit-speaker position; converted to Mumble's Z convention.
+        const RADIO_SPEAKER_POSITION: [f32; 3] = voip::xplane_to_mumble([0.0, 0.9, -6.8]);
         tokio::spawn(async move {
             let client = MumbleVoipClient {
                 username: format!("{}_radio", un_r),

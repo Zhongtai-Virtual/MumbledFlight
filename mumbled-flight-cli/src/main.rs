@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::{error, info};
 use mumbled_flight_core::config::Config;
-use mumbled_flight_core::mumble::{self, MicSource, TestClient};
+use mumbled_flight_core::mumble::{self, voip::xplane_to_mumble, MicSource, TestClient};
 use mumbled_flight_core::state::CockpitState;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -140,12 +140,11 @@ async fn main() -> Result<()> {
             .split(',')
             .map(|c| c.trim().parse().unwrap_or(0.0))
             .collect();
-        // Convert X-Plane → Mumble: negate Z (XP aft-positive, Mumble forward-positive).
-        [
+        xplane_to_mumble([
             p.first().copied().unwrap_or(0.0),
             p.get(1).copied().unwrap_or(0.0),
-            -p.get(2).copied().unwrap_or(0.0),
-        ]
+            p.get(2).copied().unwrap_or(0.0),
+        ])
     });
     // Pre-configure state for single-client test mode — DataRef bridge is skipped below.
     if args.test.is_some() {
