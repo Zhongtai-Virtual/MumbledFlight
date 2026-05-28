@@ -489,25 +489,78 @@ fn pw_capture_loop(
         utils::{Direction, SpaTypes},
     };
 
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     pw::init();
 
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context  = pw::context::ContextRc::new(&mainloop, None)?;
     let core     = context.connect_rc(None)?;
 
-    // "MumblingRadio.monitor" → target "MumblingRadio" + STREAM_CAPTURE_SINK
+    // "MumblingRadio.monitor" → target sink "MumblingRadio" + STREAM_CAPTURE_SINK,
     // because monitor ports in native PipeWire live on the sink node itself.
     let (target, capture_sink) = source_name
         .strip_suffix(".monitor")
         .map(|s| (s.to_string(), true))
         .unwrap_or_else(|| (source_name.to_string(), false));
 
+    // Phase 1: resolve the target node *name* to its object.serial via a one-shot registry dump.
+    // Targeting by serial is honoured by every WirePlumber version; a `target.object` set to a
+    // bare node name is not always resolved, and an unresolved target makes AUTOCONNECT silently
+    // fall back to the *default* device — e.g. capturing the headphone monitor instead of the
+    // selected radio source. (This is the loopback "wrong input stream" bug.)
+    let serial: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    {
+        let registry = core.get_registry()?;
+        let serial_cl = serial.clone();
+        let want = target.clone();
+        let _reg = registry
+            .add_listener_local()
+            .global(move |global| {
+                let Some(props) = global.props else { return };
+                if props.get(*pw::keys::NODE_NAME) == Some(want.as_str()) {
+                    if let Some(s) = props.get("object.serial") {
+                        let mut slot = serial_cl.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some(s.to_string());
+                        }
+                    }
+                }
+            })
+            .register();
+
+        let pending = core.sync(0)?;
+        let ml = mainloop.clone();
+        let _done = core
+            .add_listener_local()
+            .done(move |_id, seq| {
+                if seq == pending {
+                    ml.quit();
+                }
+            })
+            .register();
+        mainloop.run(); // returns once the initial registry dump completes
+    } // registry + listeners dropped here
+
+    let resolved = serial.borrow().clone();
+
+    // Phase 2: build the capture stream, bound to the resolved node by serial when possible.
     let mut props = pw::properties::properties! {
         *pw::keys::MEDIA_TYPE     => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Capture",
         *pw::keys::MEDIA_ROLE     => "Communication",
     };
-    props.insert(*pw::keys::TARGET_OBJECT, target);
+    match &resolved {
+        Some(s) => { props.insert(*pw::keys::TARGET_OBJECT, s.clone()); }
+        None => {
+            warn!(
+                "[Audio:Loopback] '{target}' not present in the PipeWire registry; \
+                 targeting by name (capture may fall back to the default device)"
+            );
+            props.insert(*pw::keys::TARGET_OBJECT, target.clone());
+        }
+    }
     if capture_sink {
         props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
     }
@@ -560,7 +613,7 @@ fn pw_capture_loop(
         &mut params,
     )?;
 
-    info!("[Audio:Loopback] PipeWire capture active: '{source_name}'");
+    info!("[Audio:Loopback] PipeWire capture active: '{source_name}' (serial={resolved:?})");
     mainloop.run();
     Ok(())
 }
