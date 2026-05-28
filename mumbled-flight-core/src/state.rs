@@ -95,6 +95,7 @@ pub enum DataRefId {
     SharedCkptZone,
     Acp1Ic, Acp1Mic, Acp1Spkr, Acp1IntSvcTog, Acp1IntSvcVol,
     Acp2Ic, Acp2Mic, Acp2Spkr, Acp2IntSvcTog, Acp2IntSvcVol,
+    Contwheel0Ic, Contwheel1Ic,
     DoorCabin,
     DoorLavatory,
 }
@@ -122,6 +123,8 @@ impl DataRefId {
             DataRefId::Acp2Spkr       => "CL650/ACP/2/spkr_tog",
             DataRefId::Acp2IntSvcTog  => "CL650/ACP/2/int_svc_tog_value",
             DataRefId::Acp2IntSvcVol  => "CL650/ACP/2/int_svc_vol",
+            DataRefId::Contwheel0Ic   => "CL650/contwheel/0/ic",
+            DataRefId::Contwheel1Ic   => "CL650/contwheel/1/ic",
             DataRefId::DoorCabin => "CL650/doors/cabin/door",
             DataRefId::DoorLavatory => "CL650/doors/cabin/lavatory",
         }
@@ -139,6 +142,7 @@ impl DataRefId {
             DataRefId::Acp1IntSvcTog, DataRefId::Acp1IntSvcVol,
             DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
             DataRefId::Acp2IntSvcTog, DataRefId::Acp2IntSvcVol,
+            DataRefId::Contwheel1Ic, DataRefId::Contwheel2Ic,
             DataRefId::DoorCabin,
             DataRefId::DoorLavatory,
         ]
@@ -158,6 +162,8 @@ pub struct CockpitState {
     pub role: SharedCockpitRole,
     pub zone: SharedCockpitZone,
     pub ic: bool,
+    /// CL650/contwheel/*/ic: control wheel IC push-to-talk
+    pub contwheel_ic: bool,
     pub mic: AcpMicSelection,
     pub spkr: bool,
     /// CL650/ACP/*/int_svc_tog_value: IC playback speaker on/off
@@ -180,6 +186,7 @@ impl Default for CockpitState {
             role: SharedCockpitRole::Pilot,
             zone: SharedCockpitZone::InFbo,
             ic: false,
+            contwheel_ic: false,
             mic: AcpMicSelection::Vhf1,
             spkr: false,
             ic_spkr: false,
@@ -207,7 +214,7 @@ impl CockpitState {
     }
 
     pub fn update_from_dataref(&mut self, id: DataRefId, val: &Value) {
-        let is_pilot = self.seat == CockpitSeat::Captain;
+        let is_left_seat = self.seat == CockpitSeat::Captain; // pilot_seat 0 = left, 1 = right
         let old_state = self.clone();
 
         match id {
@@ -231,36 +238,39 @@ impl CockpitState {
                 Err(n) => warn!("[State] unknown shared cockpit zone value {n}"),
             },
 
-            DataRefId::Acp1Ic          => if is_pilot  { self.ic = Self::val_to_bool(val) },
-            DataRefId::Acp1Mic         => if is_pilot  {
+            DataRefId::Acp1Ic          => if is_left_seat { self.ic = Self::val_to_bool(val) },
+            DataRefId::Acp1Mic         => if is_left_seat {
                 match AcpMicSelection::from_int(Self::val_to_int(val)) {
                     Ok(m)  => self.mic = m,
                     Err(n) => warn!("[State] unknown ACP1 mic value {n}"),
                 }
             },
-            DataRefId::Acp1Spkr        => if is_pilot  { self.spkr    = Self::val_to_bool(val) },
-            DataRefId::Acp1IntSvcTog   => if is_pilot  { self.ic_spkr = Self::val_to_bool(val) },
-            DataRefId::Acp1IntSvcVol   => if is_pilot  { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
+            DataRefId::Acp1Spkr        => if is_left_seat { self.spkr    = Self::val_to_bool(val) },
+            DataRefId::Acp1IntSvcTog   => if is_left_seat { self.ic_spkr = Self::val_to_bool(val) },
+            DataRefId::Acp1IntSvcVol   => if is_left_seat { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
 
-            DataRefId::Acp2Ic          => if !is_pilot { self.ic = Self::val_to_bool(val) },
-            DataRefId::Acp2Mic         => if !is_pilot {
+            DataRefId::Acp2Ic          => if !is_left_seat { self.ic = Self::val_to_bool(val) },
+            DataRefId::Acp2Mic         => if !is_left_seat {
                 match AcpMicSelection::from_int(Self::val_to_int(val)) {
                     Ok(m)  => self.mic = m,
                     Err(n) => warn!("[State] unknown ACP2 mic value {n}"),
                 }
             },
-            DataRefId::Acp2Spkr        => if !is_pilot { self.spkr    = Self::val_to_bool(val) },
-            DataRefId::Acp2IntSvcTog   => if !is_pilot { self.ic_spkr = Self::val_to_bool(val) },
-            DataRefId::Acp2IntSvcVol   => if !is_pilot { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
+            DataRefId::Acp2Spkr        => if !is_left_seat { self.spkr    = Self::val_to_bool(val) },
+            DataRefId::Acp2IntSvcTog   => if !is_left_seat { self.ic_spkr = Self::val_to_bool(val) },
+            DataRefId::Acp2IntSvcVol   => if !is_left_seat { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
+            DataRefId::Contwheel0Ic    => if  is_pilot { self.contwheel_ic = Self::val_to_bool(val) },
+            DataRefId::Contwheel1Ic    => if !is_left_seat { self.contwheel_ic = Self::val_to_bool(val) },
             DataRefId::DoorCabin => self.door = val.as_f64().unwrap_or(1.0) as f32,
             DataRefId::DoorLavatory => self.door_lav = val.as_f64().unwrap_or(1.0) as f32,
         }
 
-        if self.ic != old_state.ic || self.mic != old_state.mic
+        if self.ic != old_state.ic || self.contwheel_ic != old_state.contwheel_ic
+            || self.mic != old_state.mic
             || self.seat != old_state.seat || self.role != old_state.role || self.zone != old_state.zone
         {
-            debug!("[State] seat={:?} role={:?} zone={:?} ic={} mic={:?} (via {:?})",
-                self.seat, self.role, self.zone, self.ic, self.mic, id);
+            debug!("[State] seat={:?} role={:?} zone={:?} ic={} contwheel_ic={} mic={:?} (via {:?})",
+                self.seat, self.role, self.zone, self.ic, self.contwheel_ic, self.mic, id);
         }
     }
 

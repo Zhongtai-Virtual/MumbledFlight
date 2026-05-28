@@ -379,7 +379,8 @@ impl Session {
             if client.is_radio {
                 s.spkr
             } else if client.is_ic {
-                s.role == SharedCockpitRole::Pilot && s.ic
+                // TX when: seated as Pilot AND (ACP/*/ic keyed OR contwheel/*/ic pressed)
+                s.role == SharedCockpitRole::Pilot && (s.ic || s.contwheel_ic)
             } else {
                 true
             }
