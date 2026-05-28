@@ -258,7 +258,7 @@ impl GuiState {
                                     ClientStatus::Connected    => ([0.3, 1.0, 0.3, 1.0], "connected"),
                                     ClientStatus::Disconnected => ([0.8, 0.3, 0.3, 1.0], "disconnected"),
                                 };
-                                ui.text_disabled(&format!("{label}: "));
+                                ui.text_disabled(format!("{label}: "));
                                 ui.same_line();
                                 ui.text_colored(color, tag);
                             }

@@ -129,6 +129,9 @@ impl MumbleVoipClient {
         Ok(control)
     }
 
+    // Encoder/seq/crypt are borrowed from the caller's Session; grouping them would just move
+    // the plumbing around, so the argument list is intentionally wide here.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn send_audio(
         &self,
         pcm: &[f32],
@@ -200,7 +203,7 @@ impl MumbleVoipClient {
         };
 
         static PACKET_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        if PACKET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 400 == 0 {
+        if PACKET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(400) {
             log::debug!("{}", debug_msg);
         }
 

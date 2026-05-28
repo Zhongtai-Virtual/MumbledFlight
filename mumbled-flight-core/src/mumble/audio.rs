@@ -579,9 +579,8 @@ pub fn start_capture(
             let device = pipewire_device(device_name_filter.as_deref(), true);
             let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
             let config = match device.supported_input_configs() {
-                Ok(cfgs) => cfgs
-                    .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
-                    .next(),
+                Ok(mut cfgs) => cfgs
+                    .find(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000),
                 Err(e) => { error!("[Audio:Capture] failed to query configs for '{device_name}': {e}"); return; }
             };
             let config = match config {
@@ -607,8 +606,7 @@ pub fn start_capture(
                     let gain = f32::from_bits(mic_gain.load(Ordering::Relaxed));
                     if num_channels > 1 {
                         for chunk in data.chunks_exact(num_channels) {
-                            let mut sum = 0.0;
-                            for i in 0..num_channels { sum += chunk[i]; }
+                            let sum: f32 = chunk.iter().sum();
                             capture_buffer.push((sum / num_channels as f32) * gain);
                         }
                     } else {
