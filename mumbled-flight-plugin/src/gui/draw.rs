@@ -244,17 +244,19 @@ impl GuiState {
                     if let Some(ref statuses) = voip_statuses {
                         use mumbled_flight_core::mumble::ClientStatus;
                         let map = statuses.lock().unwrap();
-                        for label in ["Voice", "IC", "PA", "Radio"] {
+                        // Known clients in display order; unknown keys (future clients) follow.
+                        const KNOWN: &[&str] = &["Voice", "IC", "PA", "Radio"];
+                        let extras: Vec<&str> = map.keys()
+                            .map(|s| s.as_str())
+                            .filter(|k| !KNOWN.contains(k))
+                            .collect();
+                        for &label in KNOWN.iter().chain(extras.iter()) {
                             if let Some(slot) = map.get(label) {
                                 let s = slot.lock().unwrap();
                                 let (color, tag) = match *s {
-                                    ClientStatus::Connecting => {
-                                        ([1.0f32, 0.8, 0.2, 1.0], "Connecting")
-                                    }
-                                    ClientStatus::Connected => ([0.3, 1.0, 0.3, 1.0], "Connected"),
-                                    ClientStatus::Disconnected => {
-                                        ([0.8, 0.3, 0.3, 1.0], "Disconnected")
-                                    }
+                                    ClientStatus::Connecting   => ([1.0f32, 0.8, 0.2, 1.0], "connecting"),
+                                    ClientStatus::Connected    => ([0.3, 1.0, 0.3, 1.0], "connected"),
+                                    ClientStatus::Disconnected => ([0.8, 0.3, 0.3, 1.0], "disconnected"),
                                 };
                                 ui.text_disabled(&format!("{label}: "));
                                 ui.same_line();

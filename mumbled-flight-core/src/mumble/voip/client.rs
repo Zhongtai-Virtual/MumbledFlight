@@ -52,8 +52,8 @@ pub struct MumbleVoipClient {
     pub role: ClientRole,
     pub voip_status: Arc<Mutex<VoipClientStatus>>,
     pub target_channel: String,
-    /// For ambient/PA clients: (fbo_channel_name, aircraft_channel_name).
-    /// None for IC and radio clients — they never switch channels.
+    /// Voice client only: (fbo_channel_name, aircraft_channel_name) for zone switching.
+    /// None for IC, PA, and radio clients — they never switch channels.
     pub zone_channels: Option<(String, String)>,
     #[allow(dead_code)]
     pub denoise: bool,

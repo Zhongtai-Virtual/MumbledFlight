@@ -200,7 +200,7 @@ pub async fn run_mumble_stack(
                 target_channel: format!("{}_ambient_aircraft", sid_r),
                 zone_channels: None,
                 denoise,
-                test_pos: Some(RADIO_SPEAKER_POSITION),
+                test_pos: test_pos.or(Some(RADIO_SPEAKER_POSITION)),
             };
             let _ = client.run(server_addr, st_r, radio_rx, pb_tx_r).await;
         });

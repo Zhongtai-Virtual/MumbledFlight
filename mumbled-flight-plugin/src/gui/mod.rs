@@ -5,6 +5,7 @@ pub mod devices;
 mod draw;
 mod window;
 
+use mumbled_flight_core::mumble::audio::enumerate_pw_devices;
 use mumbled_flight_core::mumble::VoipStatuses;
 use std::os::raw::c_int;
 use std::path::PathBuf;
@@ -108,8 +109,24 @@ impl GuiState {
             let weak = Arc::downgrade(&pending_devices);
             std::thread::spawn(move || loop {
                 let Some(arc) = weak.upgrade() else { return };
-                let (output_names, output_labels) = devices::enumerate_output_devices();
-                let input_names = devices::enumerate_input_devices();
+                #[cfg(target_os = "linux")]
+                let (output_names, output_labels, input_names) = {
+                    use mumbled_flight_core::mumble::audio::VIRTUAL_SINK_NAME;
+                    // Single PW round-trip for both sinks and sources on Linux.
+                    let (sinks, sources) = enumerate_pw_devices();
+                    let sinks: Vec<_> = sinks.into_iter()
+                        .filter(|s| s.name != VIRTUAL_SINK_NAME)
+                        .collect();
+                    let names  = sinks.iter().map(|s| s.name.clone()).collect();
+                    let labels = sinks.into_iter().map(|s| s.description).collect();
+                    (names, labels, sources)
+                };
+                #[cfg(not(target_os = "linux"))]
+                let (output_names, output_labels, input_names) = {
+                    let (names, labels) = devices::enumerate_output_devices();
+                    let inputs = devices::enumerate_input_devices();
+                    (names, labels, inputs)
+                };
                 *arc.lock().unwrap() = Some(DeviceSnapshot { output_names, output_labels, input_names });
                 std::thread::sleep(Duration::from_secs(2));
             });

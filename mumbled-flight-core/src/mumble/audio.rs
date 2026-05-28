@@ -72,6 +72,66 @@ pub fn enumerate_pw_sources() -> Vec<String> {
 #[cfg(not(target_os = "linux"))]
 pub fn enumerate_pw_sources() -> Vec<String> { vec![] }
 
+/// Enumerate sinks and sources in a single PipeWire round-trip.
+/// Prefer this over calling [`enumerate_pw_sinks`] and [`enumerate_pw_sources`] separately.
+#[cfg(target_os = "linux")]
+pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<String>) {
+    use pipewire as pw;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    pw::init();
+    let Ok(mainloop) = pw::main_loop::MainLoopRc::new(None) else { return (vec![], vec![]) };
+    let Ok(context)  = pw::context::ContextRc::new(&mainloop, None) else { return (vec![], vec![]) };
+    let Ok(core)     = context.connect_rc(None) else { return (vec![], vec![]) };
+    let Ok(registry) = core.get_registry() else { return (vec![], vec![]) };
+
+    let sinks:   Rc<RefCell<Vec<PwSinkInfo>>> = Rc::new(RefCell::new(Vec::new()));
+    let sources: Rc<RefCell<Vec<String>>>     = Rc::new(RefCell::new(Vec::new()));
+    let sinks_cl   = sinks.clone();
+    let sources_cl = sources.clone();
+
+    let _reg = registry
+        .add_listener_local()
+        .global(move |global| {
+            let Some(props) = global.props else { return };
+            match props.get(*pw::keys::MEDIA_CLASS) {
+                Some("Audio/Sink") => {
+                    if let Some(name) = props.get(*pw::keys::NODE_NAME) {
+                        let desc = props.get(*pw::keys::NODE_DESCRIPTION).unwrap_or(name).to_string();
+                        sinks_cl.borrow_mut().push(PwSinkInfo { name: name.to_string(), description: desc });
+                    }
+                }
+                Some("Audio/Source") => {
+                    if let Some(name) = props.get(*pw::keys::NODE_NAME) {
+                        sources_cl.borrow_mut().push(name.to_string());
+                    }
+                }
+                _ => {}
+            }
+        })
+        .register();
+
+    let Ok(pending) = core.sync(0) else { return (vec![], vec![]) };
+    let ml = mainloop.clone();
+    let _done = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == 0 && seq == pending { ml.quit(); }
+        })
+        .register();
+
+    mainloop.run();
+
+    (
+        Rc::try_unwrap(sinks).ok().map(|r| r.into_inner()).unwrap_or_default(),
+        Rc::try_unwrap(sources).ok().map(|r| r.into_inner()).unwrap_or_default(),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<String>) { (vec![], vec![]) }
+
 /// Enumerate PW globals, mapping each node's properties through `mapper`.
 /// Runs a throw-away PW mainloop that quits after the initial registry dump.
 #[cfg(target_os = "linux")]
@@ -130,29 +190,34 @@ where
 pub fn create_linux_sink() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        static SINK: OnceLock<Option<String>> = OnceLock::new();
-        return SINK.get_or_init(|| {
-            const S: &str = VIRTUAL_SINK_NAME;
-            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        // Only cache success — a None result (transient PW failure) must not
+        // permanently disable the radio relay for the session.
+        static SINK: OnceLock<String> = OnceLock::new();
+        if let Some(monitor) = SINK.get() {
+            return Some(monitor.clone());
+        }
 
-            std::thread::spawn(move || {
-                if let Err(e) = pw_null_sink_loop(S, ready_tx) {
-                    error!("[Audio:Linux] PipeWire null-sink error: {e}");
-                }
-            });
+        const S: &str = VIRTUAL_SINK_NAME;
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
 
-            let monitor = format!("{S}.monitor");
-            match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                Ok(()) => {
-                    info!("[Audio:Linux] {monitor} ready");
-                    Some(monitor)
-                }
-                Err(_) => {
-                    warn!("[Audio:Linux] Timed out waiting for {S} virtual sink");
-                    None
-                }
+        std::thread::spawn(move || {
+            if let Err(e) = pw_null_sink_loop(S, ready_tx) {
+                error!("[Audio:Linux] PipeWire null-sink error: {e}");
             }
-        }).clone();
+        });
+
+        let monitor = format!("{S}.monitor");
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(()) => {
+                info!("[Audio:Linux] {monitor} ready");
+                let _ = SINK.set(monitor.clone());
+                Some(monitor)
+            }
+            Err(_) => {
+                warn!("[Audio:Linux] Timed out waiting for {S} virtual sink");
+                None
+            }
+        }
     }
     #[cfg(not(target_os = "linux"))]
     { None }
