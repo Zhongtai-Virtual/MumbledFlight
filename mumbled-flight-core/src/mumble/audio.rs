@@ -153,7 +153,7 @@ pub fn start_capture(
     std::thread::spawn(move || {
         // Hold the env lock across set_var → build_input_stream → play() so that
         // PIPEWIRE_NODE is not mutated by a concurrent stream-open in another thread.
-        let stream = {
+        let _stream = {
             let _guard = pipewire_env_lock().lock().unwrap();
             let device = pipewire_device(device_name_filter.as_deref(), true);
             let config = device.supported_input_configs()
@@ -189,7 +189,6 @@ pub fn start_capture(
             s
         }; // PIPEWIRE_NODE lock released — stream is already connected
         loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
-        drop(stream);
     });
 }
 
