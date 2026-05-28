@@ -173,11 +173,11 @@ impl GuiState {
                             .get(selected_radio as usize)
                             .map(|s| s.as_str())
                             .unwrap_or("(disabled)");
+                        let _dis = ui.begin_disabled(is_connected);
                         ui.text("Radio Source");
                         ui.same_line();
                         ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                         ui.set_next_item_width(fw);
-                        let _dis = ui.begin_disabled(is_connected);
                         if let Some(_tok) = ui.begin_combo("##radio", radio_preview) {
                             let avail_w = ui.content_region_avail()[0];
                             for (i, label) in radio_labels.iter().enumerate() {
