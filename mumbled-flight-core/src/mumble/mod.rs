@@ -21,8 +21,10 @@ pub type VoipStatuses = Arc<Mutex<HashMap<String, Arc<Mutex<VoipClientStatus>>>>
 pub enum TestClient {
     #[default]
     All,
-    Ambient,
+    Voice,
     Ic,
+    Pa,
+    Radio,
 }
 
 pub async fn run_mumble_stack(
@@ -67,7 +69,9 @@ pub async fn run_mumble_stack(
         radio_source
     };
 
-    let radio_tx = if test_client == TestClient::All && final_radio_source.is_some() {
+    let radio_tx = if matches!(test_client, TestClient::All | TestClient::Radio)
+        && final_radio_source.is_some()
+    {
         Some(radio_loopback_sender(final_radio_source.unwrap()))
     } else {
         None
@@ -89,7 +93,7 @@ pub async fn run_mumble_stack(
     };
 
     // 4. Voice Client (natural speech, spatialised)
-    if test_client != TestClient::Ic {
+    if matches!(test_client, TestClient::All | TestClient::Voice) {
         let fbo_ch = format!("{}_ambient_fbo", session_id);
         let aircraft_ch = format!("{}_ambient_aircraft", session_id);
         let initial_zone = state.lock().unwrap().zone;
@@ -118,11 +122,12 @@ pub async fn run_mumble_stack(
         });
     }
 
-    if test_client == TestClient::Ambient {
+    if test_client == TestClient::Voice {
         return;
     }
 
     // 5. Intercom Client
+    if !matches!(test_client, TestClient::Pa | TestClient::Radio) {
     let st_i = Arc::clone(&state);
     let mic_rx_i = mic_tx.subscribe();
     let pb_tx_i = ic_pb_tx;
@@ -142,10 +147,12 @@ pub async fn run_mumble_stack(
         };
         let _ = client.run(server_addr, st_i, mic_rx_i, pb_tx_i).await;
     });
+    } // end IC guard
 
     // 6. PA (Public Address) Client — fixed cabin position, always in aircraft channel
     // TODO: replace with actual cabin speaker position once confirmed
     const PA_POSITION: [f32; 3] = [0.0, 0.0, 0.0];
+    if !matches!(test_client, TestClient::Ic | TestClient::Radio) {
     let st_pa = Arc::clone(&state);
     let mic_rx_pa = mic_tx.subscribe();
     let pb_tx_pa = ambient_pb_tx.clone();
@@ -165,6 +172,7 @@ pub async fn run_mumble_stack(
         };
         let _ = client.run(server_addr, st_pa, mic_rx_pa, pb_tx_pa).await;
     });
+    } // end PA guard
 
     // 7. Radio Relay Client + local COM monitor
     // (radio_tx is a cloned Sender into the shared loopback channel — no new PW stream)

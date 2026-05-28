@@ -234,11 +234,6 @@ impl Session {
         state_msg.set_session(sync.get_session());
         state_msg.set_plugin_context(client.context.as_bytes().to_vec());
         state_msg.set_plugin_identity(client.username.clone());
-        // TX-only clients declare themselves deaf so the server stops routing
-        // incoming voice packets to them — eliminates wasted channel traffic.
-        if matches!(client.role, ClientRole::Pa | ClientRole::Radio { .. }) {
-            state_msg.set_self_deaf(true);
-        }
         control
             .send(ControlPacket::UserState(Box::new(state_msg)))
             .await?;

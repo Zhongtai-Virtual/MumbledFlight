@@ -14,8 +14,10 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliClient {
-    Ambient,
+    Voice,
     Ic,
+    Pa,
+    Radio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -60,13 +62,17 @@ struct Args {
     #[arg(long, default_value_t = false)]
     auto_sink: bool,
 
+    /// Mumble server address (host:port).
+    #[arg(short, long, default_value = "127.0.0.1:64738", value_name = "HOST:PORT")]
+    server: String,
+
     /// List all available audio input and output devices on your system.
     #[arg(long, default_value_t = false)]
     list_devices: bool,
 
-    /// Test: spawn only a single client type (ambient or ic). Omit to run all clients.
-    /// Use without a value to default to ambient.
-    #[arg(long, value_name = "TYPE", num_args = 0..=1, default_missing_value = "ambient")]
+    /// Test: spawn only a single client type. Omit to run all clients.
+    /// Use without a value to default to voice.
+    #[arg(long, value_name = "TYPE", num_args = 0..=1, default_missing_value = "voice")]
     test: Option<CliClient>,
 
     /// Zone the ambient client starts in. Only meaningful with --client ambient.
@@ -104,7 +110,7 @@ async fn main() -> Result<()> {
 
     // 2. Initialize shared state
     let state = Arc::new(Mutex::new(CockpitState::default()));
-    let server_addr: SocketAddr = "127.0.0.1:64738".parse()?;
+    let server_addr: SocketAddr = args.server.parse()?;
 
     // 3. Resolve Identity
     let user_prefix = if let Some(u) = args.user {
@@ -138,25 +144,39 @@ async fn main() -> Result<()> {
     });
     // Pre-configure state for single-client test mode — DataRef bridge is skipped below.
     if args.test.is_some() {
-        use mumbled_flight_core::state::SharedCockpitZone;
+        use mumbled_flight_core::state::{AcpMicSelection, SharedCockpitRole, SharedCockpitZone};
         let mut s = state.lock().unwrap();
+        s.role = SharedCockpitRole::Pilot;
         if let Some(zone) = args.zone {
             s.zone = match zone {
                 CliZone::Fbo => SharedCockpitZone::InFbo,
                 CliZone::Aircraft => SharedCockpitZone::AroundOrInAircraft,
             };
         }
-        if args.test == Some(CliClient::Ic) {
-            s.acp_ic = true;
+        match args.test {
+            Some(CliClient::Ic) => {
+                s.acp_ic = true;
+            }
+            Some(CliClient::Pa) => {
+                s.mic = AcpMicSelection::Pa;
+                s.acp_rt = true;
+            }
+            Some(CliClient::Radio) => {
+                s.com1_rx = true;
+                s.spkr_tog = true;
+            }
+            _ => {}
         }
     }
     let state_mumble = Arc::clone(&state);
     tokio::spawn(async move {
         use std::sync::atomic::AtomicU32;
         let test_client = match args.test {
-            None => TestClient::All,
-            Some(CliClient::Ambient) => TestClient::Ambient,
-            Some(CliClient::Ic) => TestClient::Ic,
+            None                    => TestClient::All,
+            Some(CliClient::Voice)  => TestClient::Voice,
+            Some(CliClient::Ic)     => TestClient::Ic,
+            Some(CliClient::Pa)     => TestClient::Pa,
+            Some(CliClient::Radio)  => TestClient::Radio,
         };
         let statuses = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         mumble::run_mumble_stack(
