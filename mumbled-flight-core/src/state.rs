@@ -1,14 +1,36 @@
 //! Shared state and DataRef management for the MumbledFlight application.
 
 use serde_json::Value;
-use log::debug;
+use log::{debug, warn};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SharedCockpitRole {
+    #[default]
+    Pilot      = 0,
+    Jumpseater = 1,
+    Pax        = 2,
+    Spectator  = 3,
+}
+
+impl SharedCockpitRole {
+    pub fn from_int(n: i32) -> Result<Self, i32> {
+        match n {
+            0 => Ok(Self::Pilot),
+            1 => Ok(Self::Jumpseater),
+            2 => Ok(Self::Pax),
+            3 => Ok(Self::Spectator),
+            _ => Err(n),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataRefId {
-    HeadX, HeadY, HeadZ, 
+    HeadX, HeadY, HeadZ,
     HeadPsi, HeadThe, HeadPhi,
     PlanePsi,
     PilotSeat,
+    SharedCkptRole,
     Acp1Ic, Acp1Mic, Acp1Spkr,
     Acp2Ic, Acp2Mic, Acp2Spkr,
     DoorCabin,
@@ -26,6 +48,7 @@ impl DataRefId {
             DataRefId::HeadPhi => "sim/graphics/view/pilots_head_phi",
             DataRefId::PlanePsi => "sim/flightmodel/position/psi",
             DataRefId::PilotSeat => "CL650/pilot_seat",
+            DataRefId::SharedCkptRole => "CL650/shared_ckpt/my_role",
             DataRefId::Acp1Ic => "CL650/ACP/1/ic",
             DataRefId::Acp1Mic => "CL650/ACP/1/mic_value",
             DataRefId::Acp1Spkr => "CL650/ACP/1/spkr_tog",
@@ -43,6 +66,7 @@ impl DataRefId {
             DataRefId::HeadPsi, DataRefId::HeadThe, DataRefId::HeadPhi,
             DataRefId::PlanePsi,
             DataRefId::PilotSeat,
+            DataRefId::SharedCkptRole,
             DataRefId::Acp1Ic, DataRefId::Acp1Mic, DataRefId::Acp1Spkr,
             DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
             DataRefId::DoorCabin,
@@ -61,6 +85,7 @@ pub struct CockpitState {
     pub rot: [f32; 3],
     pub plane_rot: [f32; 3],
     pub seat: i32,
+    pub role: SharedCockpitRole,
     pub ic: bool,
     pub pa: bool,
     pub spkr: bool,
@@ -77,6 +102,7 @@ impl Default for CockpitState {
             rot: [0.0; 3],
             plane_rot: [0.0; 3],
             seat: 0,
+            role: SharedCockpitRole::Pilot,
             ic: false,
             pa: false,
             spkr: false,
@@ -115,7 +141,11 @@ impl CockpitState {
             DataRefId::HeadPhi => self.rot[2] = val.as_f64().unwrap_or(0.0) as f32,
             DataRefId::PlanePsi => self.plane_rot[0] = val.as_f64().unwrap_or(0.0) as f32,
             DataRefId::PilotSeat => self.seat = Self::val_to_int(val),
-            
+            DataRefId::SharedCkptRole => match SharedCockpitRole::from_int(Self::val_to_int(val)) {
+                Ok(r)  => self.role = r,
+                Err(n) => warn!("[State] unknown shared cockpit role value {n}"),
+            },
+
             DataRefId::Acp1Ic => if is_pilot { self.ic = Self::val_to_bool(val) },
             DataRefId::Acp1Mic => if is_pilot { self.pa = Self::val_to_int(val) == 7 },
             DataRefId::Acp1Spkr => if is_pilot { self.spkr = Self::val_to_bool(val) },
@@ -127,8 +157,8 @@ impl CockpitState {
             DataRefId::DoorLavatory => self.door_lav = val.as_f64().unwrap_or(1.0) as f32,
         }
 
-        if self.ic != old_state.ic || self.pa != old_state.pa || self.seat != old_state.seat {
-            debug!("[State] seat={} ic={} pa={} (via {:?})", self.seat, self.ic, self.pa, id);
+        if self.ic != old_state.ic || self.pa != old_state.pa || self.seat != old_state.seat || self.role != old_state.role {
+            debug!("[State] seat={} role={:?} ic={} pa={} (via {:?})", self.seat, self.role, self.ic, self.pa, id);
         }
     }
 
