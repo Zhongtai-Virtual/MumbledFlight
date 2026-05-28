@@ -4,6 +4,23 @@ use serde_json::Value;
 use log::{debug, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CockpitSeat {
+    #[default]
+    Captain      = 0,
+    FirstOfficer = 1,
+}
+
+impl CockpitSeat {
+    pub fn from_int(n: i32) -> Result<Self, i32> {
+        match n {
+            0 => Ok(Self::Captain),
+            1 => Ok(Self::FirstOfficer),
+            _ => Err(n),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SharedCockpitRole {
     #[default]
     Pilot      = 0,
@@ -84,7 +101,7 @@ pub struct CockpitState {
     pub pos: [f32; 3],
     pub rot: [f32; 3],
     pub plane_rot: [f32; 3],
-    pub seat: i32,
+    pub seat: CockpitSeat,
     pub role: SharedCockpitRole,
     pub ic: bool,
     pub pa: bool,
@@ -101,7 +118,7 @@ impl Default for CockpitState {
             pos: [0.0; 3],
             rot: [0.0; 3],
             plane_rot: [0.0; 3],
-            seat: 0,
+            seat: CockpitSeat::Captain,
             role: SharedCockpitRole::Pilot,
             ic: false,
             pa: false,
@@ -129,7 +146,7 @@ impl CockpitState {
     }
 
     pub fn update_from_dataref(&mut self, id: DataRefId, val: &Value) {
-        let is_pilot = self.seat == 0;
+        let is_pilot = self.seat == CockpitSeat::Captain;
         let old_state = self.clone();
 
         match id {
@@ -140,7 +157,10 @@ impl CockpitState {
             DataRefId::HeadThe => self.rot[1] = val.as_f64().unwrap_or(0.0) as f32,
             DataRefId::HeadPhi => self.rot[2] = val.as_f64().unwrap_or(0.0) as f32,
             DataRefId::PlanePsi => self.plane_rot[0] = val.as_f64().unwrap_or(0.0) as f32,
-            DataRefId::PilotSeat => self.seat = Self::val_to_int(val),
+            DataRefId::PilotSeat => match CockpitSeat::from_int(Self::val_to_int(val)) {
+                Ok(s)  => self.seat = s,
+                Err(n) => warn!("[State] unknown pilot seat value {n}"),
+            },
             DataRefId::SharedCkptRole => match SharedCockpitRole::from_int(Self::val_to_int(val)) {
                 Ok(r)  => self.role = r,
                 Err(n) => warn!("[State] unknown shared cockpit role value {n}"),
@@ -158,7 +178,7 @@ impl CockpitState {
         }
 
         if self.ic != old_state.ic || self.pa != old_state.pa || self.seat != old_state.seat || self.role != old_state.role {
-            debug!("[State] seat={} role={:?} ic={} pa={} (via {:?})", self.seat, self.role, self.ic, self.pa, id);
+            debug!("[State] seat={:?} role={:?} ic={} pa={} (via {:?})", self.seat, self.role, self.ic, self.pa, id);
         }
     }
 
