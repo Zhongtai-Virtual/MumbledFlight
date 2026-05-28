@@ -1,11 +1,19 @@
 //! High-Performance Audio Engine for MumbledFlight.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use log::{info, debug, error};
+use log::{info, debug, error, warn};
 use tokio::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::collections::VecDeque;
 use std::io::Read;
+
+// Serialises the PIPEWIRE_NODE env-var mutation + CPAL device-open sequence.
+// std::env::set_var is unsound when called concurrently from multiple threads;
+// holding this lock across set_var → build_*_stream prevents the race.
+fn pipewire_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 pub fn list_audio_devices() {
     println!("\n--- [ Audio Host & Device Discovery ] ---");
@@ -137,45 +145,45 @@ pub fn start_capture(
     _is_loopback: bool,
 ) {
     std::thread::spawn(move || {
-        let device = pipewire_device(device_name_filter.as_deref(), true);
-
-        let supported_configs = device.supported_input_configs().expect("Failed to get configs");
-        let config = supported_configs
-            .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
-            .next()
-            .expect("HARDWARE ERROR: Your device does not natively support 48,000Hz.")
-            .with_sample_rate(cpal::SampleRate(48000));
-
-        let num_channels = config.channels() as usize;
-        info!("[Audio:Capture] Active: {} (48kHz, {} ch)", device.name().unwrap_or_default(), num_channels);
-
-        let mut capture_buffer = Vec::new();
-        let stream = device.build_input_stream(
-            &config.into(),
-            move |data: &[f32], _| {
-                if num_channels > 1 {
-                    for chunk in data.chunks_exact(num_channels) {
-                        let mut sum = 0.0;
-                        for i in 0..num_channels { sum += chunk[i]; }
-                        capture_buffer.push((sum / num_channels as f32) * gain);
+        // Hold the env lock across set_var → build_input_stream → play() so that
+        // PIPEWIRE_NODE is not mutated by a concurrent stream-open in another thread.
+        let stream = {
+            let _guard = pipewire_env_lock().lock().unwrap();
+            let device = pipewire_device(device_name_filter.as_deref(), true);
+            let config = device.supported_input_configs()
+                .expect("Failed to get configs")
+                .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
+                .next()
+                .expect("HARDWARE ERROR: Your device does not natively support 48,000Hz.")
+                .with_sample_rate(cpal::SampleRate(48000));
+            let num_channels = config.channels() as usize;
+            info!("[Audio:Capture] Active: {} (48kHz, {} ch)", device.name().unwrap_or_default(), num_channels);
+            let mut capture_buffer = Vec::new();
+            let s = device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    if num_channels > 1 {
+                        for chunk in data.chunks_exact(num_channels) {
+                            let mut sum = 0.0;
+                            for i in 0..num_channels { sum += chunk[i]; }
+                            capture_buffer.push((sum / num_channels as f32) * gain);
+                        }
+                    } else {
+                        for &s in data { capture_buffer.push(s * gain); }
                     }
-                } else {
-                    for &s in data { capture_buffer.push(s * gain); }
-                }
-
-                while capture_buffer.len() >= 960 {
-                    let frame: Vec<f32> = capture_buffer.drain(..960).collect();
-                    let _ = tx.try_send(frame);
-                }
-            },
-            |err| error!("[Audio:Capture] {}", err),
-            None,
-        ).expect("Failed to build input stream");
-
-        stream.play().expect("Failed to start input stream");
-        // stream lives here as a local — no mem::forget needed.
-        // Thread parks until the process exits or until a future shutdown mechanism drops it.
+                    while capture_buffer.len() >= 960 {
+                        let frame: Vec<f32> = capture_buffer.drain(..960).collect();
+                        let _ = tx.try_send(frame);
+                    }
+                },
+                |err| error!("[Audio:Capture] {}", err),
+                None,
+            ).expect("Failed to build input stream");
+            s.play().expect("Failed to start input stream");
+            s
+        }; // PIPEWIRE_NODE lock released — stream is already connected
         loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
+        drop(stream);
     });
 }
 
@@ -183,46 +191,50 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
     // Build and run entirely inside one thread — CPAL Stream is !Send on ALSA,
     // so creating and dropping it in the same thread avoids any Send requirement.
     std::thread::spawn(move || {
-        let device = pipewire_device(preferred_device.as_deref(), false);
-
-        let supported_configs = device.supported_output_configs().expect("Failed to get configs");
-        let config = supported_configs
-            .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
-            .find(|c| c.channels() == 2)
-            .or_else(|| device.supported_output_configs().unwrap().next())
-            .expect("HARDWARE ERROR: Could not find a valid output config.")
-            .with_sample_rate(cpal::SampleRate(48000));
-
-        let device_channels = config.channels() as usize;
-        info!("[Audio:Out] Sink: {} (48kHz, {} ch)", device.name().unwrap_or_default(), device_channels);
-
         let pending_samples    = Arc::new(Mutex::new(VecDeque::<f32>::new()));
         let pending_samples_cb = Arc::clone(&pending_samples);
-        let hwm                = 7200 * device_channels;
         let is_playing         = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let is_playing_cb      = Arc::clone(&is_playing);
 
-        let stream = device.build_output_stream(
-            &config.into(),
-            move |data: &mut [f32], _| {
-                let mut lock = pending_samples_cb.lock().unwrap();
-                let available = lock.len();
-                if !is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) || available < data.len() {
-                    for x in data.iter_mut() { *x = 0.0; }
-                    if is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) && available < data.len() {
-                        is_playing_cb.store(false, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    return;
-                }
-                for (i, sample) in lock.drain(..data.len()).enumerate() {
-                    data[i] = sample;
-                }
-            },
-            |err| error!("[Audio:Out] {}", err),
-            None,
-        ).expect("Failed to build output stream");
+        let (stream, device_channels) = {
+            let _guard = pipewire_env_lock().lock().unwrap();
+            let device = pipewire_device(preferred_device.as_deref(), false);
 
-        stream.play().expect("Failed to start output stream");
+            let supported_configs = device.supported_output_configs().expect("Failed to get configs");
+            let config = supported_configs
+                .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
+                .find(|c| c.channels() == 2)
+                .or_else(|| device.supported_output_configs().unwrap().next())
+                .expect("HARDWARE ERROR: Could not find a valid output config.")
+                .with_sample_rate(cpal::SampleRate(48000));
+
+            let device_channels = config.channels() as usize;
+            info!("[Audio:Out] Sink: {} (48kHz, {} ch)", device.name().unwrap_or_default(), device_channels);
+
+            let s = device.build_output_stream(
+                &config.into(),
+                move |data: &mut [f32], _| {
+                    let mut lock = pending_samples_cb.lock().unwrap();
+                    let available = lock.len();
+                    if !is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) || available < data.len() {
+                        for x in data.iter_mut() { *x = 0.0; }
+                        if is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) && available < data.len() {
+                            is_playing_cb.store(false, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        return;
+                    }
+                    for (i, sample) in lock.drain(..data.len()).enumerate() {
+                        data[i] = sample;
+                    }
+                },
+                |err| error!("[Audio:Out] {}", err),
+                None,
+            ).expect("Failed to build output stream");
+            s.play().expect("Failed to start output stream");
+            (s, device_channels)
+        }; // PIPEWIRE_NODE lock released — stream is already connected
+
+        let hwm = 7200 * device_channels;
 
         let mut last_log = std::time::Instant::now();
         while let Some(stereo_frame_48k) = rx.blocking_recv() {
