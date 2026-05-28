@@ -119,9 +119,9 @@ impl GuiState {
                     {
                         use mumbled_flight_core::mumble::audio::VIRTUAL_SINK_NAME;
                         // Single PW round-trip for both sinks and sources on Linux.
-                        info!("[DeviceEnum] enumerating PipeWire devices...");
+                        debug!("[DeviceEnum] polling...");
                         let (sinks, sources) = enumerate_pw_devices();
-                        info!("[DeviceEnum] found {} sinks, {} sources", sinks.len(), sources.len());
+                        debug!("[DeviceEnum] poll done: {} sinks, {} sources", sinks.len(), sources.len());
                         let sinks: Vec<_> = sinks.into_iter()
                             .filter(|s| s.name != VIRTUAL_SINK_NAME)
                             .collect();
@@ -225,7 +225,7 @@ impl GuiState {
         let changed = snap.output_names != self.output_devices
             || snap.input_names != self.radio_input_devices;
         if changed {
-            debug!("device refresh: sinks={:?} inputs={:?}", snap.output_names, snap.input_names);
+            info!("devices changed: outputs={:?} inputs={:?}", snap.output_names, snap.input_names);
         }
 
         let resolve = |cur: Option<String>| cur
