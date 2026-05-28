@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::{error, info};
 use mumbled_flight_core::config::Config;
-use mumbled_flight_core::mumble::{self, voip::xplane_to_mumble, MicSource, TestClient};
+use mumbled_flight_core::mumble::{self, voip::xplane_to_mumble, MicSource, MumbleStackConfig, TestClient};
 use mumbled_flight_core::state::CockpitState;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -190,22 +190,22 @@ async fn main() -> Result<()> {
         } else {
             MicSource::Real
         };
-        mumble::run_mumble_stack(
-            state_mumble,
-            user_prefix,
-            flight_id,
-            Arc::new(AtomicU32::new(args.gain.to_bits())),
-            args.denoise,
-            args.radio_source,
-            args.auto_sink,
+        mumble::run_mumble_stack(MumbleStackConfig {
+            state: state_mumble,
+            user_name: user_prefix,
+            session_id: flight_id,
+            mic_gain: Arc::new(AtomicU32::new(args.gain.to_bits())),
+            denoise: args.denoise,
+            radio_source: args.radio_source,
+            auto_sink: args.auto_sink,
             test_client,
             mic_source,
             test_pos, // None = use real X-Plane position; Some = fixed pos
             server_addr,
-            None,
-            None,
+            ambient_output: None,
+            ic_output: None,
             statuses,
-        )
+        })
         .await;
     });
 
