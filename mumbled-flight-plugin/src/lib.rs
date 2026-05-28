@@ -86,7 +86,8 @@ pub unsafe extern "C" fn XPluginStart(
     write_cstr(out_sig, "app.mzt.mumbled-flight");
     write_cstr(out_desc, "Spatial audio with Mumble");
     logger::init();
-    info!("XPluginStart");
+    info!("XPluginStart v{} (built {})",
+        env!("CARGO_PKG_VERSION"), env!("BUILD_TIMESTAMP"));
     1
 }
 
@@ -218,6 +219,7 @@ unsafe extern "C-unwind" fn flight_loop_cb(
     };
 
     ps.retry_pending_datarefs();
+    ps.gui.refresh_output_devices();
 
     if let Some(conn) = &ps.connection {
         if let Ok(mut cs) = conn.cockpit_state.lock() {

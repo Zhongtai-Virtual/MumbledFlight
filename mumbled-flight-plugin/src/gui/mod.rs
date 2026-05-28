@@ -7,7 +7,7 @@ mod window;
 
 use std::os::raw::c_int;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use log::{debug, LevelFilter};
 
 use xplane_sys::{XPLMMouseStatus, XPLMTakeKeyboardFocus, XPLMWindowID};
@@ -24,6 +24,7 @@ pub struct GuiState {
     imgui_renderer: Option<imgui_glow_renderer::AutoRenderer>,
 
     last_time: Instant,
+    last_device_refresh: Instant,
     screen_h: i32,
     logged_coords: bool,
     mouse_pos: [f32; 2],
@@ -95,6 +96,7 @@ impl GuiState {
             imgui_ctx: None,
             imgui_renderer: None,
             last_time: Instant::now(),
+            last_device_refresh: Instant::now() - Duration::from_secs(10),
             screen_h: 0,
             logged_coords: false,
             mouse_pos: [0.0; 2],
@@ -137,7 +139,41 @@ impl GuiState {
     }
 
     pub fn output_device(&self) -> Option<String> {
-        self.output_devices.get(self.selected_device as usize).cloned()
+        self.output_devices
+            .get(self.selected_device as usize)
+            .filter(|s| !s.is_empty())
+            .cloned()
+    }
+
+    /// Re-enumerate output and input devices, preserving current selections by name.
+    /// Throttled to at most once every 2 seconds; first call is always immediate.
+    pub fn refresh_output_devices(&mut self) {
+        if self.last_device_refresh.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_device_refresh = Instant::now();
+
+        let current_out = self.output_device();
+        let (devices, labels) = devices::enumerate_output_devices();
+        debug!("device refresh: {} sinks = {:?}", devices.len(), devices);
+        self.selected_device = current_out
+            .and_then(|name| devices.iter().position(|d| *d == name))
+            .map(|i| i as i32)
+            .unwrap_or(0);
+        self.output_devices = devices;
+        self.output_device_labels = labels;
+
+        let current_radio = self.radio_source_str().to_string();
+        let input_devices = devices::enumerate_input_devices();
+        self.selected_radio = match current_radio.as_str() {
+            ""              => 0,
+            RADIO_AUTO_SINK => 1,
+            name            => input_devices.iter()
+                .position(|d| d == name)
+                .map(|i| i as i32 + 2)
+                .unwrap_or(0),
+        };
+        self.radio_input_devices = input_devices;
     }
 
     /// Returns `(radio_source, auto_sink)` for passing to `run_mumble_stack`.

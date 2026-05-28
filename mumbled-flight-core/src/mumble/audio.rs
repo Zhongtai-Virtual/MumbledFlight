@@ -57,45 +57,28 @@ pub fn create_linux_sink() -> Option<String> {
     { None }
 }
 
-fn select_input_device(filter: Option<&str>) -> cpal::Device {
-    let host = cpal::default_host();
-    if let Some(f) = filter {
-        if let Ok(mut devs) = host.input_devices() {
-            if let Some(d) = devs.find(|d| d.name().unwrap_or_default().to_lowercase().contains(f)) {
-                return d;
-            }
+fn pipewire_device(node: Option<&str>, input: bool) -> cpal::Device {
+    // Route to a specific PipeWire node when requested; clear the var otherwise
+    // so a previous selection from the same process doesn't leak into the next stream.
+    unsafe {
+        match node {
+            Some(n) => std::env::set_var("PIPEWIRE_NODE", n),
+            None    => std::env::remove_var("PIPEWIRE_NODE"),
         }
     }
-    host.default_input_device().expect("No default input device")
-}
-
-fn select_output_device(preferred: Option<&str>) -> cpal::Device {
     let host = cpal::default_host();
-    if let Some(f) = preferred {
-        // First: try an exact ALSA device name match.
-        if let Ok(mut devs) = host.output_devices() {
-            if let Some(d) = devs.find(|d| d.name().unwrap_or_default().to_lowercase().contains(&f.to_lowercase())) {
-                return d;
-            }
-        }
-        // Not an ALSA device — treat as a PipeWire/PulseAudio sink name.
-        // Set both routing env vars so the selected sink is honoured regardless
-        // of whether we open the `pipewire` or `pulse` ALSA bridge device.
-        #[cfg(target_os = "linux")]
-        unsafe {
-            std::env::set_var("PIPEWIRE_NODE", f); // native PipeWire ALSA plugin
-            std::env::set_var("PULSE_SINK", f);    // pipewire-pulse compat layer
-        }
+    let is_pw = |d: &cpal::Device| d.name().unwrap_or_default().to_lowercase() == "pipewire";
+    if input {
+        host.input_devices().ok()
+            .and_then(|mut d| d.find(is_pw))
+            .or_else(|| host.default_input_device())
+            .expect("No PipeWire input device")
+    } else {
+        host.output_devices().ok()
+            .and_then(|mut d| d.find(is_pw))
+            .or_else(|| host.default_output_device())
+            .expect("No PipeWire output device")
     }
-    // Prefer the pipewire ALSA bridge, fall back to pulse, then system default.
-    host.output_devices().ok()
-        .and_then(|mut d| d.find(|d| {
-            let name = d.name().unwrap_or_default().to_lowercase();
-            (name == "pipewire" || name == "pulse") &&
-            d.supported_output_configs().map(|mut c| c.any(|cfg| cfg.channels() == 2)).unwrap_or(false)
-        }))
-        .or_else(|| host.default_output_device())
-        .expect("No suitable output device")
 }
 
 pub fn start_capture(
@@ -107,7 +90,7 @@ pub fn start_capture(
     _is_loopback: bool,
 ) {
     std::thread::spawn(move || {
-        let device = select_input_device(device_name_filter.as_deref());
+        let device = pipewire_device(device_name_filter.as_deref(), true);
 
         let supported_configs = device.supported_input_configs().expect("Failed to get configs");
         let config = supported_configs
@@ -153,7 +136,7 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
     // Build and run entirely inside one thread — CPAL Stream is !Send on ALSA,
     // so creating and dropping it in the same thread avoids any Send requirement.
     std::thread::spawn(move || {
-        let device = select_output_device(preferred_device.as_deref());
+        let device = pipewire_device(preferred_device.as_deref(), false);
 
         let supported_configs = device.supported_output_configs().expect("Failed to get configs");
         let config = supported_configs
