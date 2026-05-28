@@ -38,12 +38,20 @@ cargo build --release -p mumbled-flight-plugin
 # Build + run the standalone CLI bridge
 cargo run -p mumbled-flight-cli -- <FLIGHT_ID> [flags]
 
-# Tests (note: there is currently no test suite in-tree)
-cargo test
+# Tests (unit tests live in mumbled-flight-core)
+cargo test -p mumbled-flight-core
+
+# Run a single test by name
+cargo test -p mumbled-flight-core stereo_gains_pan_toward_source_side
 ```
 
-There are **no unit/integration tests in the repository yet**. `spatial.rs` and `state.rs` are
-pure and the obvious place to add them.
+Unit tests currently cover the two pure modules, `spatial.rs` (gain curve, door attenuation,
+position round-trip, stereo panning/falloff) and `state.rs` (seat-gated control ownership,
+`from_int` boundaries, the f32 update path). The audio I/O and protocol layers are not yet
+tested. `cargo clippy --workspace` is expected to be **clean** — keep it that way.
+
+> Building/testing `mumbled-flight-core` pulls in CPAL → ALSA and PipeWire, so the Linux system
+> deps below must be installed or `cargo test` fails at the `alsa-sys` build script.
 
 ### Linux build/runtime system deps
 `libasound2-dev libpulse-dev libssl-dev libopus-dev libpipewire-0.3-dev clang pkg-config`
@@ -79,10 +87,12 @@ shared across every async client.
   maps 1:1 to a DataRef name string via `DataRefId::name()`. **When adding a new DataRef, add the
   variant, its `name()` arm, AND include it in `DataRefId::all()`** — both frontends iterate
   `all()` to discover/poll DataRefs, so omitting it there silently drops the field.
-- `CockpitState::update_from_dataref` is where a raw DataRef value mutates state. Seat-dependent
-  logic lives here: ACP1/contwheel0 apply only when in the **left (Captain) seat**, ACP2/contwheel1
-  only in the **right (First Officer) seat**. This is the one place that resolves "which physical
-  control belongs to me."
+- `CockpitState::update_from_float(id, val)` is the **single update path** — a raw f32 DataRef
+  value mutates state here. The plugin reads f32/i32 XPLM handles and calls it directly; the CLI
+  bridge converts its JSON values to f32 first (`bridge.rs::value_to_f32`). Seat-dependent gating
+  uses `CockpitState::owns(id)`: ACP1/contwheel0 belong to the **left (Captain) seat**,
+  ACP2/contwheel1 to the **right (First Officer) seat**. `owns()` is the one place that resolves
+  "which physical control belongs to me" — paired ACP1/ACP2 arms share a single match arm gated on it.
 - Aircraft-specific identifiers (`CL650/...`, `xpilot/...`) are CL650-coupled. Generalizing to
   other aircraft means abstracting these names.
 
@@ -98,9 +108,11 @@ shared across every async client.
   on error.
 
 ### 3. `run_mumble_stack` fans out into multiple Mumble clients (`core/src/mumble/mod.rs`)
-This is the heart of the system. One real microphone capture is broadcast (tokio `broadcast`
-channel) to **four logical Mumble clients**, each a separate TLS+UDP connection with its own
-username suffix and Mumble channel:
+This is the heart of the system. Both frontends call it with a single `MumbleStackConfig` struct
+(state, identity, server, devices, radio source, test mode, `statuses` map — see the struct for
+fields). One real microphone capture is broadcast (tokio `broadcast` channel) to **four logical
+Mumble clients**, each a separate TLS+UDP connection with its own username suffix and Mumble
+channel, spawned through the shared `spawn_client` helper:
 
 | `ClientRole` | Username | Channel | Purpose |
 |--------------|----------|---------|---------|
@@ -142,9 +154,9 @@ username suffix and Mumble channel:
   the cabin and lavatory doors. Also Opus encode/decode and position byte (de)serialization.
 
 > **Coordinate convention (gotcha):** X-Plane is **aft-positive Z**, Mumble is **forward-positive
-> Z**. The Z axis is negated at every X-Plane↔Mumble boundary (see `position_bytes`, `spatialize`,
-> the CLI `--pos` parser, and the `RADIO_SPEAKER_POSITION` constant). Keep this consistent when
-> touching positions.
+> Z** — they differ only in the sign of Z. Convert at every X-Plane↔Mumble boundary with the single
+> `spatial::xplane_to_mumble(pos)` helper (it is its own inverse) rather than negating Z by hand;
+> it is used in `position_bytes`, `spatialize`, the CLI `--pos` parser, and `RADIO_SPEAKER_POSITION`.
 
 ### 5. Audio I/O (`core/src/mumble/audio.rs`)
 CPAL-based capture/playback plus Linux PipeWire device enumeration (`enumerate_pw_devices`) and the
