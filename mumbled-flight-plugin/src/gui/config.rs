@@ -13,7 +13,8 @@ pub struct PluginConfig {
     /// Microphone input gain multiplier (applies to captured audio only, not playback).
     pub gain: f32,
     pub denoise: bool,
-    pub output_device: String,
+    pub ambient_device: String,
+    pub ic_device: String,
     pub log_level: String,
     /// "" = disabled, "__auto__" = MumblingRadio auto-sink, anything else = device name.
     pub radio_source: String,
@@ -27,7 +28,8 @@ impl Default for PluginConfig {
             user_name: String::new(),
             gain: 1.0,
             denoise: false,
-            output_device: String::new(),
+            ambient_device: String::new(),
+            ic_device: String::new(),
             log_level: "info".to_string(),
             radio_source: String::new(),
         }

@@ -321,7 +321,8 @@ impl Session {
         else {
             return;
         };
-        if self.my_session == Some(session_id) || client.is_radio {
+        // Drop our own echoed packets.
+        if self.my_session == Some(session_id) {
             return;
         }
 

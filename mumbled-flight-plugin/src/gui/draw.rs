@@ -60,7 +60,8 @@ impl GuiState {
         let mut user_name        = self.user_name.clone();
         let mut gain             = self.gain;
         let mut denoise          = self.denoise;
-        let mut selected_device  = self.selected_device;
+        let mut selected_ambient = self.selected_ambient;
+        let mut selected_ic      = self.selected_ic;
         let mut log_level        = self.log_level;
         let mut should_connect   = false;
         let mut should_disconnect = false;
@@ -128,27 +129,31 @@ impl GuiState {
                     drop(_dis);
 
                     if !output_devices.is_empty() {
-                        let preview = output_device_labels
-                            .get(selected_device as usize)
-                            .map(|s| s.as_str())
-                            .unwrap_or("(default)");
-                        ui.text("Audio Playback");
-                        ui.same_line();
-                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                        ui.set_next_item_width(fw);
                         let _dis = ui.begin_disabled(is_connected);
-                        if let Some(_tok) = ui.begin_combo("##dev", preview) {
-                            let avail_w = ui.content_region_avail()[0];
-                            for (i, label) in output_device_labels.iter().enumerate() {
-                                let display = fit_label(ui, label, avail_w);
-                                if ui.selectable_config(&*display)
-                                    .selected(selected_device == i as i32)
-                                    .build()
-                                {
-                                    selected_device = i as i32;
+                        let output_combo = |label: &str, id: &str, selected: &mut i32| {
+                            let preview = output_device_labels
+                                .get(*selected as usize)
+                                .map(|s| s.as_str())
+                                .unwrap_or("(default)");
+                            ui.text(label);
+                            ui.same_line();
+                            ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                            ui.set_next_item_width(fw);
+                            if let Some(_tok) = ui.begin_combo(id, preview) {
+                                let avail_w = ui.content_region_avail()[0];
+                                for (i, lbl) in output_device_labels.iter().enumerate() {
+                                    let display = fit_label(ui, lbl, avail_w);
+                                    if ui.selectable_config(&*display)
+                                        .selected(*selected == i as i32)
+                                        .build()
+                                    {
+                                        *selected = i as i32;
+                                    }
                                 }
                             }
-                        }
+                        };
+                        output_combo("Ambient Out", "##dev_ambient", &mut selected_ambient);
+                        output_combo("IC Out",      "##dev_ic",      &mut selected_ic);
                         drop(_dis);
                     }
 
@@ -247,8 +252,9 @@ impl GuiState {
         if let Some(ref atomic) = self.mic_gain_live {
             atomic.store(gain.to_bits(), Ordering::Relaxed);
         }
-        self.selected_device = selected_device;
-        self.selected_radio  = selected_radio;
+        self.selected_ambient = selected_ambient;
+        self.selected_ic      = selected_ic;
+        self.selected_radio   = selected_radio;
         self.denoise         = denoise;
         if log_level != self.log_level {
             self.log_level = log_level;

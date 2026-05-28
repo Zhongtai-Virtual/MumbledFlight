@@ -3,13 +3,13 @@
 pub mod audio;
 pub mod voip;
 
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicU32;
-use std::net::SocketAddr;
-use tokio::sync::{broadcast, mpsc};
-use crate::state::{CockpitState, SharedCockpitZone};
+use self::audio::{create_linux_sink, start_capture, start_loopback_capture, start_playback};
 use self::voip::MumbleVoipClient;
-use self::audio::{start_capture, start_loopback_capture, start_playback, create_linux_sink};
+use crate::state::{CockpitState, SharedCockpitZone};
+use std::net::SocketAddr;
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TestClient {
@@ -31,7 +31,8 @@ pub async fn run_mumble_stack(
     sine_input: bool,
     test_pos: Option<[f32; 3]>,
     server_addr: SocketAddr,
-    output_device: Option<String>,
+    ambient_output: Option<String>,
+    ic_output: Option<String>,
 ) {
     // 1. MIC Chain
     let (mic_tx, _) = broadcast::channel::<Vec<f32>>(128);
@@ -53,8 +54,12 @@ pub async fn run_mumble_stack(
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // 2. RADIO Chain
-    let final_radio_source = if auto_sink { create_linux_sink() } else { radio_source };
-    
+    let final_radio_source = if auto_sink {
+        create_linux_sink()
+    } else {
+        radio_source
+    };
+
     let radio_tx = if test_client == TestClient::All && final_radio_source.is_some() {
         let source_name = final_radio_source.unwrap();
         let (tx, _) = broadcast::channel::<Vec<f32>>(128);
@@ -71,38 +76,42 @@ pub async fn run_mumble_stack(
         None
     };
 
-    // 3. Playback Mixer
-    let (playback_tx, playback_rx) = mpsc::channel(1024);
-    start_playback(playback_rx, output_device);
+    // 3. Playback Mixers — ambient and IC each route to their own output device.
+    //    Radio received audio shares the ambient mixer (no separate radio output).
+    let (ambient_pb_tx, ambient_pb_rx) = mpsc::channel(1024);
+    let (ic_pb_tx, ic_pb_rx) = mpsc::channel(1024);
+    let ic_monitor_tx = ic_pb_tx.clone();
+    start_playback(ambient_pb_rx, ambient_output);
+    start_playback(ic_pb_rx, ic_output);
 
     // 4. Ambient Client
     if test_client != TestClient::Ic {
-    let fbo_ch      = format!("{}_ambient_fbo",      session_id);
-    let aircraft_ch = format!("{}_ambient_aircraft", session_id);
-    let initial_zone = state.lock().unwrap().zone;
-    let initial_ambient_ch = match initial_zone {
-        SharedCockpitZone::InFbo              => fbo_ch.clone(),
-        SharedCockpitZone::AroundOrInAircraft => aircraft_ch.clone(),
-    };
-    let st_a = Arc::clone(&state);
-    let mic_rx_a = mic_tx.subscribe();
-    let pb_tx_a = playback_tx.clone();
-    let un_a = user_name.clone();
-    let sid_a = session_id.clone();
-    tokio::spawn(async move {
-        let client = MumbleVoipClient {
-            username: format!("{}_ambient", un_a),
-            context: format!("{}_ambient", sid_a),
-            is_ic: false,
-            is_radio: false,
-            target_channel: initial_ambient_ch,
-            zone_channels: Some((fbo_ch, aircraft_ch)),
-            has_radio_source: false,
-            denoise,
-            test_pos,
+        let fbo_ch = format!("{}_ambient_fbo", session_id);
+        let aircraft_ch = format!("{}_ambient_aircraft", session_id);
+        let initial_zone = state.lock().unwrap().zone;
+        let initial_ambient_ch = match initial_zone {
+            SharedCockpitZone::InFbo => fbo_ch.clone(),
+            SharedCockpitZone::AroundOrInAircraft => aircraft_ch.clone(),
         };
-        let _ = client.run(server_addr, st_a, mic_rx_a, pb_tx_a).await;
-    });
+        let st_a = Arc::clone(&state);
+        let mic_rx_a = mic_tx.subscribe();
+        let pb_tx_a = ambient_pb_tx.clone();
+        let un_a = user_name.clone();
+        let sid_a = session_id.clone();
+        tokio::spawn(async move {
+            let client = MumbleVoipClient {
+                username: format!("{}_ambient", un_a),
+                context: format!("{}_ambient", sid_a),
+                is_ic: false,
+                is_radio: false,
+                target_channel: initial_ambient_ch,
+                zone_channels: Some((fbo_ch, aircraft_ch)),
+                has_radio_source: false,
+                denoise,
+                test_pos,
+            };
+            let _ = client.run(server_addr, st_a, mic_rx_a, pb_tx_a).await;
+        });
     }
 
     if test_client == TestClient::Ambient {
@@ -112,7 +121,7 @@ pub async fn run_mumble_stack(
     // 5. Intercom Client
     let st_i = Arc::clone(&state);
     let mic_rx_i = mic_tx.subscribe();
-    let pb_tx_i = playback_tx.clone();
+    let pb_tx_i = ic_pb_tx;
     let un_i = user_name.clone();
     let sid_i = session_id.clone();
     tokio::spawn(async move {
@@ -130,11 +139,11 @@ pub async fn run_mumble_stack(
         let _ = client.run(server_addr, st_i, mic_rx_i, pb_tx_i).await;
     });
 
-    // 6. Radio Relay Client
+    // 6. Radio Relay Client + local COM monitor
     if let Some(rtx) = radio_tx {
         let st_r = Arc::clone(&state);
         let radio_rx = rtx.subscribe();
-        let pb_tx_r = playback_tx.clone();
+        let pb_tx_r = ambient_pb_tx.clone();
         let un_r = user_name.clone();
         let sid_r = session_id.clone();
         tokio::spawn(async move {
@@ -150,6 +159,29 @@ pub async fn run_mumble_stack(
                 test_pos,
             };
             let _ = client.run(server_addr, st_r, radio_rx, pb_tx_r).await;
+        });
+
+        // Mirror the radio source to the IC output device when COM RX is active,
+        // so pilots hear the COM audio through their designated IC headphone output.
+        let mut monitor_rx = rtx.subscribe();
+        let st_m = Arc::clone(&state);
+        tokio::spawn(async move {
+            loop {
+                match monitor_rx.recv().await {
+                    Ok(pcm) => {
+                        let active = {
+                            let s = st_m.lock().unwrap();
+                            s.com1_rx || s.com2_rx
+                        };
+                        if active {
+                            let stereo: Vec<f32> = pcm.iter().flat_map(|&s| [s, s]).collect();
+                            let _ = ic_monitor_tx.send(stereo).await;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         });
     }
 }

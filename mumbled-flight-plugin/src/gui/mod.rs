@@ -45,7 +45,8 @@ pub struct GuiState {
     pub denoise: bool,
     pub output_devices: Vec<String>,
     pub output_device_labels: Vec<String>,
-    pub selected_device: i32,
+    pub selected_ambient: i32,
+    pub selected_ic: i32,
     pub log_level: LevelFilter,
 
     // Radio relay source.
@@ -70,10 +71,12 @@ impl GuiState {
         let radio_input_devices = devices::enumerate_input_devices();
         let cfg = config::PluginConfig::load(&config_path);
 
-        let selected_device = output_devices.iter()
-            .position(|d| d == &cfg.output_device)
+        let find_device = |name: &str| output_devices.iter()
+            .position(|d| d == name)
             .map(|i| i as i32)
             .unwrap_or(0);
+        let selected_ambient = find_device(&cfg.ambient_device);
+        let selected_ic      = find_device(&cfg.ic_device);
 
         let selected_radio = match cfg.radio_source.as_str() {
             ""              => 0,
@@ -132,7 +135,8 @@ impl GuiState {
             denoise: cfg.denoise,
             output_devices,
             output_device_labels,
-            selected_device,
+            selected_ambient,
+            selected_ic,
             log_level,
             radio_input_devices,
             selected_radio,
@@ -145,30 +149,26 @@ impl GuiState {
     }
 
     pub fn save_config(&self) {
-        let output_device = self.output_devices
-            .get(self.selected_device as usize)
-            .cloned()
-            .unwrap_or_default();
-        let radio_source = self.radio_source_str().to_string();
+        let device_name = |idx: i32| self.output_devices.get(idx as usize).cloned().unwrap_or_default();
         let cfg = config::PluginConfig {
             server: self.server.clone(),
             flight_id: self.flight_id.clone(),
             user_name: self.user_name.clone(),
             gain: self.gain,
             denoise: self.denoise,
-            output_device,
+            ambient_device: device_name(self.selected_ambient),
+            ic_device:      device_name(self.selected_ic),
             log_level: self.log_level.to_string().to_lowercase(),
-            radio_source,
+            radio_source: self.radio_source_str().to_string(),
         };
         cfg.save(&self.config_path);
     }
 
-    pub fn output_device(&self) -> Option<String> {
-        self.output_devices
-            .get(self.selected_device as usize)
-            .filter(|s| !s.is_empty())
-            .cloned()
+    fn device_at(&self, idx: i32) -> Option<String> {
+        self.output_devices.get(idx as usize).filter(|s| !s.is_empty()).cloned()
     }
+    pub fn ambient_output(&self) -> Option<String> { self.device_at(self.selected_ambient) }
+    pub fn ic_output(&self)      -> Option<String> { self.device_at(self.selected_ic) }
 
     /// Apply a pending device snapshot produced by the background refresh thread.
     /// Non-blocking — the flight loop calls this at 20 Hz with no pactl overhead.
@@ -182,12 +182,13 @@ impl GuiState {
             debug!("device refresh: sinks={:?} inputs={:?}", snap.output_names, snap.input_names);
         }
 
-        let current_out = self.output_device();
-        self.selected_device = current_out
+        let resolve = |cur: Option<String>| cur
             .and_then(|name| snap.output_names.iter().position(|d| *d == name))
             .map(|i| i as i32)
             .unwrap_or(0);
-        self.output_devices  = snap.output_names;
+        self.selected_ambient = resolve(self.ambient_output());
+        self.selected_ic      = resolve(self.ic_output());
+        self.output_devices       = snap.output_names;
         self.output_device_labels = snap.output_labels;
 
         let current_radio = self.radio_source_str().to_string();
