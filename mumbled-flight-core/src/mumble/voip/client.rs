@@ -39,6 +39,8 @@ pub struct MumbleVoipClient {
     /// For ambient clients: (fbo_channel_name, aircraft_channel_name).
     /// None for IC and radio clients — they never switch channels.
     pub zone_channels: Option<(String, String)>,
+    /// True only for the radio relay client when a source device was configured (not "Disabled").
+    pub has_radio_source: bool,
     #[allow(dead_code)]
     pub denoise: bool,
     pub test_pos: Option<[f32; 3]>,

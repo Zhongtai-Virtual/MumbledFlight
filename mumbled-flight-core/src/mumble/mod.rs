@@ -97,6 +97,7 @@ pub async fn run_mumble_stack(
             is_radio: false,
             target_channel: initial_ambient_ch,
             zone_channels: Some((fbo_ch, aircraft_ch)),
+            has_radio_source: false,
             denoise,
             test_pos,
         };
@@ -122,6 +123,7 @@ pub async fn run_mumble_stack(
             is_radio: false,
             target_channel: format!("{}_ic", sid_i),
             zone_channels: None,
+            has_radio_source: false,
             denoise,
             test_pos,
         };
@@ -143,6 +145,7 @@ pub async fn run_mumble_stack(
                 is_radio: true,
                 target_channel: format!("{}_radio", sid_r),
                 zone_channels: None,
+                has_radio_source: true,
                 denoise,
                 test_pos,
             };

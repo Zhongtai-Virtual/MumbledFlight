@@ -326,14 +326,12 @@ impl Session {
         }
 
         let rx_vol = if client.is_ic {
-            // IC RX: gated by role, ic_spkr toggle, and scaled by rx_vol.
             let s = state.lock().unwrap();
-            if s.role != SharedCockpitRole::Pilot || !s.ic_spkr {
+            if s.role != SharedCockpitRole::Pilot || !s.ic_tog {
                 return;
             }
             s.ic_vol
         } else {
-            // 1.0 for ambient
             1.0
         };
 
@@ -354,7 +352,10 @@ impl Session {
         // IC simulates headphone playback — flat equal-power stereo, no spatialization.
         let mut stereo = if client.is_ic {
             let mut out = Vec::with_capacity(mono.len() * 2);
-            for &s in &mono { out.push(s); out.push(s); }
+            for &s in &mono {
+                out.push(s);
+                out.push(s);
+            }
             out
         } else {
             client.spatialize(&mono, parse_position(position_info), state, session_id)
@@ -374,22 +375,33 @@ impl Session {
         udp: &UdpSocket,
         state: &Arc<Mutex<CockpitState>>,
     ) -> Result<()> {
-        let is_active = {
+        let (is_active, tx_vol) = {
             let s = state.lock().unwrap();
             if client.is_radio {
-                s.com1_rx || s.com2_rx
+                let active = client.has_radio_source
+                    && !s.is_guest
+                    && (s.com1_rx || s.com2_rx)
+                    && s.spkr_tog;
+                (active, s.spkr_vol)
             } else if client.is_ic {
                 // TX when: seated as Pilot AND (ACP/*/ic keyed OR contwheel/*/ic pressed)
                 //         AND neither RT source is active (RT takes priority over IC)
-                s.role == SharedCockpitRole::Pilot
+                let active = s.role == SharedCockpitRole::Pilot
                     && (s.acp_ic || s.contwheel_ic)
-                    && !s.acp_rt && !s.contwheel_rt
+                    && !s.acp_rt
+                    && !s.contwheel_rt;
+                (active, 1.0)
             } else {
-                true
+                (true, 1.0)
             }
         };
         let Some(cs) = self.crypt.as_mut() else {
             return Ok(());
+        };
+        let pcm = if tx_vol != 1.0 {
+            pcm.iter().map(|&s| s * tx_vol).collect()
+        } else {
+            pcm
         };
         if is_active {
             client
