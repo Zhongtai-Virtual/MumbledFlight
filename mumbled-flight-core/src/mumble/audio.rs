@@ -38,60 +38,206 @@ pub fn list_audio_devices() {
 /// Shared with the plugin's device enumeration filter — change here propagates everywhere.
 pub const VIRTUAL_SINK_NAME: &str = "MumblingRadio";
 
+/// Info about a PipeWire audio sink returned by [`enumerate_pw_sinks`].
+pub struct PwSinkInfo {
+    pub name: String,
+    pub description: String,
+}
+
+/// Enumerate PipeWire audio sinks (output devices) via the PW registry.
+#[cfg(target_os = "linux")]
+pub fn enumerate_pw_sinks() -> Vec<PwSinkInfo> {
+    use pipewire as pw;
+    pw_enumerate(|props| {
+        if props.get(*pw::keys::MEDIA_CLASS) != Some("Audio/Sink") { return None; }
+        let name = props.get(*pw::keys::NODE_NAME)?.to_string();
+        let desc = props.get(*pw::keys::NODE_DESCRIPTION).unwrap_or(&name).to_string();
+        Some(PwSinkInfo { name, description: desc })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn enumerate_pw_sinks() -> Vec<PwSinkInfo> { vec![] }
+
+/// Enumerate PipeWire audio sources (input devices, monitors excluded) via the PW registry.
+#[cfg(target_os = "linux")]
+pub fn enumerate_pw_sources() -> Vec<String> {
+    use pipewire as pw;
+    pw_enumerate(|props| {
+        if props.get(*pw::keys::MEDIA_CLASS) != Some("Audio/Source") { return None; }
+        Some(props.get(*pw::keys::NODE_NAME)?.to_string())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn enumerate_pw_sources() -> Vec<String> { vec![] }
+
+/// Enumerate PW globals, mapping each node's properties through `mapper`.
+/// Runs a throw-away PW mainloop that quits after the initial registry dump.
+#[cfg(target_os = "linux")]
+fn pw_enumerate<T, F>(mapper: F) -> Vec<T>
+where
+    T: 'static,
+    F: Fn(&pipewire::spa::utils::dict::DictRef) -> Option<T> + 'static,
+{
+    use pipewire as pw;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    pw::init();
+    let Ok(mainloop) = pw::main_loop::MainLoopRc::new(None) else { return vec![] };
+    let Ok(context)  = pw::context::ContextRc::new(&mainloop, None) else { return vec![] };
+    let Ok(core)     = context.connect_rc(None) else { return vec![] };
+    let Ok(registry) = core.get_registry() else { return vec![] };
+
+    let results: Rc<RefCell<Vec<T>>> = Rc::new(RefCell::new(Vec::new()));
+    let results_cl = results.clone();
+
+    let _reg = registry
+        .add_listener_local()
+        .global(move |global| {
+            let Some(props) = global.props else { return };
+            if let Some(v) = mapper(props) {
+                results_cl.borrow_mut().push(v);
+            }
+        })
+        .register();
+
+    // sync(0) round-trips through the server; the done event fires after all
+    // current registry globals have been delivered.
+    let Ok(pending) = core.sync(0) else { return vec![] };
+    let ml = mainloop.clone();
+    let _done = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == 0 && seq == pending {
+                ml.quit();
+            }
+        })
+        .register();
+
+    mainloop.run();
+
+    Rc::try_unwrap(results)
+        .ok()
+        .map(|rc| rc.into_inner())
+        .unwrap_or_default()
+}
+
+/// Creates (or reuses) the `MumblingRadio` virtual null-sink via the PipeWire API.
+/// Returns the monitor source name used by [`start_loopback_capture`].
+/// The sink is kept alive by a background thread for the life of the process.
 pub fn create_linux_sink() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        const S: &str = VIRTUAL_SINK_NAME;
+        static SINK: OnceLock<Option<String>> = OnceLock::new();
+        return SINK.get_or_init(|| {
+            const S: &str = VIRTUAL_SINK_NAME;
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
 
-        // Reuse if already present — avoids accumulating duplicate modules across reconnects.
-        if let Ok(out) = std::process::Command::new("pactl").args(&["list", "short", "sinks"]).output() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            if text.lines().any(|l| l.split_whitespace().nth(1) == Some(S)) {
-                info!("[Audio:Linux] Reusing existing {S} virtual sink");
-                return Some(format!("{S}.monitor"));
+            std::thread::spawn(move || {
+                if let Err(e) = pw_null_sink_loop(S, ready_tx) {
+                    error!("[Audio:Linux] PipeWire null-sink error: {e}");
+                }
+            });
+
+            let monitor = format!("{S}.monitor");
+            match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(()) => {
+                    info!("[Audio:Linux] {monitor} ready");
+                    Some(monitor)
+                }
+                Err(_) => {
+                    warn!("[Audio:Linux] Timed out waiting for {S} virtual sink");
+                    None
+                }
             }
-        }
-
-        info!("[Audio:Linux] Creating {S} virtual sink...");
-        let status = std::process::Command::new("pactl")
-            .args(&[
-                "load-module", "module-null-sink",
-                &format!("sink_name={S}"),
-                "format=float32le", "rate=48000", "channels=2",
-                &format!("sink_properties=device.description={S}"),
-            ])
-            .status();
-
-        if !matches!(status, Ok(s) if s.success()) {
-            warn!("[Audio:Linux] pactl failed to create {S} virtual sink");
-            return None;
-        }
-
-        // Poll until PipeWire registers the monitor source — avoids a race
-        // where start_capture opens the stream before the node is ready.
-        let monitor = format!("{S}.monitor");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let visible = std::process::Command::new("pactl")
-                .args(["list", "short", "sources"])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.lines().any(|l| l.split_whitespace().nth(1) == Some(monitor.as_str())))
-                .unwrap_or(false);
-            if visible {
-                info!("[Audio:Linux] {monitor} ready");
-                return Some(monitor);
-            }
-            if std::time::Instant::now() >= deadline {
-                warn!("[Audio:Linux] timed out waiting for {monitor} to appear");
-                return None;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        }).clone();
     }
     #[cfg(not(target_os = "linux"))]
     { None }
+}
+
+/// Connects to PipeWire, checks whether `sink_name` already exists in the current registry,
+/// and creates it only if absent.  Signals `ready_tx` once the sink is confirmed present,
+/// then runs the mainloop forever to keep any newly-created node alive.
+///
+/// Two-phase design:
+///   Phase 1 — sync-round-trip to collect the initial global dump; quit when done fires.
+///   Phase 2 — create the node if not seen in phase 1, then run forever.
+#[cfg(target_os = "linux")]
+fn pw_null_sink_loop(
+    sink_name: &'static str,
+    ready_tx: std::sync::mpsc::SyncSender<()>,
+) -> Result<(), pipewire::Error> {
+    use pipewire as pw;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    pw::init();
+    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
+    let context  = pw::context::ContextRc::new(&mainloop, None)?;
+    let core     = context.connect_rc(None)?;
+    let registry = core.get_registry()?;
+
+    let sink_seen = Rc::new(Cell::new(false));
+    let sink_seen_cl = sink_seen.clone();
+    let tx = Rc::new(Cell::new(Some(ready_tx)));
+    let tx_cl = tx.clone();
+
+    // Fires for every global — both current ones (phase 1) and new ones (phase 2).
+    let _reg = registry
+        .add_listener_local()
+        .global(move |global| {
+            let Some(props) = global.props else { return };
+            if props.get(*pw::keys::MEDIA_CLASS) == Some("Audio/Sink")
+                && props.get(*pw::keys::NODE_NAME) == Some(sink_name)
+            {
+                sink_seen_cl.set(true);
+                if let Some(sender) = tx_cl.take() {
+                    let _ = sender.send(());
+                }
+            }
+        })
+        .register();
+
+    // Phase 1: sync round-trip so the server flushes all current registry globals
+    // before we decide whether to create the node.
+    let pending = core.sync(0)?;
+    let ml = mainloop.clone();
+    let _done = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == 0 && seq == pending {
+                ml.quit(); // end phase 1
+            }
+        })
+        .register();
+
+    mainloop.run(); // returns once the initial global dump is complete
+
+    // Phase 2: create the node only if not already present.
+    let _node: Option<pw::node::Node> = if sink_seen.get() {
+        info!("[Audio:Linux] Reusing existing {sink_name} virtual sink");
+        None
+    } else {
+        info!("[Audio:Linux] Creating {sink_name} virtual sink via PipeWire...");
+        let mut props = pw::properties::properties! {
+            *pw::keys::MEDIA_CLASS => "Audio/Sink",
+            "audio.rate"           => "48000",
+            "audio.channels"       => "2",
+            "audio.format"         => "F32LE",
+        };
+        props.insert(*pw::keys::FACTORY_NAME, "support.null-audio-sink");
+        props.insert(*pw::keys::NODE_NAME, sink_name);
+        props.insert(*pw::keys::NODE_DESCRIPTION, sink_name);
+        // Proxy must stay alive — dropping it destroys the node in the PW graph.
+        Some(core.create_object::<pw::node::Node>("adapter", &props)?)
+    };
+
+    // Run forever: keeps the created node alive (or just stays connected if reusing).
+    mainloop.run();
+    Ok(())
 }
 
 fn pipewire_device(node: Option<&str>, input: bool) -> cpal::Device {

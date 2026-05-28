@@ -16,9 +16,9 @@ use mumbled_flight_core::{
 };
 use xplane_sys::{
     XPLMAppendMenuItem, XPLMCheckMenuItem, XPLMCreateMenu, XPLMDataRef, XPLMDataTypeID,
-    XPLMDebugString, XPLMDestroyMenu, XPLMFindDataRef, XPLMFindPluginsMenu, XPLMGetDataRefTypes,
-    XPLMGetDataf, XPLMGetDatai, XPLMGetSystemPath, XPLMGetWindowIsVisible, XPLMMenuCheck,
-    XPLMMenuID, XPLMRegisterFlightLoopCallback, XPLMSetWindowIsVisible, XPLMTakeKeyboardFocus,
+    XPLMDestroyMenu, XPLMFindDataRef, XPLMFindPluginsMenu, XPLMGetDataRefTypes, XPLMGetDataf,
+    XPLMGetDatai, XPLMGetSystemPath, XPLMGetWindowIsVisible, XPLMMenuCheck, XPLMMenuID,
+    XPLMRegisterFlightLoopCallback, XPLMSetWindowIsVisible, XPLMTakeKeyboardFocus,
     XPLMUnregisterFlightLoopCallback,
 };
 
@@ -86,8 +86,11 @@ pub unsafe extern "C" fn XPluginStart(
     write_cstr(out_sig, "app.mzt.mumbled-flight");
     write_cstr(out_desc, "Spatial audio with Mumble");
     logger::init();
-    info!("XPluginStart v{} (built {})",
-        env!("CARGO_PKG_VERSION"), env!("BUILD_TIMESTAMP"));
+    info!(
+        "XPluginStart v{} (built {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("BUILD_TIMESTAMP")
+    );
     1
 }
 
@@ -261,14 +264,6 @@ unsafe fn find_dataref(id: DataRefId) -> Option<(XPLMDataRef, DataRefId, bool)> 
     let types = XPLMGetDataRefTypes(dr);
     let use_int = (types & XPLMDataTypeID::Float).0 == 0;
     Some((dr, id, use_int))
-}
-
-// ── Raw XPLM log sink (used only by logger::XPlaneLogger) ─────────────────────
-
-pub fn xp_log(s: &str) {
-    if let Ok(cs) = CString::new(s) {
-        unsafe { XPLMDebugString(cs.as_ptr()) };
-    }
 }
 
 unsafe fn write_cstr(dest: *mut c_char, s: &str) {

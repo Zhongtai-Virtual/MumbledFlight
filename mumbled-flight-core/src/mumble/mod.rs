@@ -8,7 +8,7 @@ use self::voip::MumbleVoipClient;
 use crate::state::{CockpitState, SharedCockpitZone};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,17 +61,7 @@ pub async fn run_mumble_stack(
     };
 
     let radio_tx = if test_client == TestClient::All && final_radio_source.is_some() {
-        let source_name = final_radio_source.unwrap();
-        let (tx, _) = broadcast::channel::<Vec<f32>>(128);
-        let tx_clone = tx.clone();
-        std::thread::spawn(move || {
-            let (sync_tx, mut sync_rx) = mpsc::channel(128);
-            start_loopback_capture(source_name, sync_tx);
-            while let Some(frame) = sync_rx.blocking_recv() {
-                let _ = tx_clone.send(frame);
-            }
-        });
-        Some(tx)
+        Some(radio_loopback_sender(final_radio_source.unwrap()))
     } else {
         None
     };
@@ -140,6 +130,7 @@ pub async fn run_mumble_stack(
     });
 
     // 6. Radio Relay Client + local COM monitor
+    // (radio_tx is a cloned Sender into the shared loopback channel — no new PW stream)
     if let Some(rtx) = radio_tx {
         let st_r = Arc::clone(&state);
         let radio_rx = rtx.subscribe();
@@ -184,4 +175,24 @@ pub async fn run_mumble_stack(
             }
         });
     }
+}
+
+/// Returns a `Sender` into the shared radio loopback broadcast channel.
+/// The underlying PipeWire capture stream and forwarding thread are created only once
+/// per process regardless of how many times `run_mumble_stack` is called.
+fn radio_loopback_sender(source_name: String) -> broadcast::Sender<Vec<f32>> {
+    static TX: OnceLock<broadcast::Sender<Vec<f32>>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, _) = broadcast::channel::<Vec<f32>>(128);
+        let tx_fwd = tx.clone();
+        std::thread::spawn(move || {
+            let (sync_tx, mut sync_rx) = mpsc::channel(128);
+            start_loopback_capture(source_name, sync_tx);
+            while let Some(frame) = sync_rx.blocking_recv() {
+                let _ = tx_fwd.send(frame);
+            }
+        });
+        tx
+    })
+    .clone()
 }
