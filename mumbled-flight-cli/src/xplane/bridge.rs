@@ -39,6 +39,15 @@ async fn fetch_dataref(client: &reqwest::Client, id: u64, timeout_ms: u64) -> Op
     resp.json::<Value>().await.ok()?.get("data").cloned()
 }
 
+/// Converts a scalar DataRef JSON value to f32 at the bridge boundary.
+/// The WebAPI returns scalars as numbers (and occasionally JSON booleans); anything
+/// non-scalar (arrays, byte strings) is rejected so it never reaches `CockpitState`.
+fn value_to_f32(val: &Value) -> Option<f32> {
+    val.as_f64()
+        .map(|f| f as f32)
+        .or_else(|| val.as_bool().map(|b| if b { 1.0 } else { 0.0 }))
+}
+
 async fn run_bridge(state: Arc<Mutex<CockpitState>>) -> Result<()> {
     info!("Discovering DataRefs...");
     let client = reqwest::Client::new();
@@ -57,7 +66,8 @@ async fn run_bridge(state: Arc<Mutex<CockpitState>>) -> Result<()> {
         ticker.tick().await;
         for (&id, &enum_id) in &id_to_enum {
             let Some(val) = fetch_dataref(&client, id, 30).await else { continue };
-            state.lock().unwrap().update_from_dataref(enum_id, &val);
+            let Some(f) = value_to_f32(&val) else { continue };
+            state.lock().unwrap().update_from_float(enum_id, f);
         }
     }
 }
