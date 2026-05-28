@@ -617,11 +617,14 @@ pub fn start_capture(
 
                     if let Some(d) = denoiser.as_mut() {
                         // RNNoise processes fixed 480-sample frames scaled to the i16 range.
+                        // Stack scratch buffers — no heap allocation on the audio callback thread.
                         const FRAME: usize = DenoiseState::FRAME_SIZE;
+                        let mut scaled = [0.0f32; FRAME];
                         let mut out = [0.0f32; FRAME];
                         while capture_buffer.len() >= FRAME {
-                            let scaled: Vec<f32> =
-                                capture_buffer.drain(..FRAME).map(|s| s * 32768.0).collect();
+                            for (dst, src) in scaled.iter_mut().zip(capture_buffer.drain(..FRAME)) {
+                                *dst = src * 32768.0;
+                            }
                             d.process_frame(&mut out, &scaled);
                             output_buffer.extend(out.iter().map(|s| s / 32768.0));
                         }
