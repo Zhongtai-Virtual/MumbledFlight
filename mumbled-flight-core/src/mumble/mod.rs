@@ -261,22 +261,26 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     }
 }
 
-/// Returns a `Sender` into the shared radio loopback broadcast channel.
-/// The underlying PipeWire capture stream and forwarding thread are created only once
-/// per process regardless of how many times `run_mumble_stack` is called.
+/// Returns a `Sender` into the shared radio loopback broadcast channel for `source_name`.
+/// Capture streams are cached **per source name**: reconnecting with the same source reuses the
+/// existing PipeWire stream (no churn), while selecting a different source starts a new one — so
+/// changing the radio device in the GUI and reconnecting captures the newly selected stream.
 fn radio_loopback_sender(source_name: String) -> broadcast::Sender<Vec<f32>> {
-    static TX: OnceLock<broadcast::Sender<Vec<f32>>> = OnceLock::new();
-    TX.get_or_init(|| {
-        let (tx, _) = broadcast::channel::<Vec<f32>>(128);
-        let tx_fwd = tx.clone();
-        std::thread::spawn(move || {
-            let (sync_tx, mut sync_rx) = mpsc::channel(128);
-            start_loopback_capture(source_name, sync_tx);
-            while let Some(frame) = sync_rx.blocking_recv() {
-                let _ = tx_fwd.send(frame);
-            }
-        });
-        tx
-    })
-    .clone()
+    static STREAMS: OnceLock<Mutex<HashMap<String, broadcast::Sender<Vec<f32>>>>> = OnceLock::new();
+    let mut streams = STREAMS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    streams
+        .entry(source_name.clone())
+        .or_insert_with(|| {
+            let (tx, _) = broadcast::channel::<Vec<f32>>(128);
+            let tx_fwd = tx.clone();
+            std::thread::spawn(move || {
+                let (sync_tx, mut sync_rx) = mpsc::channel(128);
+                start_loopback_capture(source_name, sync_tx);
+                while let Some(frame) = sync_rx.blocking_recv() {
+                    let _ = tx_fwd.send(frame);
+                }
+            });
+            tx
+        })
+        .clone()
 }
