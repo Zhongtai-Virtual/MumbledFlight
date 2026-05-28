@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio_native_tls::TlsStream;
 use tokio_util::codec::Framed;
 
-use crate::state::{CockpitState, SharedCockpitZone};
+use crate::state::{CockpitState, SharedCockpitRole, SharedCockpitZone};
 use super::client::MumbleVoipClient;
 use super::spatial::{decode_opus_packet, parse_position};
 
@@ -247,6 +247,16 @@ impl Session {
         };
         let VoicePacket::Audio { session_id, payload, position_info, .. } = packet else { return };
         if self.my_session == Some(session_id) || client.is_radio { return; }
+
+        // IC RX: gated by role, ic_spkr toggle, and scaled by ic_vol.
+        let ic_vol = if client.is_ic {
+            let s = state.lock().unwrap();
+            if s.role != SharedCockpitRole::Pilot || !s.ic_spkr { return; }
+            s.ic_vol
+        } else {
+            1.0
+        };
+
         let VoicePacketPayload::Opus(data, _) = payload else { return };
 
         let decoder = self.decoders.entry(session_id).or_insert_with(|| {
@@ -254,7 +264,10 @@ impl Session {
             Decoder::new(SampleRate::Hz48000, Channels::Mono).expect("decoder")
         });
         let Some(mono) = decode_opus_packet(decoder, &data) else { return };
-        let stereo = client.spatialize(&mono, parse_position(position_info), state, session_id);
+        let mut stereo = client.spatialize(&mono, parse_position(position_info), state, session_id);
+        if ic_vol != 1.0 {
+            for s in &mut stereo { *s *= ic_vol; }
+        }
         let _ = playback_tx.send(stereo).await;
     }
 
@@ -268,7 +281,7 @@ impl Session {
         let is_active = {
             let s = state.lock().unwrap();
             if client.is_radio   { s.spkr }
-            else if client.is_ic { s.ic || s.pa }
+            else if client.is_ic { s.role == SharedCockpitRole::Pilot && s.ic }
             else                 { true }
         };
         let Some(cs) = self.crypt.as_mut() else { return Ok(()) };

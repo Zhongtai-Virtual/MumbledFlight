@@ -38,6 +38,33 @@ impl SharedCockpitZone {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AcpMicSelection {
+    #[default]
+    Vhf1   = 0,
+    Vhf2   = 1,
+    Vhf3   = 2,
+    Hf1    = 3,
+    Hf2    = 4,
+    IntSvc = 5,
+    Pa     = 6,
+}
+
+impl AcpMicSelection {
+    pub fn from_int(n: i32) -> Result<Self, i32> {
+        match n {
+            0 => Ok(Self::Vhf1),
+            1 => Ok(Self::Vhf2),
+            2 => Ok(Self::Vhf3),
+            3 => Ok(Self::Hf1),
+            4 => Ok(Self::Hf2),
+            5 => Ok(Self::IntSvc),
+            6 => Ok(Self::Pa),
+            _ => Err(n),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SharedCockpitRole {
     #[default]
     Pilot      = 0,
@@ -66,8 +93,8 @@ pub enum DataRefId {
     PilotSeat,
     SharedCkptRole,
     SharedCkptZone,
-    Acp1Ic, Acp1Mic, Acp1Spkr,
-    Acp2Ic, Acp2Mic, Acp2Spkr,
+    Acp1Ic, Acp1Mic, Acp1Spkr, Acp1IntSvcTog, Acp1IntSvcVol,
+    Acp2Ic, Acp2Mic, Acp2Spkr, Acp2IntSvcTog, Acp2IntSvcVol,
     DoorCabin,
     DoorLavatory,
 }
@@ -85,12 +112,16 @@ impl DataRefId {
             DataRefId::PilotSeat => "CL650/pilot_seat",
             DataRefId::SharedCkptRole => "CL650/shared_ckpt/my_role",
             DataRefId::SharedCkptZone => "CL650/shared_ckpt/my_zone",
-            DataRefId::Acp1Ic => "CL650/ACP/1/ic",
-            DataRefId::Acp1Mic => "CL650/ACP/1/mic_value",
-            DataRefId::Acp1Spkr => "CL650/ACP/1/spkr_tog",
-            DataRefId::Acp2Ic => "CL650/ACP/2/ic",
-            DataRefId::Acp2Mic => "CL650/ACP/2/mic_value",
-            DataRefId::Acp2Spkr => "CL650/ACP/2/spkr_tog",
+            DataRefId::Acp1Ic         => "CL650/ACP/1/ic",
+            DataRefId::Acp1Mic        => "CL650/ACP/1/mic_value",
+            DataRefId::Acp1Spkr       => "CL650/ACP/1/spkr_tog",
+            DataRefId::Acp1IntSvcTog  => "CL650/ACP/1/int_svc_tog_value",
+            DataRefId::Acp1IntSvcVol  => "CL650/ACP/1/int_svc_vol",
+            DataRefId::Acp2Ic         => "CL650/ACP/2/ic",
+            DataRefId::Acp2Mic        => "CL650/ACP/2/mic_value",
+            DataRefId::Acp2Spkr       => "CL650/ACP/2/spkr_tog",
+            DataRefId::Acp2IntSvcTog  => "CL650/ACP/2/int_svc_tog_value",
+            DataRefId::Acp2IntSvcVol  => "CL650/ACP/2/int_svc_vol",
             DataRefId::DoorCabin => "CL650/doors/cabin/door",
             DataRefId::DoorLavatory => "CL650/doors/cabin/lavatory",
         }
@@ -105,7 +136,9 @@ impl DataRefId {
             DataRefId::SharedCkptRole,
             DataRefId::SharedCkptZone,
             DataRefId::Acp1Ic, DataRefId::Acp1Mic, DataRefId::Acp1Spkr,
+            DataRefId::Acp1IntSvcTog, DataRefId::Acp1IntSvcVol,
             DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
+            DataRefId::Acp2IntSvcTog, DataRefId::Acp2IntSvcVol,
             DataRefId::DoorCabin,
             DataRefId::DoorLavatory,
         ]
@@ -125,8 +158,12 @@ pub struct CockpitState {
     pub role: SharedCockpitRole,
     pub zone: SharedCockpitZone,
     pub ic: bool,
-    pub pa: bool,
+    pub mic: AcpMicSelection,
     pub spkr: bool,
+    /// CL650/ACP/*/int_svc_tog_value: IC playback speaker on/off
+    pub ic_spkr: bool,
+    /// CL650/ACP/*/int_svc_vol: IC playback volume 0.0 (silence) – 1.0 (full)
+    pub ic_vol: f32,
     /// CL650/doors/cabin/door: 0.0 = closed, 0.95 = panel removed, 1.0 = stored
     pub door: f32,
     /// CL650/doors/cabin/lavatory: 0.0 = closed, 1.0 = open
@@ -143,8 +180,10 @@ impl Default for CockpitState {
             role: SharedCockpitRole::Pilot,
             zone: SharedCockpitZone::InFbo,
             ic: false,
-            pa: false,
+            mic: AcpMicSelection::Vhf1,
             spkr: false,
+            ic_spkr: false,
+            ic_vol: 0.0,
             door: 1.0,      // open by default — no spurious attenuation before DataRefs are read
             door_lav: 1.0,
         }
@@ -192,22 +231,36 @@ impl CockpitState {
                 Err(n) => warn!("[State] unknown shared cockpit zone value {n}"),
             },
 
-            DataRefId::Acp1Ic => if is_pilot { self.ic = Self::val_to_bool(val) },
-            DataRefId::Acp1Mic => if is_pilot { self.pa = Self::val_to_int(val) == 7 },
-            DataRefId::Acp1Spkr => if is_pilot { self.spkr = Self::val_to_bool(val) },
-            
-            DataRefId::Acp2Ic => if !is_pilot { self.ic = Self::val_to_bool(val) },
-            DataRefId::Acp2Mic => if !is_pilot { self.pa = Self::val_to_int(val) == 7 },
-            DataRefId::Acp2Spkr => if !is_pilot { self.spkr = Self::val_to_bool(val) },
+            DataRefId::Acp1Ic          => if is_pilot  { self.ic = Self::val_to_bool(val) },
+            DataRefId::Acp1Mic         => if is_pilot  {
+                match AcpMicSelection::from_int(Self::val_to_int(val)) {
+                    Ok(m)  => self.mic = m,
+                    Err(n) => warn!("[State] unknown ACP1 mic value {n}"),
+                }
+            },
+            DataRefId::Acp1Spkr        => if is_pilot  { self.spkr    = Self::val_to_bool(val) },
+            DataRefId::Acp1IntSvcTog   => if is_pilot  { self.ic_spkr = Self::val_to_bool(val) },
+            DataRefId::Acp1IntSvcVol   => if is_pilot  { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
+
+            DataRefId::Acp2Ic          => if !is_pilot { self.ic = Self::val_to_bool(val) },
+            DataRefId::Acp2Mic         => if !is_pilot {
+                match AcpMicSelection::from_int(Self::val_to_int(val)) {
+                    Ok(m)  => self.mic = m,
+                    Err(n) => warn!("[State] unknown ACP2 mic value {n}"),
+                }
+            },
+            DataRefId::Acp2Spkr        => if !is_pilot { self.spkr    = Self::val_to_bool(val) },
+            DataRefId::Acp2IntSvcTog   => if !is_pilot { self.ic_spkr = Self::val_to_bool(val) },
+            DataRefId::Acp2IntSvcVol   => if !is_pilot { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
             DataRefId::DoorCabin => self.door = val.as_f64().unwrap_or(1.0) as f32,
             DataRefId::DoorLavatory => self.door_lav = val.as_f64().unwrap_or(1.0) as f32,
         }
 
-        if self.ic != old_state.ic || self.pa != old_state.pa
+        if self.ic != old_state.ic || self.mic != old_state.mic
             || self.seat != old_state.seat || self.role != old_state.role || self.zone != old_state.zone
         {
-            debug!("[State] seat={:?} role={:?} zone={:?} ic={} pa={} (via {:?})",
-                self.seat, self.role, self.zone, self.ic, self.pa, id);
+            debug!("[State] seat={:?} role={:?} zone={:?} ic={} mic={:?} (via {:?})",
+                self.seat, self.role, self.zone, self.ic, self.mic, id);
         }
     }
 
