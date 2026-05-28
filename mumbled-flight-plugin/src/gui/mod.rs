@@ -125,8 +125,10 @@ impl GuiState {
                         let sinks: Vec<_> = sinks.into_iter()
                             .filter(|s| s.name != VIRTUAL_SINK_NAME)
                             .collect();
-                        let names  = sinks.iter().map(|s| s.name.clone()).collect();
-                        let labels = sinks.into_iter().map(|s| s.description).collect();
+                        let mut names:  Vec<String> = vec![String::new()];
+                        let mut labels: Vec<String> = vec!["(system default)".to_string()];
+                        names.extend(sinks.iter().map(|s| s.name.clone()));
+                        labels.extend(sinks.into_iter().map(|s| s.description));
                         (names, labels, sources)
                     }
                     #[cfg(not(target_os = "linux"))]

@@ -39,6 +39,7 @@ pub fn list_audio_devices() {
 pub const VIRTUAL_SINK_NAME: &str = "MumblingRadio";
 
 /// Info about a PipeWire audio sink returned by [`enumerate_pw_sinks`].
+#[derive(Clone)]
 pub struct PwSinkInfo {
     pub name: String,
     pub description: String,
@@ -81,52 +82,83 @@ pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<String>) {
     use std::rc::Rc;
 
     pw::init();
-    let Ok(mainloop) = pw::main_loop::MainLoopRc::new(None) else { return (vec![], vec![]) };
-    let Ok(context)  = pw::context::ContextRc::new(&mainloop, None) else { return (vec![], vec![]) };
-    let Ok(core)     = context.connect_rc(None) else { return (vec![], vec![]) };
-    let Ok(registry) = core.get_registry() else { return (vec![], vec![]) };
+    let mainloop = match pw::main_loop::MainLoopRc::new(None) {
+        Ok(m) => m,
+        Err(e) => { error!("[DeviceEnum] mainloop: {e}"); return (vec![], vec![]) }
+    };
+    let context = match pw::context::ContextRc::new(&mainloop, None) {
+        Ok(c) => c,
+        Err(e) => { error!("[DeviceEnum] context: {e}"); return (vec![], vec![]) }
+    };
+    let core = match context.connect_rc(None) {
+        Ok(c) => c,
+        Err(e) => { error!("[DeviceEnum] connect: {e}"); return (vec![], vec![]) }
+    };
+    let registry = match core.get_registry() {
+        Ok(r) => r,
+        Err(e) => { error!("[DeviceEnum] registry: {e}"); return (vec![], vec![]) }
+    };
 
-    let sinks:   Rc<RefCell<Vec<PwSinkInfo>>> = Rc::new(RefCell::new(Vec::new()));
-    let sources: Rc<RefCell<Vec<String>>>     = Rc::new(RefCell::new(Vec::new()));
+    let sinks:      Rc<RefCell<Vec<PwSinkInfo>>> = Rc::new(RefCell::new(Vec::new()));
+    let sources:    Rc<RefCell<Vec<String>>>     = Rc::new(RefCell::new(Vec::new()));
+    let total_seen: Rc<RefCell<u32>>             = Rc::new(RefCell::new(0));
     let sinks_cl   = sinks.clone();
     let sources_cl = sources.clone();
+    let total_cl   = total_seen.clone();
 
     let _reg = registry
         .add_listener_local()
         .global(move |global| {
+            *total_cl.borrow_mut() += 1;
             let Some(props) = global.props else { return };
-            match props.get(*pw::keys::MEDIA_CLASS) {
-                Some("Audio/Sink") => {
+            let class = props.get(*pw::keys::MEDIA_CLASS).unwrap_or("(no class)");
+            match class {
+                "Audio/Sink" => {
                     if let Some(name) = props.get(*pw::keys::NODE_NAME) {
                         let desc = props.get(*pw::keys::NODE_DESCRIPTION).unwrap_or(name).to_string();
+                        debug!("[DeviceEnum] sink: {name} ({desc})");
                         sinks_cl.borrow_mut().push(PwSinkInfo { name: name.to_string(), description: desc });
                     }
                 }
-                Some("Audio/Source") => {
+                "Audio/Source" => {
                     if let Some(name) = props.get(*pw::keys::NODE_NAME) {
+                        debug!("[DeviceEnum] source: {name}");
                         sources_cl.borrow_mut().push(name.to_string());
                     }
                 }
-                _ => {}
+                other => {
+                    debug!("[DeviceEnum] global id={} class={other}", global.id);
+                }
             }
         })
         .register();
 
-    let Ok(pending) = core.sync(0) else { return (vec![], vec![]) };
+    let pending = match core.sync(0) {
+        Ok(p) => p,
+        Err(e) => { error!("[DeviceEnum] sync: {e}"); return (vec![], vec![]) }
+    };
     let ml = mainloop.clone();
     let _done = core
         .add_listener_local()
         .done(move |id, seq| {
-            if id == 0 && seq == pending { ml.quit(); }
+            debug!("[DeviceEnum] done id={id} seq={seq:?} pending={pending:?}");
+            // id 0 = core proxy in native PW; some versions report a different id.
+            // Match on sequence number alone as a fallback.
+            if seq == pending { ml.quit(); }
         })
         .register();
 
     mainloop.run();
 
-    (
-        Rc::try_unwrap(sinks).ok().map(|r| r.into_inner()).unwrap_or_default(),
-        Rc::try_unwrap(sources).ok().map(|r| r.into_inner()).unwrap_or_default(),
-    )
+    let total = *total_seen.borrow();
+    debug!("[DeviceEnum] sync complete: {total} globals seen");
+
+    // _reg's closure still holds sinks_cl/sources_cl — Rc strong count > 1 so
+    // try_unwrap would fail. borrow() is safe here since the mainloop has quit
+    // and the closure is no longer executing.
+    let out_sinks   = sinks.borrow().clone();
+    let out_sources = sources.borrow().clone();
+    (out_sinks, out_sources)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -170,18 +202,15 @@ where
     let _done = core
         .add_listener_local()
         .done(move |id, seq| {
-            if id == 0 && seq == pending {
-                ml.quit();
-            }
+            debug!("[PwEnum] done id={id} seq={seq:?} pending={pending:?}");
+            if seq == pending { ml.quit(); }
         })
         .register();
 
     mainloop.run();
 
-    Rc::try_unwrap(results)
-        .ok()
-        .map(|rc| rc.into_inner())
-        .unwrap_or_default()
+    let out: Vec<T> = results.borrow_mut().drain(..).collect();
+    out
 }
 
 /// Creates (or reuses) the `MumblingRadio` virtual null-sink via the PipeWire API.
@@ -272,8 +301,8 @@ fn pw_null_sink_loop(
     let ml = mainloop.clone();
     let _done = core
         .add_listener_local()
-        .done(move |id, seq| {
-            if id == 0 && seq == pending {
+        .done(move |_id, seq| {
+            if seq == pending {
                 ml.quit(); // end phase 1
             }
         })
