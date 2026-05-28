@@ -1353,7 +1353,6 @@ dependencies = [
  "nnnoiseless",
  "openssl",
  "pipewire",
- "serde_json",
  "tokio",
  "tokio-native-tls",
  "tokio-util 0.6.10",
