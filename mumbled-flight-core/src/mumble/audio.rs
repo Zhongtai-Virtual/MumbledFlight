@@ -120,6 +120,7 @@ pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, gain: f32) {
                 std::thread::sleep(remaining);
             }
         }
+        let _ = child.wait(); // reap so it doesn't linger as a zombie
     });
 }
 
