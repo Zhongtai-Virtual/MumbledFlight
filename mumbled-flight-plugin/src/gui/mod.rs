@@ -176,7 +176,11 @@ impl GuiState {
         let snap = self.pending_devices.lock().unwrap().take();
         let Some(snap) = snap else { return };
 
-        debug!("device refresh: {} sinks = {:?}", snap.output_names.len(), snap.output_names);
+        let changed = snap.output_names != self.output_devices
+            || snap.input_names != self.radio_input_devices;
+        if changed {
+            debug!("device refresh: sinks={:?} inputs={:?}", snap.output_names, snap.input_names);
+        }
 
         let current_out = self.output_device();
         self.selected_device = current_out

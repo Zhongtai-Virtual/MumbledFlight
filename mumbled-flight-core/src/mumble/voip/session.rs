@@ -377,7 +377,7 @@ impl Session {
         let is_active = {
             let s = state.lock().unwrap();
             if client.is_radio {
-                s.spkr
+                s.com1_rx || s.com2_rx
             } else if client.is_ic {
                 // TX when: seated as Pilot AND (ACP/*/ic keyed OR contwheel/*/ic pressed)
                 //         AND neither RT source is active (RT takes priority over IC)

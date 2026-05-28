@@ -62,10 +62,33 @@ pub fn create_linux_sink() -> Option<String> {
             ])
             .status();
 
-        if let Ok(s) = status {
-            if s.success() { return Some(format!("{S}.monitor")); }
+        if !matches!(status, Ok(s) if s.success()) {
+            warn!("[Audio:Linux] pactl failed to create {S} virtual sink");
+            return None;
         }
-        None
+
+        // Poll until PipeWire registers the monitor source — avoids a race
+        // where start_capture opens the stream before the node is ready.
+        let monitor = format!("{S}.monitor");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let visible = std::process::Command::new("pactl")
+                .args(["list", "short", "sources"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.lines().any(|l| l.split_whitespace().nth(1) == Some(monitor.as_str())))
+                .unwrap_or(false);
+            if visible {
+                info!("[Audio:Linux] {monitor} ready");
+                return Some(monitor);
+            }
+            if std::time::Instant::now() >= deadline {
+                warn!("[Audio:Linux] timed out waiting for {monitor} to appear");
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
     #[cfg(not(target_os = "linux"))]
     { None }
@@ -144,13 +167,128 @@ pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, mic_gain: Arc<AtomicU32>) 
     });
 }
 
+/// Captures audio from a named PipeWire source using the native PipeWire API.
+/// For monitor sources (e.g. "MumblingRadio.monitor") the ".monitor" suffix is stripped
+/// and STREAM_CAPTURE_SINK is set, because in native PipeWire the monitor ports live on
+/// the sink node itself — there is no separate monitor node.
+pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
+    std::thread::spawn(move || {
+        // std::sync channel for the RT callback (no async runtime in RT thread).
+        let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(256);
+
+        {
+            let src = source_name.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = pw_capture_loop(&src, raw_tx) {
+                    error!("[Audio:Loopback] PipeWire error: {e}");
+                }
+            });
+        }
+
+        // Accumulate variable-sized PipeWire buffers into 960-sample Opus frames.
+        let mut accum: Vec<f32> = Vec::new();
+        for chunk in raw_rx {
+            accum.extend_from_slice(&chunk);
+            while accum.len() >= 960 {
+                let frame: Vec<f32> = accum.drain(..960).collect();
+                let _ = tx.try_send(frame);
+            }
+        }
+    });
+}
+
+fn pw_capture_loop(
+    source_name: &str,
+    tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+) -> Result<(), pipewire::Error> {
+    use pipewire as pw;
+    use pw::spa::{
+        param::{audio::{AudioFormat, AudioInfoRaw}, ParamType},
+        pod::{Object, Pod, Value, serialize::PodSerializer},
+        utils::{Direction, SpaTypes},
+    };
+
+    pw::init();
+
+    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
+    let context  = pw::context::ContextRc::new(&mainloop, None)?;
+    let core     = context.connect_rc(None)?;
+
+    // "MumblingRadio.monitor" → target "MumblingRadio" + STREAM_CAPTURE_SINK
+    // because monitor ports in native PipeWire live on the sink node itself.
+    let (target, capture_sink) = source_name
+        .strip_suffix(".monitor")
+        .map(|s| (s.to_string(), true))
+        .unwrap_or_else(|| (source_name.to_string(), false));
+
+    let mut props = pw::properties::properties! {
+        *pw::keys::MEDIA_TYPE     => "Audio",
+        *pw::keys::MEDIA_CATEGORY => "Capture",
+        *pw::keys::MEDIA_ROLE     => "Communication",
+    };
+    props.insert(*pw::keys::TARGET_OBJECT, target);
+    if capture_sink {
+        props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
+    }
+
+    let stream = pw::stream::StreamBox::new(&core, "mumbled-flight-loopback", props)?;
+
+    let _listener = stream
+        .add_local_listener_with_user_data(tx)
+        .process(|stream, tx| {
+            let mut buf = match stream.dequeue_buffer() {
+                Some(b) => b,
+                None    => return,
+            };
+            let datas = buf.datas_mut();
+            if datas.is_empty() { return; }
+            let n = datas[0].chunk().size() as usize;
+            if let Some(raw) = datas[0].data() {
+                let end = n.min(raw.len());
+                let samples: Vec<f32> = raw[..end]
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                let _ = tx.try_send(samples);
+            }
+        })
+        .register()?;
+
+    let mut audio_info = AudioInfoRaw::new();
+    audio_info.set_format(AudioFormat::F32LE);
+    audio_info.set_rate(48000);
+    audio_info.set_channels(1);
+    let obj = Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id:    ParamType::EnumFormat.as_raw(),
+        properties: audio_info.into(),
+    };
+    let values: Vec<u8> = PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &Value::Object(obj),
+    ).unwrap().0.into_inner();
+    let mut params = [Pod::from_bytes(&values).unwrap()];
+
+    stream.connect(
+        Direction::Input,
+        None,
+        pw::stream::StreamFlags::AUTOCONNECT
+            | pw::stream::StreamFlags::MAP_BUFFERS
+            | pw::stream::StreamFlags::RT_PROCESS,
+        &mut params,
+    )?;
+
+    info!("[Audio:Loopback] PipeWire capture active: '{source_name}'");
+    mainloop.run();
+    Ok(())
+}
+
 pub fn start_capture(
     tx: mpsc::Sender<Vec<f32>>,
     _denoise: bool,
     mic_gain: Arc<AtomicU32>,
     _gate_threshold: f32,
     device_name_filter: Option<String>,
-    _is_loopback: bool,
 ) {
     std::thread::spawn(move || {
         // Hold the env lock across set_var → build_input_stream → play() so that

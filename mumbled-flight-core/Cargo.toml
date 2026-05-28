@@ -12,6 +12,7 @@ openssl = "0.10"
 native-tls = "0.2"
 mumble-protocol = "0.4"
 cpal = "0.15"
+pipewire = { version = "0.10", features = ["v0_3_44"] }
 audiopus = { version = "0.3.0-rc.0" }
 byteorder = "1.5"
 bytes = "1.0"

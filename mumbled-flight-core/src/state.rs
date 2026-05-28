@@ -99,6 +99,10 @@ pub enum DataRefId {
     Contwheel0Rt, Contwheel1Rt,
     DoorCabin,
     DoorLavatory,
+    /// xpilot/audio/com1_rx: xPilot COM1 receiver active
+    XpilotCom1Rx,
+    /// xpilot/audio/com2_rx: xPilot COM2 receiver active
+    XpilotCom2Rx,
 }
 
 impl DataRefId {
@@ -130,8 +134,10 @@ impl DataRefId {
             DataRefId::Contwheel1Ic   => "CL650/contwheel/1/ic",
             DataRefId::Contwheel0Rt   => "CL650/contwheel/0/rt",
             DataRefId::Contwheel1Rt   => "CL650/contwheel/1/rt",
-            DataRefId::DoorCabin => "CL650/doors/cabin/door",
-            DataRefId::DoorLavatory => "CL650/doors/cabin/lavatory",
+            DataRefId::DoorCabin      => "CL650/doors/cabin/door",
+            DataRefId::DoorLavatory   => "CL650/doors/cabin/lavatory",
+            DataRefId::XpilotCom1Rx   => "xpilot/audio/com1_rx",
+            DataRefId::XpilotCom2Rx   => "xpilot/audio/com2_rx",
         }
     }
 
@@ -151,6 +157,8 @@ impl DataRefId {
             DataRefId::Contwheel0Rt, DataRefId::Contwheel1Rt,
             DataRefId::DoorCabin,
             DataRefId::DoorLavatory,
+            DataRefId::XpilotCom1Rx,
+            DataRefId::XpilotCom2Rx,
         ]
     }
 
@@ -185,6 +193,10 @@ pub struct CockpitState {
     pub door: f32,
     /// CL650/doors/cabin/lavatory: 0.0 = closed, 1.0 = open
     pub door_lav: f32,
+    /// xpilot/audio/com1_rx: xPilot COM1 receiver active
+    pub com1_rx: bool,
+    /// xpilot/audio/com2_rx: xPilot COM2 receiver active
+    pub com2_rx: bool,
 }
 
 impl Default for CockpitState {
@@ -206,6 +218,8 @@ impl Default for CockpitState {
             ic_vol: 0.0,
             door: 1.0,      // open by default — no spurious attenuation before DataRefs are read
             door_lav: 1.0,
+            com1_rx: false,
+            com2_rx: false,
         }
     }
 }
@@ -278,8 +292,10 @@ impl CockpitState {
             DataRefId::Contwheel1Ic    => if !is_left_seat { self.contwheel_ic = Self::val_to_bool(val) },
             DataRefId::Contwheel0Rt    => if  is_left_seat { self.contwheel_rt = Self::val_to_bool(val) },
             DataRefId::Contwheel1Rt    => if !is_left_seat { self.contwheel_rt = Self::val_to_bool(val) },
-            DataRefId::DoorCabin => self.door = val.as_f64().unwrap_or(1.0) as f32,
+            DataRefId::DoorCabin    => self.door     = val.as_f64().unwrap_or(1.0) as f32,
             DataRefId::DoorLavatory => self.door_lav = val.as_f64().unwrap_or(1.0) as f32,
+            DataRefId::XpilotCom1Rx => self.com1_rx  = Self::val_to_bool(val),
+            DataRefId::XpilotCom2Rx => self.com2_rx  = Self::val_to_bool(val),
         }
 
         if self.acp_ic != old_state.acp_ic || self.contwheel_ic != old_state.contwheel_ic

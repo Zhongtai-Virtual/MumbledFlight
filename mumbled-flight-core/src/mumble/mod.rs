@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use tokio::sync::{broadcast, mpsc};
 use crate::state::{CockpitState, SharedCockpitZone};
 use self::voip::MumbleVoipClient;
-use self::audio::{start_capture, start_playback, create_linux_sink};
+use self::audio::{start_capture, start_loopback_capture, start_playback, create_linux_sink};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TestClient {
@@ -42,7 +42,7 @@ pub async fn run_mumble_stack(
         if sine_input {
             audio::start_sine_capture(sync_tx, mic_gain);
         } else {
-            start_capture(sync_tx, d_mic, mic_gain, 0.0, None, false);
+            start_capture(sync_tx, d_mic, mic_gain, 0.0, None);
         }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);
@@ -61,8 +61,7 @@ pub async fn run_mumble_stack(
         let tx_clone = tx.clone();
         std::thread::spawn(move || {
             let (sync_tx, mut sync_rx) = mpsc::channel(128);
-            let unity = Arc::new(AtomicU32::new(1.0f32.to_bits()));
-            crate::mumble::audio::start_capture(sync_tx, false, unity, 0.0, Some(source_name), true);
+            start_loopback_capture(source_name, sync_tx);
             while let Some(frame) = sync_rx.blocking_recv() {
                 let _ = tx_clone.send(frame);
             }
