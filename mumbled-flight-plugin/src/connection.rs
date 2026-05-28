@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicU32;
 
-use mumbled_flight_core::{mumble, state::CockpitState};
+use mumbled_flight_core::{mumble, mumble::TestClient, state::CockpitState};
 
 use crate::PluginState;
 
@@ -44,7 +44,7 @@ pub fn start(ps: &mut PluginState) {
     runtime.spawn(async move {
         mumble::run_mumble_stack(
             state_clone, user_name, flight_id, mic_gain_for_thread,
-            denoise, radio_source, auto_sink, false, false, None,
+            denoise, radio_source, auto_sink, TestClient::default(), false, None,
             server_addr, output_device,
         ).await;
     });

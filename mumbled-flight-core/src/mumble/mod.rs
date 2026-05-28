@@ -11,6 +11,14 @@ use crate::state::{CockpitState, SharedCockpitZone};
 use self::voip::MumbleVoipClient;
 use self::audio::{start_capture, start_playback, create_linux_sink};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TestClient {
+    #[default]
+    All,
+    Ambient,
+    Ic,
+}
+
 pub async fn run_mumble_stack(
     state: Arc<Mutex<CockpitState>>,
     user_name: String,
@@ -19,7 +27,7 @@ pub async fn run_mumble_stack(
     denoise: bool,
     radio_source: Option<String>,
     auto_sink: bool,
-    single_client: bool,
+    test_client: TestClient,
     sine_input: bool,
     test_pos: Option<[f32; 3]>,
     server_addr: SocketAddr,
@@ -47,7 +55,7 @@ pub async fn run_mumble_stack(
     // 2. RADIO Chain
     let final_radio_source = if auto_sink { create_linux_sink() } else { radio_source };
     
-    let radio_tx = if !single_client && final_radio_source.is_some() {
+    let radio_tx = if test_client == TestClient::All && final_radio_source.is_some() {
         let source_name = final_radio_source.unwrap();
         let (tx, _) = broadcast::channel::<Vec<f32>>(128);
         let tx_clone = tx.clone();
@@ -68,7 +76,8 @@ pub async fn run_mumble_stack(
     let (playback_tx, playback_rx) = mpsc::channel(1024);
     start_playback(playback_rx, output_device);
 
-    // 4. Ambient Client — joins zone-specific channel, switches on zone change
+    // 4. Ambient Client
+    if test_client != TestClient::Ic {
     let fbo_ch      = format!("{}_ambient_fbo",      session_id);
     let aircraft_ch = format!("{}_ambient_aircraft", session_id);
     let initial_zone = state.lock().unwrap().zone;
@@ -94,8 +103,9 @@ pub async fn run_mumble_stack(
         };
         let _ = client.run(server_addr, st_a, mic_rx_a, pb_tx_a).await;
     });
+    }
 
-    if single_client {
+    if test_client == TestClient::Ambient {
         return;
     }
 
