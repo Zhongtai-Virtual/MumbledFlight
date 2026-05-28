@@ -19,6 +19,7 @@ pub async fn run_mumble_stack(
     radio_source: Option<String>,
     auto_sink: bool,
     single_client: bool,
+    sine_input: bool,
     test_pos: Option<[f32; 3]>,
     server_addr: SocketAddr,
     output_device: Option<String>,
@@ -29,7 +30,11 @@ pub async fn run_mumble_stack(
     let d_mic = denoise;
     std::thread::spawn(move || {
         let (sync_tx, mut sync_rx) = mpsc::channel(128);
-        start_capture(sync_tx, d_mic, gain, 0.0, None, false);
+        if sine_input {
+            audio::start_sine_capture(sync_tx, gain);
+        } else {
+            start_capture(sync_tx, d_mic, gain, 0.0, None, false);
+        }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);
         }

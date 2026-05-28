@@ -73,8 +73,11 @@ impl MumbleVoipClient {
                     session.on_control_msg(msg, self, &mut control).await?;
                 }
                 result = audio_rx.recv() => {
-                    let Ok(pcm) = result else { break };
-                    session.on_mic_pcm(pcm, self, &udp, &state).await?;
+                    match result {
+                        Ok(pcm) => session.on_mic_pcm(pcm, self, &udp, &state).await?,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed)    => break,
+                    }
                 }
             }
         }

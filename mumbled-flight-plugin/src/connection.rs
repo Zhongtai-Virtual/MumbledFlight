@@ -41,7 +41,7 @@ pub fn start(ps: &mut PluginState) {
     runtime.spawn(async move {
         mumble::run_mumble_stack(
             state_clone, user_name, flight_id, gain,
-            denoise, radio_source, auto_sink, false, None,
+            denoise, radio_source, auto_sink, false, false, None,
             server_addr, output_device,
         ).await;
     });

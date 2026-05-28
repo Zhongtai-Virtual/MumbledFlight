@@ -5,6 +5,7 @@ use log::{info, debug, error};
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
+use std::io::Read;
 
 pub fn list_audio_devices() {
     println!("\n--- [ Audio Host & Device Discovery ] ---");
@@ -79,6 +80,47 @@ fn pipewire_device(node: Option<&str>, input: bool) -> cpal::Device {
             .or_else(|| host.default_output_device())
             .expect("No PipeWire output device")
     }
+}
+
+/// Generates a 500 Hz sine tone via ffmpeg and feeds it into the mic pipeline.
+/// Requires ffmpeg on PATH. Intended for CLI test/debug mode only.
+pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, gain: f32) {
+    std::thread::spawn(move || {
+        let mut child = match std::process::Command::new("ffmpeg")
+            .args([
+                "-f", "lavfi",
+                "-i", "sine=f=500:r=48000",
+                "-f", "f32le", "-ar", "48000", "-ac", "1",
+                "-",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => { error!("[Audio:Sine] ffmpeg spawn failed: {e}"); return; }
+        };
+
+        info!("[Audio:Sine] 500 Hz sine tone active (gain {gain:.1}x)");
+
+        let mut stdout = child.stdout.take().unwrap();
+        const SAMPLES: usize = 960; // 20 ms @ 48 kHz
+        const FRAME_DUR: std::time::Duration = std::time::Duration::from_millis(20);
+        let mut buf = [0u8; SAMPLES * 4]; // f32le = 4 bytes/sample
+        let mut next = std::time::Instant::now();
+        loop {
+            if stdout.read_exact(&mut buf).is_err() { break; }
+            let frame: Vec<f32> = buf.chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * gain)
+                .collect();
+            let _ = tx.try_send(frame);
+            // Sleep until the next 20 ms boundary to match real capture pacing.
+            next += FRAME_DUR;
+            if let Some(remaining) = next.checked_duration_since(std::time::Instant::now()) {
+                std::thread::sleep(remaining);
+            }
+        }
+    });
 }
 
 pub fn start_capture(
