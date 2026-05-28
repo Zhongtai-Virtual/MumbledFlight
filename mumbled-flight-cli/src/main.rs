@@ -4,16 +4,19 @@ mod xplane;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use log::{info, error};
-use std::sync::{Arc, Mutex};
+use log::{error, info};
+use mumbled_flight_core::config::Config;
+use mumbled_flight_core::mumble::{self, TestClient};
+use mumbled_flight_core::state::CockpitState;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use mumbled_flight_core::state::CockpitState;
-use mumbled_flight_core::mumble::{self, TestClient};
-use mumbled_flight_core::config::Config;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum CliClient { Ambient, Ic }
+enum CliClient {
+    Ambient,
+    Ic,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliZone {
@@ -93,14 +96,16 @@ async fn main() -> Result<()> {
     }
 
     // Ensure we have a flight ID for normal operation
-    let flight_id = args.flight_id.expect("Error: Flight ID is required. Use --help for usage details.");
+    let flight_id = args
+        .flight_id
+        .expect("Error: Flight ID is required. Use --help for usage details.");
 
     info!("MumbledFlight Standalone Bridge starting...");
 
     // 2. Initialize shared state
     let state = Arc::new(Mutex::new(CockpitState::default()));
     let server_addr: SocketAddr = "127.0.0.1:64738".parse()?;
-    
+
     // 3. Resolve Identity
     let user_prefix = if let Some(u) = args.user {
         u
@@ -114,13 +119,22 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     };
 
-    info!("Session ready — user: {}, flight: {}, denoise: {}",
-        user_prefix, flight_id, args.denoise);
+    info!(
+        "Session ready — user: {}, flight: {}, denoise: {}",
+        user_prefix, flight_id, args.denoise
+    );
 
     // 4. Start Mumble Stack
     let test_pos: Option<[f32; 3]> = args.pos.map(|s| {
-        let p: Vec<f32> = s.split(',').map(|c| c.trim().parse().unwrap_or(0.0)).collect();
-        [p.first().copied().unwrap_or(0.0), p.get(1).copied().unwrap_or(0.0), p.get(2).copied().unwrap_or(0.0)]
+        let p: Vec<f32> = s
+            .split(',')
+            .map(|c| c.trim().parse().unwrap_or(0.0))
+            .collect();
+        [
+            p.first().copied().unwrap_or(0.0),
+            p.get(1).copied().unwrap_or(0.0),
+            p.get(2).copied().unwrap_or(0.0),
+        ]
     });
     // Pre-configure state for single-client test mode — DataRef bridge is skipped below.
     if args.test.is_some() {
@@ -128,7 +142,7 @@ async fn main() -> Result<()> {
         let mut s = state.lock().unwrap();
         if let Some(zone) = args.zone {
             s.zone = match zone {
-                CliZone::Fbo      => SharedCockpitZone::InFbo,
+                CliZone::Fbo => SharedCockpitZone::InFbo,
                 CliZone::Aircraft => SharedCockpitZone::AroundOrInAircraft,
             };
         }
@@ -140,9 +154,9 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         use std::sync::atomic::AtomicU32;
         let test_client = match args.test {
-            None                     => TestClient::All,
+            None => TestClient::All,
             Some(CliClient::Ambient) => TestClient::Ambient,
-            Some(CliClient::Ic)      => TestClient::Ic,
+            Some(CliClient::Ic) => TestClient::Ic,
         };
         mumble::run_mumble_stack(
             state_mumble,
@@ -154,10 +168,12 @@ async fn main() -> Result<()> {
             args.auto_sink,
             test_client,
             args.sine,
-            test_pos,  // None = use real X-Plane position; Some = fixed pos
+            test_pos, // None = use real X-Plane position; Some = fixed pos
             server_addr,
             None,
-        ).await;
+            None,
+        )
+        .await;
     });
 
     // 5. Run the X-Plane WebAPI bridge (Main Thread) — skipped in single-client test mode
