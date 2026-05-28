@@ -172,6 +172,7 @@ pub fn start_sine_capture(tx: mpsc::Sender<Vec<f32>>, mic_gain: Arc<AtomicU32>) 
 /// and STREAM_CAPTURE_SINK is set, because in native PipeWire the monitor ports live on
 /// the sink node itself — there is no separate monitor node.
 pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
+    #[cfg(target_os = "linux")]
     std::thread::spawn(move || {
         // std::sync channel for the RT callback (no async runtime in RT thread).
         let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(256);
@@ -195,8 +196,15 @@ pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
             }
         }
     });
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source_name, tx);
+        warn!("[Audio:Loopback] Loopback capture is only supported on Linux (via PipeWire)");
+    }
 }
 
+#[cfg(target_os = "linux")]
 fn pw_capture_loop(
     source_name: &str,
     tx: std::sync::mpsc::SyncSender<Vec<f32>>,
