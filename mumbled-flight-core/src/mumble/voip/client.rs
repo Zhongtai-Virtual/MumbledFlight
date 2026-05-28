@@ -30,17 +30,23 @@ use super::spatial::{compute_stereo_gains, encode_pos};
 
 const MUMBLE_VERSION: u32 = 0x00010400;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientRole {
+    Ambient,
+    Ic,
+    Pa,
+    /// `has_source` — false when the radio source device is "Disabled" (no loopback capture).
+    Radio { has_source: bool },
+}
+
 pub struct MumbleVoipClient {
     pub username: String,
     pub context: String,
-    pub is_ic: bool,
-    pub is_radio: bool,
+    pub role: ClientRole,
     pub target_channel: String,
-    /// For ambient clients: (fbo_channel_name, aircraft_channel_name).
+    /// For ambient/PA clients: (fbo_channel_name, aircraft_channel_name).
     /// None for IC and radio clients — they never switch channels.
     pub zone_channels: Option<(String, String)>,
-    /// True only for the radio relay client when a source device was configured (not "Disabled").
-    pub has_radio_source: bool,
     #[allow(dead_code)]
     pub denoise: bool,
     pub test_pos: Option<[f32; 3]>,
@@ -147,10 +153,15 @@ impl MumbleVoipClient {
     }
 
     fn position_bytes(&self, s: &CockpitState) -> Option<Bytes> {
-        if self.is_ic                        { None }
-        else if self.is_radio                { Some(encode_pos(0.0, 0.0, 0.0)) }
-        else if let Some(tp) = self.test_pos { Some(encode_pos(tp[0], tp[1], tp[2])) }
-        else                                 { Some(encode_pos(s.pos[0], s.pos[1], -s.pos[2])) }
+        match self.role {
+            ClientRole::Ic           => None,
+            ClientRole::Radio { .. } => Some(encode_pos(0.0, 0.0, 0.0)),
+            _ => if let Some(tp) = self.test_pos {
+                Some(encode_pos(tp[0], tp[1], tp[2]))
+            } else {
+                Some(encode_pos(s.pos[0], s.pos[1], -s.pos[2]))
+            },
+        }
     }
 
     pub(super) fn spatialize(

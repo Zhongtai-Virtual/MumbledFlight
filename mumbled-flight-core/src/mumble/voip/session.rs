@@ -18,9 +18,9 @@ use tokio::sync::mpsc;
 use tokio_native_tls::TlsStream;
 use tokio_util::codec::Framed;
 
-use super::client::MumbleVoipClient;
+use super::client::{ClientRole, MumbleVoipClient};
 use super::spatial::{decode_opus_packet, parse_position};
-use crate::state::{CockpitState, SharedCockpitRole, SharedCockpitZone};
+use crate::state::{AcpMicSelection, CockpitState, SharedCockpitRole, SharedCockpitZone};
 
 pub type Control = Framed<TlsStream<TcpStream>, ClientControlCodec>;
 
@@ -325,8 +325,12 @@ impl Session {
         if self.my_session == Some(session_id) {
             return;
         }
+        // PA is TX-only — ambient client already covers the aircraft channel for RX.
+        if client.role == ClientRole::Pa {
+            return;
+        }
 
-        let rx_vol = if client.is_ic {
+        let rx_vol = if client.role == ClientRole::Ic {
             let s = state.lock().unwrap();
             if s.role != SharedCockpitRole::Pilot || !s.ic_tog {
                 return;
@@ -351,7 +355,7 @@ impl Session {
             return;
         };
         // IC simulates headphone playback — flat equal-power stereo, no spatialization.
-        let mut stereo = if client.is_ic {
+        let mut stereo = if client.role == ClientRole::Ic {
             let mut out = Vec::with_capacity(mono.len() * 2);
             for &s in &mono {
                 out.push(s);
@@ -378,22 +382,31 @@ impl Session {
     ) -> Result<()> {
         let (is_active, tx_vol) = {
             let s = state.lock().unwrap();
-            if client.is_radio {
-                let active = client.has_radio_source
-                    && !s.is_guest
-                    && (s.com1_rx || s.com2_rx)
-                    && s.spkr_tog;
-                (active, s.spkr_vol)
-            } else if client.is_ic {
-                // TX when: seated as Pilot AND (ACP/*/ic keyed OR contwheel/*/ic pressed)
-                //         AND neither RT source is active (RT takes priority over IC)
-                let active = s.role == SharedCockpitRole::Pilot
-                    && (s.acp_ic || s.contwheel_ic)
-                    && !s.acp_rt
-                    && !s.contwheel_rt;
-                (active, 1.0)
-            } else {
-                (true, 1.0)
+            match client.role {
+                ClientRole::Radio { has_source } => {
+                    let active = has_source
+                        && !s.is_guest
+                        && (s.com1_rx || s.com2_rx)
+                        && s.spkr_tog;
+                    (active, s.spkr_vol)
+                }
+                ClientRole::Ic => {
+                    // TX when: seated as Pilot AND (ACP/*/ic keyed OR contwheel/*/ic pressed)
+                    //         AND neither RT source is active (RT takes priority over IC)
+                    let active = s.role == SharedCockpitRole::Pilot
+                        && (s.acp_ic || s.contwheel_ic)
+                        && !s.acp_rt
+                        && !s.contwheel_rt;
+                    (active, 1.0)
+                }
+                ClientRole::Pa => {
+                    // TX when: seated as Pilot AND mic selector is PA AND RT active on contwheel or ACP
+                    let active = s.role == SharedCockpitRole::Pilot
+                        && s.mic == AcpMicSelection::Pa
+                        && (s.acp_rt || s.contwheel_rt);
+                    (active, 1.0)
+                }
+                ClientRole::Ambient => (true, 1.0),
             }
         };
         let Some(cs) = self.crypt.as_mut() else {

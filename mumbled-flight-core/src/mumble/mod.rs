@@ -4,7 +4,7 @@ pub mod audio;
 pub mod voip;
 
 use self::audio::{create_linux_sink, start_capture, start_loopback_capture, start_playback};
-use self::voip::MumbleVoipClient;
+use self::voip::client::{ClientRole, MumbleVoipClient};
 use crate::state::{CockpitState, SharedCockpitZone};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
@@ -92,11 +92,9 @@ pub async fn run_mumble_stack(
             let client = MumbleVoipClient {
                 username: format!("{}_ambient", un_a),
                 context: format!("{}_ambient", sid_a),
-                is_ic: false,
-                is_radio: false,
+                role: ClientRole::Ambient,
                 target_channel: initial_ambient_ch,
                 zone_channels: Some((fbo_ch, aircraft_ch)),
-                has_radio_source: false,
                 denoise,
                 test_pos,
             };
@@ -118,18 +116,37 @@ pub async fn run_mumble_stack(
         let client = MumbleVoipClient {
             username: format!("{}_ic", un_i),
             context: format!("{}_ic", sid_i),
-            is_ic: true,
-            is_radio: false,
+            role: ClientRole::Ic,
             target_channel: format!("{}_ic", sid_i),
             zone_channels: None,
-            has_radio_source: false,
             denoise,
             test_pos,
         };
         let _ = client.run(server_addr, st_i, mic_rx_i, pb_tx_i).await;
     });
 
-    // 6. Radio Relay Client + local COM monitor
+    // 6. PA (Public Address) Client — fixed cabin position, always in aircraft channel
+    // TODO: replace with actual cabin speaker position once confirmed
+    const PA_POSITION: [f32; 3] = [0.0, 0.0, 0.0];
+    let st_pa = Arc::clone(&state);
+    let mic_rx_pa = mic_tx.subscribe();
+    let pb_tx_pa = ambient_pb_tx.clone();
+    let un_pa = user_name.clone();
+    let sid_pa = session_id.clone();
+    tokio::spawn(async move {
+        let client = MumbleVoipClient {
+            username: format!("{}_PA", un_pa),
+            context: format!("{}_ambient", sid_pa),
+            role: ClientRole::Pa,
+            target_channel: format!("{}_ambient_aircraft", sid_pa),
+            zone_channels: None,
+            denoise,
+            test_pos: Some(PA_POSITION),
+        };
+        let _ = client.run(server_addr, st_pa, mic_rx_pa, pb_tx_pa).await;
+    });
+
+    // 7. Radio Relay Client + local COM monitor
     // (radio_tx is a cloned Sender into the shared loopback channel — no new PW stream)
     if let Some(rtx) = radio_tx {
         let st_r = Arc::clone(&state);
@@ -141,11 +158,9 @@ pub async fn run_mumble_stack(
             let client = MumbleVoipClient {
                 username: format!("{}_radio", un_r),
                 context: format!("{}_radio", sid_r),
-                is_ic: false,
-                is_radio: true,
+                role: ClientRole::Radio { has_source: true },
                 target_channel: format!("{}_radio", sid_r),
                 zone_channels: None,
-                has_radio_source: true,
                 denoise,
                 test_pos,
             };
