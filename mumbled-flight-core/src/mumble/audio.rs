@@ -658,8 +658,6 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
     std::thread::spawn(move || {
         let pending_samples    = Arc::new(Mutex::new(VecDeque::<f32>::new()));
         let pending_samples_cb = Arc::clone(&pending_samples);
-        let is_playing         = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let is_playing_cb      = Arc::clone(&is_playing);
 
         let (stream, device_channels) = {
             let _guard = pipewire_env_lock().lock().unwrap();
@@ -689,17 +687,11 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
                 &config.into(),
                 move |data: &mut [f32], _| {
                     let mut lock = pending_samples_cb.lock().unwrap();
-                    let available = lock.len();
-                    if !is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) || available < data.len() {
-                        for x in data.iter_mut() { *x = 0.0; }
-                        if is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) && available < data.len() {
-                            is_playing_cb.store(false, std::sync::atomic::Ordering::SeqCst);
-                        }
-                        return;
+                    let n = lock.len().min(data.len());
+                    for (dst, src) in data[..n].iter_mut().zip(lock.drain(..n)) {
+                        *dst = src;
                     }
-                    for (i, sample) in lock.drain(..data.len()).enumerate() {
-                        data[i] = sample;
-                    }
+                    for x in data[n..].iter_mut() { *x = 0.0; }
                 },
                 |err| error!("[Audio:Out] stream error: {err}"),
                 None,
@@ -714,8 +706,6 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
             (s, device_channels)
         }; // PIPEWIRE_NODE lock released — stream is already connected
 
-        let hwm = 7200 * device_channels;
-
         let mut last_log = std::time::Instant::now();
         while let Some(stereo_frame_48k) = rx.blocking_recv() {
             let mut lock = pending_samples.lock().unwrap();
@@ -727,10 +717,6 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
                     let mono = (chunk[0] + chunk[1]) * 0.5;
                     for _ in 0..device_channels { lock.push_back(mono); }
                 }
-            }
-
-            if lock.len() >= hwm {
-                is_playing.store(true, std::sync::atomic::Ordering::SeqCst);
             }
 
             let max_buffered = 24000 * device_channels;
