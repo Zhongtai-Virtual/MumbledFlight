@@ -1,7 +1,8 @@
 //! Audio device enumeration — output (PipeWire registry on Linux, CPAL elsewhere) and input.
 
 #[cfg(not(target_os = "linux"))]
-use cpal::traits::HostTrait;
+use cpal::traits::{DeviceTrait, HostTrait};
+#[cfg(target_os = "linux")]
 use mumbled_flight_core::mumble::audio::{enumerate_pw_sinks, enumerate_pw_sources, VIRTUAL_SINK_NAME};
 
 /// Returns `(names, labels)` where `names` are used for routing and `labels` for display.
