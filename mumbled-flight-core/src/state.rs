@@ -142,7 +142,7 @@ impl DataRefId {
             DataRefId::Acp1IntSvcTog, DataRefId::Acp1IntSvcVol,
             DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
             DataRefId::Acp2IntSvcTog, DataRefId::Acp2IntSvcVol,
-            DataRefId::Contwheel1Ic, DataRefId::Contwheel2Ic,
+            DataRefId::Contwheel0Ic, DataRefId::Contwheel1Ic,
             DataRefId::DoorCabin,
             DataRefId::DoorLavatory,
         ]
@@ -259,7 +259,7 @@ impl CockpitState {
             DataRefId::Acp2Spkr        => if !is_left_seat { self.spkr    = Self::val_to_bool(val) },
             DataRefId::Acp2IntSvcTog   => if !is_left_seat { self.ic_spkr = Self::val_to_bool(val) },
             DataRefId::Acp2IntSvcVol   => if !is_left_seat { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
-            DataRefId::Contwheel0Ic    => if  is_pilot { self.contwheel_ic = Self::val_to_bool(val) },
+            DataRefId::Contwheel0Ic    => if  is_left_seat { self.contwheel_ic = Self::val_to_bool(val) },
             DataRefId::Contwheel1Ic    => if !is_left_seat { self.contwheel_ic = Self::val_to_bool(val) },
             DataRefId::DoorCabin => self.door = val.as_f64().unwrap_or(1.0) as f32,
             DataRefId::DoorLavatory => self.door_lav = val.as_f64().unwrap_or(1.0) as f32,
