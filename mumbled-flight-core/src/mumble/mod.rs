@@ -47,9 +47,7 @@ pub async fn run_mumble_stack(
         let tx_clone = tx.clone();
         std::thread::spawn(move || {
             let (sync_tx, mut sync_rx) = mpsc::channel(128);
-            
             crate::mumble::audio::start_capture(sync_tx, false, 1.0, 0.0, Some(source_name), true);
-
             while let Some(frame) = sync_rx.blocking_recv() {
                 let _ = tx_clone.send(frame);
             }

@@ -99,12 +99,12 @@ fn select_output_device(preferred: Option<&str>) -> cpal::Device {
 }
 
 pub fn start_capture(
-    tx: mpsc::Sender<Vec<f32>>, 
-    _denoise: bool, 
-    gain: f32, 
+    tx: mpsc::Sender<Vec<f32>>,
+    _denoise: bool,
+    gain: f32,
     _gate_threshold: f32,
     device_name_filter: Option<String>,
-    _is_loopback: bool
+    _is_loopback: bool,
 ) {
     std::thread::spawn(move || {
         let device = select_input_device(device_name_filter.as_deref());
@@ -127,7 +127,7 @@ pub fn start_capture(
                     for chunk in data.chunks_exact(num_channels) {
                         let mut sum = 0.0;
                         for i in 0..num_channels { sum += chunk[i]; }
-                        capture_buffer.push((sum / num_channels as f32) * gain); 
+                        capture_buffer.push((sum / num_channels as f32) * gain);
                     }
                 } else {
                     for &s in data { capture_buffer.push(s * gain); }
@@ -139,43 +139,65 @@ pub fn start_capture(
                 }
             },
             |err| error!("[Audio:Capture] {}", err),
-            None
+            None,
         ).expect("Failed to build input stream");
 
         stream.play().expect("Failed to start input stream");
-        std::mem::forget(stream);
+        // stream lives here as a local — no mem::forget needed.
+        // Thread parks until the process exits or until a future shutdown mechanism drops it.
         loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
     });
 }
 
 pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option<String>) {
-    let device = select_output_device(preferred_device.as_deref());
-    
-    let supported_configs = device.supported_output_configs().expect("Failed to get configs");
-    let config = supported_configs
-        .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
-        .find(|c| c.channels() == 2)
-        .or_else(|| device.supported_output_configs().unwrap().next())
-        .expect("HARDWARE ERROR: Could not find a valid output config.")
-        .with_sample_rate(cpal::SampleRate(48000));
-        
-    let device_channels = config.channels() as usize;
-    info!("[Audio:Out] Sink: {} (48kHz, {} ch)", device.name().unwrap_or_default(), device_channels);
-
-    // REAL-TIME RING BUFFER: Optimized for O(1) removals.
-    let pending_samples = Arc::new(Mutex::new(VecDeque::<f32>::new()));
-    let pending_samples_cb = Arc::clone(&pending_samples);
-
-    // Initial Prime: Wait for 150ms of audio (channel-aware)
-    let hwm = 7200 * device_channels; 
-    let is_playing = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let is_playing_cb = Arc::clone(&is_playing);
-
+    // Build and run entirely inside one thread — CPAL Stream is !Send on ALSA,
+    // so creating and dropping it in the same thread avoids any Send requirement.
     std::thread::spawn(move || {
+        let device = select_output_device(preferred_device.as_deref());
+
+        let supported_configs = device.supported_output_configs().expect("Failed to get configs");
+        let config = supported_configs
+            .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
+            .find(|c| c.channels() == 2)
+            .or_else(|| device.supported_output_configs().unwrap().next())
+            .expect("HARDWARE ERROR: Could not find a valid output config.")
+            .with_sample_rate(cpal::SampleRate(48000));
+
+        let device_channels = config.channels() as usize;
+        info!("[Audio:Out] Sink: {} (48kHz, {} ch)", device.name().unwrap_or_default(), device_channels);
+
+        let pending_samples    = Arc::new(Mutex::new(VecDeque::<f32>::new()));
+        let pending_samples_cb = Arc::clone(&pending_samples);
+        let hwm                = 7200 * device_channels;
+        let is_playing         = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let is_playing_cb      = Arc::clone(&is_playing);
+
+        let stream = device.build_output_stream(
+            &config.into(),
+            move |data: &mut [f32], _| {
+                let mut lock = pending_samples_cb.lock().unwrap();
+                let available = lock.len();
+                if !is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) || available < data.len() {
+                    for x in data.iter_mut() { *x = 0.0; }
+                    if is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) && available < data.len() {
+                        is_playing_cb.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    return;
+                }
+                for (i, sample) in lock.drain(..data.len()).enumerate() {
+                    data[i] = sample;
+                }
+            },
+            |err| error!("[Audio:Out] {}", err),
+            None,
+        ).expect("Failed to build output stream");
+
+        stream.play().expect("Failed to start output stream");
+
         let mut last_log = std::time::Instant::now();
         while let Some(stereo_frame_48k) = rx.blocking_recv() {
             let mut lock = pending_samples.lock().unwrap();
-            
+
             if device_channels == 2 {
                 lock.extend(stereo_frame_48k);
             } else {
@@ -189,7 +211,6 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
                 is_playing.store(true, std::sync::atomic::Ordering::SeqCst);
             }
 
-            // High-Stability Buffer Cap (500ms)
             let max_buffered = 24000 * device_channels;
             if lock.len() > max_buffered {
                 let to_drain = lock.len() - max_buffered;
@@ -202,34 +223,6 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
                 last_log = std::time::Instant::now();
             }
         }
+        drop(stream);
     });
-
-    let stream = device.build_output_stream(
-        &config.into(),
-        move |data: &mut [f32], _| {
-            let mut lock = pending_samples_cb.lock().unwrap();
-            let available = lock.len();
-            
-            // HYSTERESIS BLOCK LOGIC:
-            // Only play if we have hit the high water mark AND can fulfill the whole request.
-            // This prevents the high-frequency clicking (shredding).
-            if !is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) || available < data.len() {
-                for x in data.iter_mut() { *x = 0.0; }
-                if is_playing_cb.load(std::sync::atomic::Ordering::SeqCst) && available < data.len() {
-                    is_playing_cb.store(false, std::sync::atomic::Ordering::SeqCst);
-                }
-                return;
-            }
-
-            // Bulk copy from buffer
-            for (i, sample) in lock.drain(..data.len()).enumerate() {
-                data[i] = sample;
-            }
-        },
-        |err| error!("[Audio:Out] {}", err),
-        None
-    ).expect("Failed to build output stream");
-
-    stream.play().expect("Failed to start output stream");
-    std::mem::forget(stream);
 }
