@@ -26,7 +26,7 @@ use tokio_util::codec::Framed;
 
 use crate::state::CockpitState;
 use super::session::{Control, Session};
-use super::spatial::{compute_stereo_gains, encode_pos};
+use super::spatial::{compute_stereo_gains, encode_pos, xplane_to_mumble};
 
 const MUMBLE_VERSION: u32 = 0x00010400;
 
@@ -55,8 +55,6 @@ pub struct MumbleVoipClient {
     /// Voice client only: (fbo_channel_name, aircraft_channel_name) for zone switching.
     /// None for IC, PA, and radio clients — they never switch channels.
     pub zone_channels: Option<(String, String)>,
-    #[allow(dead_code)]
-    pub denoise: bool,
     pub test_pos: Option<[f32; 3]>,
 }
 
@@ -131,6 +129,9 @@ impl MumbleVoipClient {
         Ok(control)
     }
 
+    // Encoder/seq/crypt are borrowed from the caller's Session; grouping them would just move
+    // the plumbing around, so the argument list is intentionally wide here.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn send_audio(
         &self,
         pcm: &[f32],
@@ -168,7 +169,8 @@ impl MumbleVoipClient {
             _ => if let Some(tp) = self.test_pos {
                 Some(encode_pos(tp[0], tp[1], tp[2]))
             } else {
-                Some(encode_pos(s.pos[0], s.pos[1], -s.pos[2]))
+                let [x, y, z] = xplane_to_mumble(s.pos);
+                Some(encode_pos(x, y, z))
             },
         }
     }
@@ -182,7 +184,7 @@ impl MumbleVoipClient {
     ) -> Vec<f32> {
         let (lpos, lrot, door, door_lav) = {
             let s = state.lock().unwrap();
-            ([s.pos[0], s.pos[1], -s.pos[2]], s.rot, s.door, s.door_lav)
+            (xplane_to_mumble(s.pos), s.rot, s.door, s.door_lav)
         };
 
         let (gain_l, gain_r, debug_msg) = match source_pos {
@@ -201,7 +203,7 @@ impl MumbleVoipClient {
         };
 
         static PACKET_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        if PACKET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 400 == 0 {
+        if PACKET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(400) {
             log::debug!("{}", debug_msg);
         }
 

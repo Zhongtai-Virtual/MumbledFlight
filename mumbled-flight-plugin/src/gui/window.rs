@@ -92,7 +92,7 @@ pub unsafe fn create_xplm_window() -> XPLMWindowID {
     };
 
     let win = XPLMCreateWindowEx(&mut params);
-    XPLMSetWindowTitle(win, b"MumbledFlight\0".as_ptr() as *const c_char);
+    XPLMSetWindowTitle(win, c"MumbledFlight".as_ptr());
     XPLMSetWindowPositioningMode(win, XPLMWindowPositioningMode::PositionFree, -1);
     win
 }

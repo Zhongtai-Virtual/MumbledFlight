@@ -19,16 +19,13 @@ impl Config {
         let reader = BufReader::new(file);
         let mut user_name = None;
 
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             let line = line.trim();
             if line.starts_with("netlink/user_name = ") {
                 user_name = Some(line.replace("netlink/user_name = ", "").trim().to_string());
             }
         }
 
-        match user_name {
-            Some(u) => Some(Config { user_name: u }),
-            _ => None,
-        }
+        user_name.map(|u| Config { user_name: u })
     }
 }

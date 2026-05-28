@@ -1,5 +1,10 @@
 //! X-Plane 12 plugin — GUI configuration panel + manual connect/disconnect.
 
+// The `XPlugin*` exports and XPLM callbacks are `unsafe extern` because X-Plane invokes them
+// across the FFI boundary; their safety contract is "the XPLM host calls them correctly," not
+// something a Rust caller can uphold, so per-function `# Safety` docs add no information here.
+#![allow(clippy::missing_safety_doc)]
+
 mod connection;
 mod gui;
 mod logger;
@@ -140,13 +145,13 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
     }
     let sub_idx = XPLMAppendMenuItem(
         plugins_menu,
-        b"MumbledFlight\0".as_ptr() as *const c_char,
+        c"MumbledFlight".as_ptr(),
         std::ptr::null_mut(),
         0,
     );
     info!("menu sub_idx: {sub_idx}");
     let menu_id = XPLMCreateMenu(
-        b"MumbledFlight\0".as_ptr() as *const c_char,
+        c"MumbledFlight".as_ptr(),
         plugins_menu,
         sub_idx,
         Some(menu_handler),
@@ -157,7 +162,7 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
     }
     XPLMAppendMenuItem(
         menu_id,
-        b"Show Window\0".as_ptr() as *const c_char,
+        c"Show Window".as_ptr(),
         std::ptr::null_mut(),
         0,
     );

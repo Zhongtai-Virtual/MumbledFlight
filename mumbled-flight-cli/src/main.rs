@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::{error, info};
 use mumbled_flight_core::config::Config;
-use mumbled_flight_core::mumble::{self, MicSource, TestClient};
+use mumbled_flight_core::mumble::{self, voip::xplane_to_mumble, MicSource, MumbleStackConfig, TestClient};
 use mumbled_flight_core::state::CockpitState;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ struct Args {
     #[arg(short, long, value_name = "NAME")]
     user: Option<String>,
 
-    /// Enable the WebRTC Audio Processing Suite (Noise Suppression, HPF, AGC).
+    /// Enable RNNoise noise suppression on the microphone input.
     #[arg(short, long, default_value_t = false)]
     denoise: bool,
 
@@ -140,12 +140,11 @@ async fn main() -> Result<()> {
             .split(',')
             .map(|c| c.trim().parse().unwrap_or(0.0))
             .collect();
-        // Convert X-Plane → Mumble: negate Z (XP aft-positive, Mumble forward-positive).
-        [
+        xplane_to_mumble([
             p.first().copied().unwrap_or(0.0),
             p.get(1).copied().unwrap_or(0.0),
-            -p.get(2).copied().unwrap_or(0.0),
-        ]
+            p.get(2).copied().unwrap_or(0.0),
+        ])
     });
     // Pre-configure state for single-client test mode — DataRef bridge is skipped below.
     if args.test.is_some() {
@@ -191,22 +190,22 @@ async fn main() -> Result<()> {
         } else {
             MicSource::Real
         };
-        mumble::run_mumble_stack(
-            state_mumble,
-            user_prefix,
-            flight_id,
-            Arc::new(AtomicU32::new(args.gain.to_bits())),
-            args.denoise,
-            args.radio_source,
-            args.auto_sink,
+        mumble::run_mumble_stack(MumbleStackConfig {
+            state: state_mumble,
+            user_name: user_prefix,
+            session_id: flight_id,
+            mic_gain: Arc::new(AtomicU32::new(args.gain.to_bits())),
+            denoise: args.denoise,
+            radio_source: args.radio_source,
+            auto_sink: args.auto_sink,
             test_client,
             mic_source,
             test_pos, // None = use real X-Plane position; Some = fixed pos
             server_addr,
-            None,
-            None,
+            ambient_output: None,
+            ic_output: None,
             statuses,
-        )
+        })
         .await;
     });
 
