@@ -234,6 +234,11 @@ impl Session {
         state_msg.set_session(sync.get_session());
         state_msg.set_plugin_context(client.context.as_bytes().to_vec());
         state_msg.set_plugin_identity(client.username.clone());
+        // TX-only clients declare themselves deaf so the server stops routing
+        // incoming voice packets to them — eliminates wasted channel traffic.
+        if matches!(client.role, ClientRole::Pa | ClientRole::Radio { .. }) {
+            state_msg.set_self_deaf(true);
+        }
         control
             .send(ControlPacket::UserState(Box::new(state_msg)))
             .await?;
@@ -325,8 +330,8 @@ impl Session {
         if self.my_session == Some(session_id) {
             return;
         }
-        // PA is TX-only — ambient client already covers the aircraft channel for RX.
-        if client.role == ClientRole::Pa {
+        // PA and Radio are TX-only speakers — ambient client already covers RX for those channels.
+        if matches!(client.role, ClientRole::Pa | ClientRole::Radio { .. }) {
             return;
         }
 
@@ -406,7 +411,7 @@ impl Session {
                         && (s.acp_rt || s.contwheel_rt);
                     (active, 1.0)
                 }
-                ClientRole::Ambient => (true, 1.0),
+                ClientRole::Voice => (true, 1.0),
             }
         };
         let Some(cs) = self.crypt.as_mut() else {

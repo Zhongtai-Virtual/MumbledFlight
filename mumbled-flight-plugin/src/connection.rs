@@ -1,11 +1,12 @@
 //! Mumble connection lifecycle — start and stop helpers.
 
 use log::{info, warn};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
-use mumbled_flight_core::{mumble, mumble::TestClient, state::CockpitState};
+use mumbled_flight_core::{mumble, mumble::{TestClient, VoipStatuses}, state::CockpitState};
 
 use crate::PluginState;
 
@@ -44,6 +45,9 @@ pub fn start(ps: &mut PluginState) {
     let ic_output = ps.gui.ic_output();
     let (radio_source, auto_sink) = ps.gui.radio_params();
 
+    let statuses: VoipStatuses = Arc::new(Mutex::new(HashMap::new()));
+    let statuses_clone = Arc::clone(&statuses);
+
     runtime.spawn(async move {
         mumble::run_mumble_stack(
             state_clone,
@@ -59,18 +63,20 @@ pub fn start(ps: &mut PluginState) {
             server_addr,
             ambient_output,
             ic_output,
+            statuses_clone,
         )
         .await;
     });
 
     ps.gui.mic_gain_live = Some(Arc::clone(&mic_gain));
+    ps.gui.voip_statuses = Some(statuses);
     ps.connection = Some(MumbleConnection {
         cockpit_state,
         _mic_gain: mic_gain,
         _runtime: runtime,
     });
     ps.gui.is_connected = true;
-    ps.gui.status = format!("Connected to {}", ps.gui.server);
+    ps.gui.status = String::new();
     ps.gui.save_config();
     info!(
         "connected — user={} flight={}",
@@ -81,7 +87,8 @@ pub fn start(ps: &mut PluginState) {
 pub fn stop(ps: &mut PluginState) {
     ps.connection = None;
     ps.gui.mic_gain_live = None;
+    ps.gui.voip_statuses = None;
     ps.gui.is_connected = false;
-    ps.gui.status = "Disconnected.".to_string();
+    ps.gui.status = String::new();
     info!("disconnected");
 }

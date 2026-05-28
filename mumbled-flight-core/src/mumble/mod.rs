@@ -4,12 +4,18 @@ pub mod audio;
 pub mod voip;
 
 use self::audio::{create_linux_sink, start_capture, start_loopback_capture, start_playback};
-use self::voip::client::{ClientRole, MumbleVoipClient};
+use self::voip::client::{ClientRole, MumbleVoipClient, VoipClientStatus};
 use crate::state::{CockpitState, SharedCockpitZone};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, mpsc};
+
+pub use self::voip::client::VoipClientStatus as ClientStatus;
+
+/// Maps a display label (e.g. "Voice", "IC") to that client's live connection status.
+pub type VoipStatuses = Arc<Mutex<HashMap<String, Arc<Mutex<VoipClientStatus>>>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TestClient {
@@ -33,6 +39,7 @@ pub async fn run_mumble_stack(
     server_addr: SocketAddr,
     ambient_output: Option<String>,
     ic_output: Option<String>,
+    statuses: VoipStatuses,
 ) {
     // 1. MIC Chain
     let (mic_tx, _) = broadcast::channel::<Vec<f32>>(128);
@@ -74,7 +81,14 @@ pub async fn run_mumble_stack(
     start_playback(ambient_pb_rx, ambient_output);
     start_playback(ic_pb_rx, ic_output);
 
-    // 4. Ambient Client
+    // Helper: allocate a status slot and register it in the shared map.
+    let mk_status = |label: &str| -> Arc<Mutex<VoipClientStatus>> {
+        let slot = Arc::new(Mutex::new(VoipClientStatus::Connecting));
+        statuses.lock().unwrap().insert(label.to_string(), Arc::clone(&slot));
+        slot
+    };
+
+    // 4. Voice Client (natural speech, spatialised)
     if test_client != TestClient::Ic {
         let fbo_ch = format!("{}_ambient_fbo", session_id);
         let aircraft_ch = format!("{}_ambient_aircraft", session_id);
@@ -88,11 +102,13 @@ pub async fn run_mumble_stack(
         let pb_tx_a = ambient_pb_tx.clone();
         let un_a = user_name.clone();
         let sid_a = session_id.clone();
+        let status_a = mk_status("Voice");
         tokio::spawn(async move {
             let client = MumbleVoipClient {
-                username: format!("{}_ambient", un_a),
+                username: format!("{}_voice", un_a),
                 context: format!("{}_ambient", sid_a),
-                role: ClientRole::Ambient,
+                role: ClientRole::Voice,
+                voip_status: status_a,
                 target_channel: initial_ambient_ch,
                 zone_channels: Some((fbo_ch, aircraft_ch)),
                 denoise,
@@ -112,11 +128,13 @@ pub async fn run_mumble_stack(
     let pb_tx_i = ic_pb_tx;
     let un_i = user_name.clone();
     let sid_i = session_id.clone();
+    let status_i = mk_status("IC");
     tokio::spawn(async move {
         let client = MumbleVoipClient {
             username: format!("{}_ic", un_i),
             context: format!("{}_ic", sid_i),
             role: ClientRole::Ic,
+            voip_status: status_i,
             target_channel: format!("{}_ic", sid_i),
             zone_channels: None,
             denoise,
@@ -133,11 +151,13 @@ pub async fn run_mumble_stack(
     let pb_tx_pa = ambient_pb_tx.clone();
     let un_pa = user_name.clone();
     let sid_pa = session_id.clone();
+    let status_pa = mk_status("PA");
     tokio::spawn(async move {
         let client = MumbleVoipClient {
             username: format!("{}_PA", un_pa),
             context: format!("{}_ambient", sid_pa),
             role: ClientRole::Pa,
+            voip_status: status_pa,
             target_channel: format!("{}_ambient_aircraft", sid_pa),
             zone_channels: None,
             denoise,
@@ -154,35 +174,33 @@ pub async fn run_mumble_stack(
         let pb_tx_r = ambient_pb_tx.clone();
         let un_r = user_name.clone();
         let sid_r = session_id.clone();
+        let status_r = mk_status("Radio");
+        // TODO: replace with actual radio speaker position once confirmed
+        const RADIO_SPEAKER_POSITION: [f32; 3] = [0.0, 0.0, 0.0];
         tokio::spawn(async move {
             let client = MumbleVoipClient {
                 username: format!("{}_radio", un_r),
-                context: format!("{}_radio", sid_r),
+                context: format!("{}_ambient", sid_r),
                 role: ClientRole::Radio { has_source: true },
-                target_channel: format!("{}_radio", sid_r),
+                voip_status: status_r,
+                target_channel: format!("{}_ambient_aircraft", sid_r),
                 zone_channels: None,
                 denoise,
-                test_pos,
+                test_pos: Some(RADIO_SPEAKER_POSITION),
             };
             let _ = client.run(server_addr, st_r, radio_rx, pb_tx_r).await;
         });
 
-        // Mirror the radio source to the IC output device when COM RX is active,
-        // so pilots hear the COM audio through their designated IC headphone output.
+        // Always mirror the radio source to the IC output device so pilots hear
+        // COM audio through their designated IC headphone output.
+        // TX gating (com1_rx / com2_rx) is handled separately in on_mic_pcm.
         let mut monitor_rx = rtx.subscribe();
-        let st_m = Arc::clone(&state);
         tokio::spawn(async move {
             loop {
                 match monitor_rx.recv().await {
                     Ok(pcm) => {
-                        let active = {
-                            let s = st_m.lock().unwrap();
-                            s.com1_rx || s.com2_rx
-                        };
-                        if active {
-                            let stereo: Vec<f32> = pcm.iter().flat_map(|&s| [s, s]).collect();
-                            let _ = ic_monitor_tx.send(stereo).await;
-                        }
+                        let stereo: Vec<f32> = pcm.iter().flat_map(|&s| [s, s]).collect();
+                        let _ = ic_monitor_tx.send(stereo).await;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,

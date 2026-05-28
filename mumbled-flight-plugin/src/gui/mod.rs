@@ -5,6 +5,7 @@ pub mod devices;
 mod draw;
 mod window;
 
+use mumbled_flight_core::mumble::VoipStatuses;
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -58,6 +59,8 @@ pub struct GuiState {
     pub should_disconnect: bool,
     pub is_connected: bool,
     pub status: String,
+    /// Per-client connection statuses — None when disconnected.
+    pub voip_statuses: Option<VoipStatuses>,
     /// Shared with the capture thread while connected — None when disconnected.
     pub mic_gain_live: Option<Arc<AtomicU32>>,
 }
@@ -144,6 +147,7 @@ impl GuiState {
             should_disconnect: false,
             is_connected: false,
             status: String::new(),
+            voip_statuses: None,
             mic_gain_live: None,
         }
     }

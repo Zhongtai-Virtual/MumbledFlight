@@ -31,8 +31,15 @@ use super::spatial::{compute_stereo_gains, encode_pos};
 const MUMBLE_VERSION: u32 = 0x00010400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoipClientStatus {
+    Connecting,
+    Connected,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientRole {
-    Ambient,
+    Voice,
     Ic,
     Pa,
     /// `has_source` — false when the radio source device is "Disabled" (no loopback capture).
@@ -43,6 +50,7 @@ pub struct MumbleVoipClient {
     pub username: String,
     pub context: String,
     pub role: ClientRole,
+    pub voip_status: Arc<Mutex<VoipClientStatus>>,
     pub target_channel: String,
     /// For ambient/PA clients: (fbo_channel_name, aircraft_channel_name).
     /// None for IC and radio clients — they never switch channels.
@@ -62,6 +70,7 @@ impl MumbleVoipClient {
     ) -> Result<()> {
         info!("[VoIP:{}] Connecting to {}...", self.username, server_addr);
         let mut control = self.connect(server_addr).await?;
+        *self.voip_status.lock().unwrap() = VoipClientStatus::Connected;
         let udp = UdpSocket::bind("0.0.0.0:0").await?;
         udp.connect(&server_addr).await?;
 
@@ -94,6 +103,7 @@ impl MumbleVoipClient {
                 }
             }
         }
+        *self.voip_status.lock().unwrap() = VoipClientStatus::Disconnected;
         Ok(())
     }
 
@@ -154,8 +164,7 @@ impl MumbleVoipClient {
 
     fn position_bytes(&self, s: &CockpitState) -> Option<Bytes> {
         match self.role {
-            ClientRole::Ic           => None,
-            ClientRole::Radio { .. } => Some(encode_pos(0.0, 0.0, 0.0)),
+            ClientRole::Ic => None,
             _ => if let Some(tp) = self.test_pos {
                 Some(encode_pos(tp[0], tp[1], tp[2]))
             } else {

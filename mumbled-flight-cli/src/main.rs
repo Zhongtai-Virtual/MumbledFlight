@@ -158,6 +158,7 @@ async fn main() -> Result<()> {
             Some(CliClient::Ambient) => TestClient::Ambient,
             Some(CliClient::Ic) => TestClient::Ic,
         };
+        let statuses = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         mumble::run_mumble_stack(
             state_mumble,
             user_prefix,
@@ -172,6 +173,7 @@ async fn main() -> Result<()> {
             server_addr,
             None,
             None,
+            statuses,
         )
         .await;
     });

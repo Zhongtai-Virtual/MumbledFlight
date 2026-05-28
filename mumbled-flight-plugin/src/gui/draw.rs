@@ -1,15 +1,15 @@
 //! ImGui draw loop and renderer initialisation for GuiState.
 
+use log::{debug, warn, LevelFilter};
 use std::borrow::Cow;
 use std::ffi::CString;
 use std::os::raw::c_void;
-use std::time::Instant;
-use log::{debug, warn, LevelFilter};
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use xplane_sys::{
-    XPLMGetScreenBoundsGlobal, XPLMGetScreenSize, XPLMGetWindowGeometry,
-    XPLMSetGraphicsState, XPLMWindowID,
+    XPLMGetScreenBoundsGlobal, XPLMGetScreenSize, XPLMGetWindowGeometry, XPLMSetGraphicsState,
+    XPLMWindowID,
 };
 
 use super::GuiState;
@@ -22,7 +22,7 @@ impl GuiState {
 
         let (mut left, mut top, mut right, mut bottom) = (0i32, 0i32, 0i32, 0i32);
         unsafe { XPLMGetWindowGeometry(win, &mut left, &mut top, &mut right, &mut bottom) };
-        let width  = (right - left).max(1);
+        let width = (right - left).max(1);
         let height = (top - bottom).max(1);
 
         let (mut virt_l, mut virt_t, mut virt_r, mut virt_b) = (0i32, 0i32, 0i32, 0i32);
@@ -42,9 +42,11 @@ impl GuiState {
 
         if !self.logged_coords {
             self.logged_coords = true;
-            debug!("virt={virt_w}x{virt_h} phys={phys_w}x{phys_h} \
+            debug!(
+                "virt={virt_w}x{virt_h} phys={phys_w}x{phys_h} \
                  scale={scale_x:.2}x{scale_y:.2} win=({left},{bottom})-({right},{top}) \
-                 imgui_pos=({win_imgui_x},{win_imgui_y})");
+                 imgui_pos=({win_imgui_x},{win_imgui_y})"
+            );
         }
 
         let dt = {
@@ -55,38 +57,38 @@ impl GuiState {
         };
 
         // Snapshot mutable fields — avoids borrow conflict between imgui::Ui and self.
-        let mut server           = self.server.clone();
-        let mut flight_id        = self.flight_id.clone();
-        let mut user_name        = self.user_name.clone();
-        let mut gain             = self.gain;
-        let mut denoise          = self.denoise;
+        let mut server = self.server.clone();
+        let mut flight_id = self.flight_id.clone();
+        let mut user_name = self.user_name.clone();
+        let mut gain = self.gain;
+        let mut denoise = self.denoise;
         let mut selected_ambient = self.selected_ambient;
-        let mut selected_ic      = self.selected_ic;
-        let mut log_level        = self.log_level;
-        let mut should_connect   = false;
+        let mut selected_ic = self.selected_ic;
+        let mut log_level = self.log_level;
+        let mut should_connect = false;
         let mut should_disconnect = false;
-        let is_connected         = self.is_connected;
-        let status               = self.status.clone();
-        let output_devices        = self.output_devices.clone();
-        let output_device_labels  = self.output_device_labels.clone();
-        let radio_input_devices   = self.radio_input_devices.clone();
-        let mut selected_radio    = self.selected_radio;
-        let mouse_pos             = self.mouse_pos;
-        let mouse_down            = self.mouse_down;
+        let is_connected = self.is_connected;
+        let status = self.status.clone();
+        let voip_statuses = self.voip_statuses.clone();
+        let output_devices = self.output_devices.clone();
+        let output_device_labels = self.output_device_labels.clone();
+        let radio_input_devices = self.radio_input_devices.clone();
+        let mut selected_radio = self.selected_radio;
+        let mouse_pos = self.mouse_pos;
+        let mouse_down = self.mouse_down;
 
-        let (Some(ctx), Some(renderer)) =
-            (self.imgui_ctx.as_mut(), self.imgui_renderer.as_mut())
+        let (Some(ctx), Some(renderer)) = (self.imgui_ctx.as_mut(), self.imgui_renderer.as_mut())
         else {
             return;
         };
 
         {
             let io = ctx.io_mut();
-            io.display_size              = [virt_w as f32, virt_h as f32];
+            io.display_size = [virt_w as f32, virt_h as f32];
             io.display_framebuffer_scale = [scale_x, scale_y];
-            io.delta_time                = dt;
-            io.mouse_pos                 = mouse_pos;
-            io.mouse_down                = mouse_down;
+            io.delta_time = dt;
+            io.mouse_pos = mouse_pos;
+            io.mouse_down = mouse_down;
         }
 
         {
@@ -109,9 +111,9 @@ impl GuiState {
                         ui.input_text(id, buf).build();
                     };
 
-                    row("Server",    "##srv", &mut server);
+                    row("Server", "##srv", &mut server);
                     row("Flight ID", "##fid", &mut flight_id);
-                    row("Username",  "##usr", &mut user_name);
+                    row("Username", "##usr", &mut user_name);
 
                     ui.text("Mic Gain");
                     ui.same_line();
@@ -143,7 +145,8 @@ impl GuiState {
                                 let avail_w = ui.content_region_avail()[0];
                                 for (i, lbl) in output_device_labels.iter().enumerate() {
                                     let display = fit_label(ui, lbl, avail_w);
-                                    if ui.selectable_config(&*display)
+                                    if ui
+                                        .selectable_config(&*display)
                                         .selected(*selected == i as i32)
                                         .build()
                                     {
@@ -152,8 +155,8 @@ impl GuiState {
                                 }
                             }
                         };
-                        output_combo("Ambient Out", "##dev_ambient", &mut selected_ambient);
-                        output_combo("IC Out",      "##dev_ic",      &mut selected_ic);
+                        output_combo("Voice Out", "##dev_ambient", &mut selected_ambient);
+                        output_combo("IC Out", "##dev_ic", &mut selected_ic);
                         drop(_dis);
                     }
 
@@ -179,7 +182,8 @@ impl GuiState {
                             let avail_w = ui.content_region_avail()[0];
                             for (i, label) in radio_labels.iter().enumerate() {
                                 let display = fit_label(ui, label, avail_w);
-                                if ui.selectable_config(&*display)
+                                if ui
+                                    .selectable_config(&*display)
                                     .selected(selected_radio == i as i32)
                                     .build()
                                 {
@@ -191,8 +195,10 @@ impl GuiState {
                     }
 
                     const LOG_LEVELS: &[LevelFilter] = &[
-                        LevelFilter::Error, LevelFilter::Warn,
-                        LevelFilter::Info,  LevelFilter::Debug,
+                        LevelFilter::Error,
+                        LevelFilter::Warn,
+                        LevelFilter::Info,
+                        LevelFilter::Debug,
                     ];
                     let level_preview = format!("{log_level}");
                     ui.text("Log Level");
@@ -201,7 +207,8 @@ impl GuiState {
                     ui.set_next_item_width(fw);
                     if let Some(_tok) = ui.begin_combo("##loglevel", &level_preview) {
                         for &lvl in LOG_LEVELS {
-                            if ui.selectable_config(format!("{lvl}"))
+                            if ui
+                                .selectable_config(format!("{lvl}"))
                                 .selected(log_level == lvl)
                                 .build()
                             {
@@ -215,20 +222,46 @@ impl GuiState {
                     ui.spacing();
 
                     if is_connected {
-                        if ui.button("Disconnect") { should_disconnect = true; }
-                        ui.same_line();
-                        ui.text_colored([0.3, 1.0, 0.3, 1.0], "Connected");
+                        if ui.button("Disconnect") {
+                            should_disconnect = true;
+                        }
                     } else {
                         if ui.button("Connect") {
-                            debug!("Connect pressed — flight_id='{}' user='{}'",
-                                flight_id.trim(), user_name.trim());
+                            debug!(
+                                "Connect pressed — flight_id='{}' user='{}'",
+                                flight_id.trim(),
+                                user_name.trim()
+                            );
                             if !flight_id.trim().is_empty() && !user_name.trim().is_empty() {
                                 should_connect = true;
                             } else {
                                 warn!("Connect blocked — flight_id or username is empty");
                             }
                         }
-                        ui.same_line();
+                    }
+
+                    ui.spacing();
+                    if let Some(ref statuses) = voip_statuses {
+                        use mumbled_flight_core::mumble::ClientStatus;
+                        let map = statuses.lock().unwrap();
+                        for label in ["Voice", "IC", "PA", "Radio"] {
+                            if let Some(slot) = map.get(label) {
+                                let s = slot.lock().unwrap();
+                                let (color, tag) = match *s {
+                                    ClientStatus::Connecting => {
+                                        ([1.0f32, 0.8, 0.2, 1.0], "Connecting")
+                                    }
+                                    ClientStatus::Connected => ([0.3, 1.0, 0.3, 1.0], "Connected"),
+                                    ClientStatus::Disconnected => {
+                                        ([0.8, 0.3, 0.3, 1.0], "Disconnected")
+                                    }
+                                };
+                                ui.text_disabled(&format!("{label}: "));
+                                ui.same_line();
+                                ui.text_colored(color, tag);
+                            }
+                        }
+                    } else {
                         ui.text_colored([0.8, 0.3, 0.3, 1.0], "Disconnected");
                     }
 
@@ -245,24 +278,28 @@ impl GuiState {
         renderer.render(draw_data).ok();
 
         // Write back modified config locals.
-        self.server          = server;
-        self.flight_id       = flight_id;
-        self.user_name       = user_name;
-        self.gain            = gain;
+        self.server = server;
+        self.flight_id = flight_id;
+        self.user_name = user_name;
+        self.gain = gain;
         if let Some(ref atomic) = self.mic_gain_live {
             atomic.store(gain.to_bits(), Ordering::Relaxed);
         }
         self.selected_ambient = selected_ambient;
-        self.selected_ic      = selected_ic;
-        self.selected_radio   = selected_radio;
-        self.denoise         = denoise;
+        self.selected_ic = selected_ic;
+        self.selected_radio = selected_radio;
+        self.denoise = denoise;
         if log_level != self.log_level {
             self.log_level = log_level;
             log::set_max_level(log_level);
             self.save_config();
         }
-        if should_connect    { self.should_connect    = true; }
-        if should_disconnect { self.should_disconnect = true; }
+        if should_connect {
+            self.should_connect = true;
+        }
+        if should_disconnect {
+            self.should_disconnect = true;
+        }
     }
 
     fn init_renderer(&mut self) {
@@ -324,8 +361,12 @@ fn fit_label<'a>(ui: &imgui::Ui, text: &'a str, max_px: f32) -> Cow<'a, str> {
     let avail = (max_px - ell_w).max(0.0);
     let mut end = text.len();
     while end > 0 {
-        while end > 0 && !text.is_char_boundary(end) { end -= 1; }
-        if ui.calc_text_size(&text[..end])[0] <= avail { break; }
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if ui.calc_text_size(&text[..end])[0] <= avail {
+            break;
+        }
         end -= 1;
     }
     Cow::Owned(format!("{}...", &text[..end]))
