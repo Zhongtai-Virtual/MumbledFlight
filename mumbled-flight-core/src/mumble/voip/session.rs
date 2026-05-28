@@ -380,7 +380,10 @@ impl Session {
                 s.spkr
             } else if client.is_ic {
                 // TX when: seated as Pilot AND (ACP/*/ic keyed OR contwheel/*/ic pressed)
-                s.role == SharedCockpitRole::Pilot && (s.ic || s.contwheel_ic)
+                //         AND neither RT source is active (RT takes priority over IC)
+                s.role == SharedCockpitRole::Pilot
+                    && (s.acp_ic || s.contwheel_ic)
+                    && !s.acp_rt && !s.contwheel_rt
             } else {
                 true
             }

@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
             };
         }
         if args.test == Some(CliClient::Ic) {
-            s.ic = true;
+            s.acp_ic = true;
         }
     }
     let state_mumble = Arc::clone(&state);

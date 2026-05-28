@@ -93,9 +93,10 @@ pub enum DataRefId {
     PilotSeat,
     SharedCkptRole,
     SharedCkptZone,
-    Acp1Ic, Acp1Mic, Acp1Spkr, Acp1IntSvcTog, Acp1IntSvcVol,
-    Acp2Ic, Acp2Mic, Acp2Spkr, Acp2IntSvcTog, Acp2IntSvcVol,
+    Acp1Ic, Acp1Rt, Acp1Mic, Acp1Spkr, Acp1IntSvcTog, Acp1IntSvcVol,
+    Acp2Ic, Acp2Rt, Acp2Mic, Acp2Spkr, Acp2IntSvcTog, Acp2IntSvcVol,
     Contwheel0Ic, Contwheel1Ic,
+    Contwheel0Rt, Contwheel1Rt,
     DoorCabin,
     DoorLavatory,
 }
@@ -114,17 +115,21 @@ impl DataRefId {
             DataRefId::SharedCkptRole => "CL650/shared_ckpt/my_role",
             DataRefId::SharedCkptZone => "CL650/shared_ckpt/my_zone",
             DataRefId::Acp1Ic         => "CL650/ACP/1/ic",
+            DataRefId::Acp1Rt         => "CL650/ACP/1/rt",
             DataRefId::Acp1Mic        => "CL650/ACP/1/mic_value",
             DataRefId::Acp1Spkr       => "CL650/ACP/1/spkr_tog",
             DataRefId::Acp1IntSvcTog  => "CL650/ACP/1/int_svc_tog_value",
             DataRefId::Acp1IntSvcVol  => "CL650/ACP/1/int_svc_vol",
             DataRefId::Acp2Ic         => "CL650/ACP/2/ic",
+            DataRefId::Acp2Rt         => "CL650/ACP/2/rt",
             DataRefId::Acp2Mic        => "CL650/ACP/2/mic_value",
             DataRefId::Acp2Spkr       => "CL650/ACP/2/spkr_tog",
             DataRefId::Acp2IntSvcTog  => "CL650/ACP/2/int_svc_tog_value",
             DataRefId::Acp2IntSvcVol  => "CL650/ACP/2/int_svc_vol",
             DataRefId::Contwheel0Ic   => "CL650/contwheel/0/ic",
             DataRefId::Contwheel1Ic   => "CL650/contwheel/1/ic",
+            DataRefId::Contwheel0Rt   => "CL650/contwheel/0/rt",
+            DataRefId::Contwheel1Rt   => "CL650/contwheel/1/rt",
             DataRefId::DoorCabin => "CL650/doors/cabin/door",
             DataRefId::DoorLavatory => "CL650/doors/cabin/lavatory",
         }
@@ -138,11 +143,12 @@ impl DataRefId {
             DataRefId::PilotSeat,
             DataRefId::SharedCkptRole,
             DataRefId::SharedCkptZone,
-            DataRefId::Acp1Ic, DataRefId::Acp1Mic, DataRefId::Acp1Spkr,
+            DataRefId::Acp1Ic, DataRefId::Acp1Rt, DataRefId::Acp1Mic, DataRefId::Acp1Spkr,
             DataRefId::Acp1IntSvcTog, DataRefId::Acp1IntSvcVol,
-            DataRefId::Acp2Ic, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
+            DataRefId::Acp2Ic, DataRefId::Acp2Rt, DataRefId::Acp2Mic, DataRefId::Acp2Spkr,
             DataRefId::Acp2IntSvcTog, DataRefId::Acp2IntSvcVol,
             DataRefId::Contwheel0Ic, DataRefId::Contwheel1Ic,
+            DataRefId::Contwheel0Rt, DataRefId::Contwheel1Rt,
             DataRefId::DoorCabin,
             DataRefId::DoorLavatory,
         ]
@@ -161,9 +167,14 @@ pub struct CockpitState {
     pub seat: CockpitSeat,
     pub role: SharedCockpitRole,
     pub zone: SharedCockpitZone,
-    pub ic: bool,
+    /// CL650/ACP/*/ic: ACP interphone push-to-talk
+    pub acp_ic: bool,
     /// CL650/contwheel/*/ic: control wheel IC push-to-talk
     pub contwheel_ic: bool,
+    /// CL650/ACP/*/rt: ACP radio transmit push-to-talk
+    pub acp_rt: bool,
+    /// CL650/contwheel/*/rt: control wheel radio transmit push-to-talk
+    pub contwheel_rt: bool,
     pub mic: AcpMicSelection,
     pub spkr: bool,
     /// CL650/ACP/*/int_svc_tog_value: IC playback speaker on/off
@@ -185,8 +196,10 @@ impl Default for CockpitState {
             seat: CockpitSeat::Captain,
             role: SharedCockpitRole::Pilot,
             zone: SharedCockpitZone::InFbo,
-            ic: false,
+            acp_ic: false,
             contwheel_ic: false,
+            acp_rt: false,
+            contwheel_rt: false,
             mic: AcpMicSelection::Vhf1,
             spkr: false,
             ic_spkr: false,
@@ -238,7 +251,8 @@ impl CockpitState {
                 Err(n) => warn!("[State] unknown shared cockpit zone value {n}"),
             },
 
-            DataRefId::Acp1Ic          => if is_left_seat { self.ic = Self::val_to_bool(val) },
+            DataRefId::Acp1Ic          => if  is_left_seat { self.acp_ic = Self::val_to_bool(val) },
+            DataRefId::Acp1Rt          => if  is_left_seat { self.acp_rt = Self::val_to_bool(val) },
             DataRefId::Acp1Mic         => if is_left_seat {
                 match AcpMicSelection::from_int(Self::val_to_int(val)) {
                     Ok(m)  => self.mic = m,
@@ -249,7 +263,8 @@ impl CockpitState {
             DataRefId::Acp1IntSvcTog   => if is_left_seat { self.ic_spkr = Self::val_to_bool(val) },
             DataRefId::Acp1IntSvcVol   => if is_left_seat { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
 
-            DataRefId::Acp2Ic          => if !is_left_seat { self.ic = Self::val_to_bool(val) },
+            DataRefId::Acp2Ic          => if !is_left_seat { self.acp_ic = Self::val_to_bool(val) },
+            DataRefId::Acp2Rt          => if !is_left_seat { self.acp_rt = Self::val_to_bool(val) },
             DataRefId::Acp2Mic         => if !is_left_seat {
                 match AcpMicSelection::from_int(Self::val_to_int(val)) {
                     Ok(m)  => self.mic = m,
@@ -261,16 +276,18 @@ impl CockpitState {
             DataRefId::Acp2IntSvcVol   => if !is_left_seat { self.ic_vol  = val.as_f64().unwrap_or(0.0) as f32 },
             DataRefId::Contwheel0Ic    => if  is_left_seat { self.contwheel_ic = Self::val_to_bool(val) },
             DataRefId::Contwheel1Ic    => if !is_left_seat { self.contwheel_ic = Self::val_to_bool(val) },
+            DataRefId::Contwheel0Rt    => if  is_left_seat { self.contwheel_rt = Self::val_to_bool(val) },
+            DataRefId::Contwheel1Rt    => if !is_left_seat { self.contwheel_rt = Self::val_to_bool(val) },
             DataRefId::DoorCabin => self.door = val.as_f64().unwrap_or(1.0) as f32,
             DataRefId::DoorLavatory => self.door_lav = val.as_f64().unwrap_or(1.0) as f32,
         }
 
-        if self.ic != old_state.ic || self.contwheel_ic != old_state.contwheel_ic
+        if self.acp_ic != old_state.acp_ic || self.contwheel_ic != old_state.contwheel_ic
             || self.mic != old_state.mic
             || self.seat != old_state.seat || self.role != old_state.role || self.zone != old_state.zone
         {
             debug!("[State] seat={:?} role={:?} zone={:?} ic={} contwheel_ic={} mic={:?} (via {:?})",
-                self.seat, self.role, self.zone, self.ic, self.contwheel_ic, self.mic, id);
+                self.seat, self.role, self.zone, self.acp_ic, self.contwheel_ic, self.mic, id);
         }
     }
 
