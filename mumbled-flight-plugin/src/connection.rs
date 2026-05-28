@@ -3,7 +3,7 @@
 use log::{info, warn};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mumbled_flight_core::{mumble, mumble::{InputType, MumbleStackConfig, TestClient, VoipStatuses}, state::CockpitState};
@@ -13,7 +13,16 @@ use crate::PluginState;
 pub struct MumbleConnection {
     pub cockpit_state: Arc<Mutex<CockpitState>>,
     pub _mic_gain: Arc<AtomicU32>,
+    shutdown: Arc<AtomicBool>,
     pub _runtime: tokio::runtime::Runtime,
+}
+
+impl Drop for MumbleConnection {
+    fn drop(&mut self) {
+        // Signal the microphone capture thread to release its stream. Runs before the
+        // tokio runtime field is dropped, so capture winds down as the connection tears down.
+        self.shutdown.store(true, Ordering::Release);
+    }
 }
 
 pub fn start(ps: &mut PluginState) {
@@ -57,6 +66,9 @@ pub fn start(ps: &mut PluginState) {
     let statuses: VoipStatuses = Arc::new(Mutex::new(HashMap::new()));
     let statuses_clone = Arc::clone(&statuses);
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_for_stack = Arc::clone(&shutdown);
+
     runtime.spawn(async move {
         mumble::run_mumble_stack(MumbleStackConfig {
             state: state_clone,
@@ -74,6 +86,7 @@ pub fn start(ps: &mut PluginState) {
             ambient_output,
             ic_output,
             statuses: statuses_clone,
+            shutdown: shutdown_for_stack,
         })
         .await;
     });
@@ -83,6 +96,7 @@ pub fn start(ps: &mut PluginState) {
     ps.connection = Some(MumbleConnection {
         cockpit_state,
         _mic_gain: mic_gain,
+        shutdown,
         _runtime: runtime,
     });
     ps.gui.is_connected = true;

@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
     }
     let state_mumble = Arc::clone(&state);
     tokio::spawn(async move {
-        use std::sync::atomic::AtomicU32;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
         let test_client = match args.test {
             None                    => TestClient::All,
             Some(CliClient::Voice)  => TestClient::Voice,
@@ -210,6 +210,8 @@ async fn main() -> Result<()> {
             ambient_output: None,
             ic_output: None,
             statuses,
+            // One-shot process — never torn down, so the flag is never set.
+            shutdown: Arc::new(AtomicBool::new(false)),
         })
         .await;
     });

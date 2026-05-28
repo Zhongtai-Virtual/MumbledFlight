@@ -8,7 +8,7 @@ use self::voip::client::{ClientRole, MumbleVoipClient, VoipClientStatus};
 use crate::state::{CockpitState, SharedCockpitZone};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, mpsc};
 
@@ -58,6 +58,10 @@ pub struct MumbleStackConfig {
     pub ambient_output: Option<String>,
     pub ic_output: Option<String>,
     pub statuses: VoipStatuses,
+    /// Set to `true` by the frontend when the connection is torn down. The microphone capture
+    /// stream watches this and exits, dropping its CPAL/PipeWire stream instead of leaking it
+    /// across reconnects. CLI (one-shot) can pass a flag that is never set.
+    pub shutdown: Arc<AtomicBool>,
 }
 
 /// Spawns a single Mumble client's run loop, logging a disconnect at error level.
@@ -93,6 +97,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         ambient_output,
         ic_output,
         statuses,
+        shutdown,
     } = cfg;
 
     // 1. MIC Chain
@@ -104,7 +109,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         match input_type {
             InputType::Sine          => audio::start_sine_capture(sync_tx, mic_gain),
             InputType::File(path)    => audio::start_file_capture(path, sync_tx, mic_gain),
-            InputType::Real          => start_capture(sync_tx, d_mic, mic_gain, 0.0, mic_device),
+            InputType::Real          => start_capture(sync_tx, d_mic, mic_gain, 0.0, mic_device, shutdown),
         }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);

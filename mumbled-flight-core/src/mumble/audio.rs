@@ -5,7 +5,7 @@ use log::{info, debug, error, warn};
 use nnnoiseless::DenoiseState;
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::collections::VecDeque;
 use std::io::Read;
 
@@ -624,6 +624,7 @@ pub fn start_capture(
     mic_gain: Arc<AtomicU32>,
     _gate_threshold: f32,
     device_name_filter: Option<String>,
+    shutdown: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
         // Hold the env lock across set_var → build_input_stream → play() so that
@@ -701,7 +702,13 @@ pub fn start_capture(
             }
             s
         }; // PIPEWIRE_NODE lock released — stream is already connected
-        loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
+        // Keep the stream alive until the connection is torn down, then drop it so the
+        // CPAL/PipeWire input stream is released instead of leaking across reconnects.
+        while !shutdown.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        drop(_stream);
+        info!("[Audio:Capture] stream stopped");
     });
 }
 
