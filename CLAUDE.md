@@ -138,9 +138,12 @@ channel, spawned through the shared `spawn_client` helper:
   PCM. Authentication: each client sends the optional Mumble server `password` in its
   `Authenticate` message; for the TLS identity it uses an optional user-supplied client
   certificate (`ClientCert`, PKCS#12 / `.p12`, validated eagerly on load) when provided, otherwise
-  a self-signed throwaway identity per connection (`generate_temp_identity`). **Note:** the TLS
-  connector sets `danger_accept_invalid_certs(true)` — the server cert is *not* verified.
-  Audio is Opus, 48 kHz mono, position info attached to each voice packet.
+  a self-signed throwaway identity per connection (`generate_temp_identity`). Server-cert
+  verification: the connector sets `danger_accept_invalid_certs`/`_hostnames(true)` to complete the
+  handshake, then — if a `ServerTrust` anchor is configured (the server's cert for pinning, or its
+  CA) — verifies the server's presented cert against *only* those anchors with openssl
+  (`X509StoreContext`). Done this way because native-tls can't drop the system trust store. With no
+  anchor, the server cert is **not** verified. Audio is Opus, 48 kHz mono, position info attached to each voice packet.
   `spatialize()` applies a stereo-width blend after all gain/attenuation math:
   `mid + (L/R − mid) × width`, where `width` is read from `spatial_width` at each packet.
   Values in [0, 1] blend toward mono; values in (1, 2] exaggerate the stereo spread beyond

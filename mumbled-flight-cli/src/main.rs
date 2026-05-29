@@ -82,6 +82,11 @@ struct Args {
     #[arg(long, value_name = "PASSPHRASE")]
     cert_pass: Option<String>,
 
+    /// Verify the server's certificate against this CA or pinned cert (PEM/DER). Without it the
+    /// server certificate is not verified.
+    #[arg(long, value_name = "FILE")]
+    server_ca: Option<PathBuf>,
+
     /// List all available audio input and output devices on your system.
     #[arg(long, default_value_t = false)]
     list_devices: bool,
@@ -196,6 +201,10 @@ async fn main() -> Result<()> {
         )?)),
         None => None,
     };
+    let server_trust = match &args.server_ca {
+        Some(path) => Some(Arc::new(mumble::ServerTrust::load(path)?)),
+        None => None,
+    };
 
     let state_mumble = Arc::clone(&state);
     tokio::spawn(async move {
@@ -221,6 +230,7 @@ async fn main() -> Result<()> {
             session_id: flight_id,
             server_password: args.password.unwrap_or_default(),
             client_cert,
+            server_trust,
             mic_gain: Arc::new(AtomicU32::new(args.gain.to_bits())),
             denoise: args.denoise,
             radio_source: args.radio_source,

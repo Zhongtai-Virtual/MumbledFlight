@@ -14,7 +14,9 @@ use openssl::hash::MessageDigest;
 use openssl::pkcs12::Pkcs12;
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
-use openssl::x509::{X509, X509Name};
+use openssl::stack::Stack;
+use openssl::x509::store::X509StoreBuilder;
+use openssl::x509::{X509, X509Name, X509StoreContext};
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -61,6 +63,9 @@ pub struct MumbleVoipClient {
     /// Optional user-supplied client certificate used as the TLS identity. When `None`, a
     /// throwaway self-signed identity is generated per connection. Shared by all four clients.
     pub client_cert: Option<Arc<ClientCert>>,
+    /// Optional trust anchor(s) used to verify the server's certificate. When `None`, the
+    /// server certificate is **not** verified (the connection is unauthenticated).
+    pub server_trust: Option<Arc<ServerTrust>>,
     /// Stereo width for spatialized audio: 0.0 = mono, 1.0 = full spatial. Live-adjustable.
     pub spatial_width: Arc<std::sync::atomic::AtomicU32>,
 }
@@ -86,6 +91,71 @@ impl ClientCert {
     fn identity(&self) -> Result<Identity> {
         Identity::from_pkcs12(&self.pkcs12, &self.passphrase)
             .map_err(|e| anyhow!("client certificate: {e}"))
+    }
+}
+
+/// Trust anchors for verifying the Mumble **server's** certificate: either the server's own
+/// certificate (exact pinning) or the root/intermediate CA(s) that issued it. Provide a PEM
+/// (one cert or a bundle) or a single DER cert.
+///
+/// `native-tls` cannot drop the system trust store, so it can't express "trust ONLY this
+/// cert/CA". We therefore complete the handshake and verify the server's presented certificate
+/// against *only* these anchors with openssl — a self-signed anchor pins exactly that cert; a
+/// CA anchor accepts any leaf that chains to it.
+pub struct ServerTrust {
+    anchors: Vec<u8>,
+}
+
+impl ServerTrust {
+    /// Reads and validates a PEM/DER certificate file containing the server cert or its CA(s).
+    pub fn load(path: &std::path::Path) -> Result<Self> {
+        let anchors = std::fs::read(path)
+            .map_err(|e| anyhow!("reading server CA/cert '{}': {e}", path.display()))?;
+        if Self::parse(&anchors)?.is_empty() {
+            return Err(anyhow!("no certificates found in '{}'", path.display()));
+        }
+        Ok(Self { anchors })
+    }
+
+    /// Parse the anchor bytes as a PEM bundle (root + intermediates) or a single DER cert.
+    fn parse(bytes: &[u8]) -> Result<Vec<X509>> {
+        if let Ok(stack) = X509::stack_from_pem(bytes) {
+            if !stack.is_empty() {
+                return Ok(stack);
+            }
+        }
+        let der = X509::from_der(bytes)
+            .map_err(|e| anyhow!("not a PEM or DER certificate: {e}"))?;
+        Ok(vec![der])
+    }
+
+    /// Verifies the server's leaf certificate (DER) against the trusted anchors.
+    fn verify(&self, peer_der: &[u8]) -> Result<()> {
+        let leaf = X509::from_der(peer_der)
+            .map_err(|e| anyhow!("parsing server certificate: {e}"))?;
+        let mut builder = X509StoreBuilder::new()?;
+        for anchor in Self::parse(&self.anchors)? {
+            builder.add_cert(anchor)?;
+        }
+        let store = builder.build();
+        let chain = Stack::new()?;
+        let mut ctx = X509StoreContext::new()?;
+        let mut reason = None;
+        let verified = ctx.init(&store, &leaf, &chain, |c| {
+            let ok = c.verify_cert()?;
+            if !ok {
+                reason = Some(c.error());
+            }
+            Ok(ok)
+        })?;
+        if verified {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "server certificate not trusted by the provided CA/cert: {}",
+                reason.map(|r| r.to_string()).unwrap_or_default()
+            ))
+        }
     }
 }
 
@@ -142,13 +212,28 @@ impl MumbleVoipClient {
             Some(cert) => cert.identity()?,
             None => self.generate_temp_identity()?,
         };
+        // Complete the handshake unconditionally; if trust anchors are configured we verify the
+        // server's certificate against them ourselves below (native-tls can't restrict trust to
+        // only a user-supplied cert/CA). Hostname checks are skipped since Mumble servers are
+        // typically reached by IP with a self-signed cert that has no matching SAN.
         let connector = native_tls::TlsConnector::builder()
             .identity(identity)
             .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
             .build()?;
         let tls = TlsConnector::from(connector)
             .connect(&addr.ip().to_string(), tcp)
             .await?;
+        if let Some(trust) = &self.server_trust {
+            let peer = tls
+                .get_ref()
+                .peer_certificate()
+                .map_err(|e| anyhow!("reading server certificate: {e}"))?
+                .ok_or_else(|| anyhow!("server presented no certificate"))?;
+            let der = peer.to_der().map_err(|e| anyhow!("encoding server certificate: {e}"))?;
+            trust.verify(&der)?;
+            info!("[VoIP:{}] server certificate verified", self.username);
+        }
         let mut control = Framed::new(tls, ClientControlCodec::new());
 
         let mut version = msgs::Version::new();
@@ -304,8 +389,8 @@ impl MumbleVoipClient {
 mod tests {
     use super::*;
 
-    /// Builds a throwaway PKCS#12 protected by `passphrase`.
-    fn make_pkcs12(passphrase: &str) -> Vec<u8> {
+    /// Builds a throwaway self-signed certificate + its key.
+    fn gen_cert() -> (X509, PKey<openssl::pkey::Private>) {
         let rsa = Rsa::generate(2048).unwrap();
         let pkey = PKey::from_rsa(rsa).unwrap();
         let mut nb = X509Name::builder().unwrap();
@@ -319,7 +404,12 @@ mod tests {
         cb.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
         cb.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
         cb.sign(&pkey, MessageDigest::sha256()).unwrap();
-        let cert = cb.build();
+        (cb.build(), pkey)
+    }
+
+    /// Builds a throwaway PKCS#12 protected by `passphrase`.
+    fn make_pkcs12(passphrase: &str) -> Vec<u8> {
+        let (cert, pkey) = gen_cert();
         Pkcs12::builder().name("test").pkey(&pkey).cert(&cert).build2(passphrase).unwrap()
             .to_der().unwrap()
     }
@@ -342,5 +432,16 @@ mod tests {
             .err()
             .expect("missing file must error");
         assert!(err.to_string().contains("reading client certificate"));
+    }
+
+    #[test]
+    fn server_trust_pins_exact_cert_and_rejects_others() {
+        let (cert, _) = gen_cert();
+        let trust = ServerTrust { anchors: cert.to_pem().unwrap() };
+        // The server presenting exactly the pinned cert verifies.
+        assert!(trust.verify(&cert.to_der().unwrap()).is_ok(), "pinned cert must verify");
+        // A different (untrusted) cert is rejected.
+        let (other, _) = gen_cert();
+        assert!(trust.verify(&other.to_der().unwrap()).is_err(), "unknown cert must be rejected");
     }
 }

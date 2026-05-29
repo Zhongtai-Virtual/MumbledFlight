@@ -14,6 +14,8 @@ pub struct PluginConfig {
     pub cert_path: String,
     /// Passphrase for `cert_path`. Stored in plain text in config.toml.
     pub cert_pass: String,
+    /// Optional CA / pinned-cert path (PEM/DER) used to verify the server certificate.
+    pub server_ca: String,
     pub flight_id: String,
     pub user_name: String,
     /// Microphone input gain multiplier (applies to captured audio only, not playback).
@@ -38,6 +40,7 @@ impl Default for PluginConfig {
             server_password: String::new(),
             cert_path: String::new(),
             cert_pass: String::new(),
+            server_ca: String::new(),
             flight_id: String::new(),
             user_name: String::new(),
             gain: 1.0,

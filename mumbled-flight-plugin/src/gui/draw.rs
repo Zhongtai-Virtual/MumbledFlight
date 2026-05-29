@@ -62,6 +62,7 @@ impl GuiState {
         let mut server_password = self.server_password.clone();
         let mut cert_path = self.cert_path.clone();
         let mut cert_pass = self.cert_pass.clone();
+        let mut server_ca = self.server_ca.clone();
         let mut flight_id = self.flight_id.clone();
         let mut user_name = self.user_name.clone();
         let mut gain = self.gain;
@@ -116,7 +117,7 @@ impl GuiState {
                 .movable(false)
                 .scroll_bar(false)
                 .build(|| {
-                    p.connection_fields(&mut server, &mut server_password, &mut cert_path, &mut cert_pass, &mut flight_id, &mut user_name);
+                    p.connection_fields(&mut server, &mut server_password, &mut cert_path, &mut cert_pass, &mut server_ca, &mut flight_id, &mut user_name);
                     p.audio_controls(&mut ambient_vol, &mut ic_vol, &mut gain, &mut spatial_width);
                     p.denoise_toggle(&mut denoise, is_connected);
                     if !output_device_labels.is_empty() {
@@ -142,6 +143,7 @@ impl GuiState {
         self.server_password = server_password;
         self.cert_path = cert_path;
         self.cert_pass = cert_pass;
+        self.server_ca = server_ca;
         self.flight_id = flight_id;
         self.user_name = user_name;
         self.gain = gain;
@@ -349,12 +351,14 @@ impl<'ui> Ctx<'ui> {
     // ── Panels ────────────────────────────────────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
-    fn connection_fields(&self, server: &mut String, server_password: &mut String, cert_path: &mut String, cert_pass: &mut String, flight_id: &mut String, user_name: &mut String) {
+    fn connection_fields(&self, server: &mut String, server_password: &mut String, cert_path: &mut String, cert_pass: &mut String, server_ca: &mut String, flight_id: &mut String, user_name: &mut String) {
         self.row("Server",    "##srv", server);
         self.password_row("Password", "##pwd", server_password);
         // Optional client-certificate auth (PKCS#12 .p12) — leave blank to use password auth.
         self.row("Client Cert", "##cert", cert_path);
         self.password_row("Cert Pass", "##certpw", cert_pass);
+        // Optional server CA / pinned cert (PEM/DER) — verifies the server's certificate.
+        self.row("Server CA", "##sca", server_ca);
         self.row("Flight ID", "##fid", flight_id);
         self.row("Username",  "##usr", user_name);
     }

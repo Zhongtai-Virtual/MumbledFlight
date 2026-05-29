@@ -85,6 +85,21 @@ pub fn start(ps: &mut PluginState) {
         }
     };
 
+    // Optional server-certificate verification (server cert or its CA).
+    let server_trust = if ps.gui.server_ca.trim().is_empty() {
+        None
+    } else {
+        match mumble::ServerTrust::load(std::path::Path::new(ps.gui.server_ca.trim())) {
+            Ok(t) => Some(Arc::new(t)),
+            Err(e) => {
+                let msg = format!("Server CA error: {e}");
+                warn!("{msg}");
+                ps.gui.status = msg;
+                return;
+            }
+        }
+    };
+
     let statuses: VoipStatuses = Arc::new(Mutex::new(HashMap::new()));
     let statuses_clone = Arc::clone(&statuses);
 
@@ -97,6 +112,7 @@ pub fn start(ps: &mut PluginState) {
             state: state_clone,
             server_password,
             client_cert,
+            server_trust,
             user_name,
             session_id: flight_id,
             mic_gain: mic_gain_for_thread,
