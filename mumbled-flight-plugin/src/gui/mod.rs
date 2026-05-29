@@ -3,6 +3,7 @@
 pub mod config;
 pub mod devices;
 mod draw;
+mod secrets;
 mod window;
 
 use mumbled_flight_core::mumble::audio::enumerate_pw_devices;
@@ -134,6 +135,17 @@ impl GuiState {
             cfg.user_name
         };
 
+        // Secrets come from the OS secret store, not config.toml. Migrate any legacy plain-text
+        // value found in an older config (it is cleared from the toml on the next save).
+        let server_password = {
+            let s = secrets::load(secrets::SERVER_PASSWORD);
+            if s.is_empty() { cfg.server_password } else { s }
+        };
+        let cert_pass = {
+            let s = secrets::load(secrets::CERT_PASSPHRASE);
+            if s.is_empty() { cfg.cert_pass } else { s }
+        };
+
         info!("GuiState::new: creating XPLM window...");
         let window_id = unsafe { window::create_xplm_window() };
         info!("GuiState::new: XPLM window created ({window_id:?})");
@@ -205,9 +217,9 @@ impl GuiState {
             mouse_pos: [0.0; 2],
             mouse_down: [false; 5],
             server: cfg.server,
-            server_password: cfg.server_password,
+            server_password,
             cert_path: cfg.cert_path,
-            cert_pass: cfg.cert_pass,
+            cert_pass,
             server_ca: cfg.server_ca,
             flight_id: cfg.flight_id,
             user_name,
@@ -250,11 +262,15 @@ impl GuiState {
             0 => String::new(),
             i => self.mic_input_devices.get(i as usize - 1).cloned().unwrap_or_default(),
         };
+        // Secrets go to the OS secret store; the toml fields are written empty (which also
+        // clears any legacy plain-text value an older build may have saved).
+        secrets::store(secrets::SERVER_PASSWORD, &self.server_password);
+        secrets::store(secrets::CERT_PASSPHRASE, &self.cert_pass);
         let cfg = config::PluginConfig {
             server: self.server.clone(),
-            server_password: self.server_password.clone(),
+            server_password: String::new(),
             cert_path: self.cert_path.clone(),
-            cert_pass: self.cert_pass.clone(),
+            cert_pass: String::new(),
             server_ca: self.server_ca.clone(),
             flight_id: self.flight_id.clone(),
             user_name: self.user_name.clone(),

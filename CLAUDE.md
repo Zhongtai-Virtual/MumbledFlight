@@ -202,7 +202,11 @@ the flag cannot be toggled while connected.
 ### 6. Plugin GUI (`plugin/src/gui/`)
 ImGui window rendered via `imgui-glow-renderer`. `GuiState` (in `gui/mod.rs`) holds all UI/config
 state and is the bridge between user input and `connection::start/stop`. Config persists to
-`Resources/plugins/MumbledFlight/config.toml` (`gui/config.rs`, serde). Device enumeration runs on
+`Resources/plugins/MumbledFlight/config.toml` (`gui/config.rs`, serde) — **except secrets** (the
+server password and client-cert passphrase), which go to the **OS secret store** via `gui/secrets.rs`
+(`keyring`: freedesktop Secret Service on Linux — GNOME Keyring / KWallet / KeePassXC — Keychain on
+macOS, Credential Manager on Windows). Legacy plain-text secrets in an existing toml are read once,
+migrated to the store, and cleared. Device enumeration runs on
 a **background thread** (every 2 s, panic-caught) and is applied non-blocking in the flight loop —
 deliberately kept off the XPLM main thread so it never blocks `XPluginEnable`.
 
