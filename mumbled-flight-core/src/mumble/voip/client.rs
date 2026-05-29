@@ -56,6 +56,8 @@ pub struct MumbleVoipClient {
     /// None for IC, PA, and radio clients — they never switch channels.
     pub zone_channels: Option<(String, String)>,
     pub test_pos: Option<[f32; 3]>,
+    /// Mumble server password (empty = none). Sent in the Authenticate message on connect.
+    pub password: String,
     /// Stereo width for spatialized audio: 0.0 = mono, 1.0 = full spatial. Live-adjustable.
     pub spatial_width: Arc<std::sync::atomic::AtomicU32>,
 }
@@ -125,6 +127,9 @@ impl MumbleVoipClient {
 
         let mut auth = msgs::Authenticate::new();
         auth.set_username(self.username.clone());
+        if !self.password.is_empty() {
+            auth.set_password(self.password.clone());
+        }
         auth.set_opus(true);
         control.send(ControlPacket::Authenticate(Box::new(auth))).await?;
 

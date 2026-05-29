@@ -54,6 +54,7 @@ pub fn start(ps: &mut PluginState) {
 
     let state_clone = Arc::clone(&cockpit_state);
     let user_name = ps.gui.user_name.clone();
+    let server_password = ps.gui.server_password.clone();
     let flight_id = ps.gui.flight_id.clone();
     let mic_gain = Arc::new(AtomicU32::new(ps.gui.gain.to_bits()));
     let mic_gain_for_thread = Arc::clone(&mic_gain);
@@ -78,6 +79,7 @@ pub fn start(ps: &mut PluginState) {
     runtime.spawn(async move {
         mumble::run_mumble_stack(MumbleStackConfig {
             state: state_clone,
+            server_password,
             user_name,
             session_id: flight_id,
             mic_gain: mic_gain_for_thread,

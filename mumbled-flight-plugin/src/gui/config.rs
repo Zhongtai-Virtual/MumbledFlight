@@ -8,6 +8,8 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct PluginConfig {
     pub server: String,
+    /// Mumble server password (empty = none). Stored in plain text in config.toml.
+    pub server_password: String,
     pub flight_id: String,
     pub user_name: String,
     /// Microphone input gain multiplier (applies to captured audio only, not playback).
@@ -29,6 +31,7 @@ impl Default for PluginConfig {
     fn default() -> Self {
         Self {
             server: "127.0.0.1:64738".to_string(),
+            server_password: String::new(),
             flight_id: String::new(),
             user_name: String::new(),
             gain: 1.0,

@@ -70,6 +70,10 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:64738", value_name = "HOST:PORT")]
     server: String,
 
+    /// Mumble server password, if the server requires one.
+    #[arg(short = 'P', long, value_name = "PASSWORD")]
+    password: Option<String>,
+
     /// List all available audio input and output devices on your system.
     #[arg(long, default_value_t = false)]
     list_devices: bool,
@@ -198,6 +202,7 @@ async fn main() -> Result<()> {
             state: state_mumble,
             user_name: user_prefix,
             session_id: flight_id,
+            server_password: args.password.unwrap_or_default(),
             mic_gain: Arc::new(AtomicU32::new(args.gain.to_bits())),
             denoise: args.denoise,
             radio_source: args.radio_source,

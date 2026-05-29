@@ -59,6 +59,7 @@ impl GuiState {
 
         // Snapshot mutable fields — avoids borrow conflict between imgui::Ui and self.
         let mut server = self.server.clone();
+        let mut server_password = self.server_password.clone();
         let mut flight_id = self.flight_id.clone();
         let mut user_name = self.user_name.clone();
         let mut gain = self.gain;
@@ -113,7 +114,7 @@ impl GuiState {
                 .movable(false)
                 .scroll_bar(false)
                 .build(|| {
-                    p.connection_fields(&mut server, &mut flight_id, &mut user_name);
+                    p.connection_fields(&mut server, &mut server_password, &mut flight_id, &mut user_name);
                     p.audio_controls(&mut ambient_vol, &mut ic_vol, &mut gain, &mut spatial_width);
                     p.denoise_toggle(&mut denoise, is_connected);
                     if !output_device_labels.is_empty() {
@@ -136,6 +137,7 @@ impl GuiState {
 
         // Write back modified config locals.
         self.server = server;
+        self.server_password = server_password;
         self.flight_id = flight_id;
         self.user_name = user_name;
         self.gain = gain;
@@ -243,6 +245,15 @@ impl<'ui> Ctx<'ui> {
         self.ui.input_text(id, buf).build();
     }
 
+    /// Same layout as `row`, but the input is masked (for the server password).
+    fn password_row(&self, label: &str, id: &str, buf: &mut String) {
+        self.ui.text(label);
+        self.ui.same_line();
+        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_next_item_width(self.fw);
+        self.ui.input_text(id, buf).password(true).build();
+    }
+
     // A labelled slider plus a reset icon; the parameters map 1:1 to imgui's slider config.
     #[allow(clippy::too_many_arguments)]
     fn slider(&self, label: &str, id: &str, v: &mut f32, min: f32, max: f32, flags: imgui::SliderFlags, default: f32) {
@@ -333,8 +344,9 @@ impl<'ui> Ctx<'ui> {
 
     // ── Panels ────────────────────────────────────────────────────────────────
 
-    fn connection_fields(&self, server: &mut String, flight_id: &mut String, user_name: &mut String) {
+    fn connection_fields(&self, server: &mut String, server_password: &mut String, flight_id: &mut String, user_name: &mut String) {
         self.row("Server",    "##srv", server);
+        self.password_row("Password", "##pwd", server_password);
         self.row("Flight ID", "##fid", flight_id);
         self.row("Username",  "##usr", user_name);
     }
