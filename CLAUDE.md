@@ -133,10 +133,14 @@ channel, spawned through the shared `spawn_client` helper:
 
 ### 4. The Mumble protocol state machine (`core/src/mumble/voip/`)
 - `client.rs` — `MumbleVoipClient` holds the *static* per-client config (role, channel, context,
-  fixed test position). `run()` is the tokio `select!` event loop: TCP/UDP pings, zone-channel
-  checks, inbound UDP voice, inbound TLS control messages, outbound mic PCM. It generates a
-  self-signed throwaway TLS identity per connection (`generate_temp_identity`). Audio is Opus,
-  48 kHz mono, position info attached to each voice packet.
+  fixed test position, `spatial_width: Arc<AtomicU32>`). `run()` is the tokio `select!` event loop:
+  TCP/UDP pings, zone-channel checks, inbound UDP voice, inbound TLS control messages, outbound mic
+  PCM. It generates a self-signed throwaway TLS identity per connection (`generate_temp_identity`).
+  Audio is Opus, 48 kHz mono, position info attached to each voice packet.
+  `spatialize()` applies a stereo-width blend after all gain/attenuation math:
+  `mid + (L/R − mid) × width`, where `width` is read from `spatial_width` at each packet.
+  Values in [0, 1] blend toward mono; values in (1, 2] exaggerate the stereo spread beyond
+  the natural geometry. Output gains are clamped to ≥ 0 to prevent phase inversion.
 - `session.rs` — `Session` is the *mutable* per-connection state (crypt, channel map, decoders,
   encoder, sequence counters). Key methods:
   - `on_mic_pcm` — **the transmit-gating logic.** Decides whether *this* client should transmit
@@ -167,19 +171,42 @@ channel, spawned through the shared `spawn_client` helper:
 > it is used in `position_bytes`, `spatialize`, the CLI `--pos` parser, and `RADIO_SPEAKER_POSITION`.
 
 ### 5. Audio I/O (`core/src/mumble/audio.rs`)
-CPAL-based capture/playback plus Linux PipeWire device enumeration (`enumerate_pw_devices`) and the
-auto-created virtual sink `MumblingRadio` (`VIRTUAL_SINK_NAME`, `create_linux_sink`) used to
-capture xPilot's radio output. `std::env::set_var(PIPEWIRE_NODE)` + CPAL device-open is serialized
-under a process-wide mutex (`pipewire_env_lock`) because `set_var` is unsound across threads.
-`mic_gain` is an `Arc<AtomicU32>` (f32 bits) so the GUI can adjust gain live.
+CPAL-based capture/playback. Device selection goes through `select_device(name, input)`, which is
+`#[cfg]`-split: on Linux it steers PipeWire via `PIPEWIRE_NODE` and finds the `"pipewire"` CPAL
+device; on macOS/Windows it iterates CPAL devices by exact name, falling back to the system
+default. All device-open calls are serialised under `device_open_lock` (on Linux this also
+guards the `set_var` race; elsewhere it just serialises concurrent opens).
+
+Linux additionally provides `enumerate_pw_devices` (single PipeWire round-trip for sinks +
+sources) and `create_linux_sink` / `start_loopback_capture` for the `MumblingRadio` virtual sink
+used to capture xPilot's radio output — all `#[cfg(target_os = "linux")]`. On macOS/Windows,
+`start_loopback_capture` uses a standard CPAL `build_input_stream` instead (for virtual audio
+cables such as BlackHole or VB-Cable). `mic_gain` / `ambient_vol` / `ic_vol` / `spatial_width`
+are all `Arc<AtomicU32>` (f32 bits) so the GUI can adjust them live without reconnecting.
+
+**Denoise** (`--denoise` flag / GUI checkbox): RNNoise via `nnnoiseless`, 480-sample (10 ms)
+frames. Gain is applied *after* `process_frame` so the denoiser always sees a normalised signal.
+`process_frame` returns a VAD probability; frames below `VAD_THRESHOLD` (0.5) are replaced with
+silence, acting as a noise gate. The denoiser is stateful and created once per capture stream;
+the flag cannot be toggled while connected.
 
 ### 6. Plugin GUI (`plugin/src/gui/`)
 ImGui window rendered via `imgui-glow-renderer`. `GuiState` (in `gui/mod.rs`) holds all UI/config
 state and is the bridge between user input and `connection::start/stop`. Config persists to
 `Resources/plugins/MumbledFlight/config.toml` (`gui/config.rs`, serde). Device enumeration runs on
 a **background thread** (every 2 s, panic-caught) and is applied non-blocking in the flight loop —
-deliberately kept off the XPLM main thread so it never blocks `XPluginEnable`. The radio source
-combo encodes: index 0 = disabled, 1 = auto-sink (`__auto__`), 2+ = an input device.
+deliberately kept off the XPLM main thread so it never blocks `XPluginEnable`.
+
+**Radio source combo** is platform-conditional via `RADIO_DEVICE_OFFSET`: on Linux index 0 =
+disabled, 1 = auto-sink (`__auto__`), 2+ = input devices; on macOS/Windows index 0 = disabled,
+1+ = input devices (auto-sink entry is hidden). `radio_params()`, `radio_source_str()`, and
+`refresh_output_devices()` all use the same offset constant.
+
+**Sliders** — Voice Vol, IC Vol, Mic Gain, and Spatial all share a single parametric `slider`
+closure (min, max, `SliderFlags`, default). Double-clicking any slider resets it to its default.
+The Spatial slider (`spatial_width`, 0–2, linear, `NO_INPUT`) controls stereo width: 0 = mono,
+1 = natural geometry (default), 2 = super-stereo. It is live-adjustable via `spatial_width_live:
+Option<Arc<AtomicU32>>` — same pattern as `mic_gain_live`, `ambient_vol_live`, `ic_vol_live`.
 
 ## Conventions & gotchas
 
@@ -191,10 +218,11 @@ combo encodes: index 0 = disabled, 1 = auto-sink (`__auto__`), 2+ = an input dev
   X-Plane use `extern "C-unwind"`. XPLM handle types are raw pointers, hand-marked `Send`, and
   must only be touched on the main thread.
 - `build.rs` in the plugin injects `BUILD_TIMESTAMP` (chrono) used in the startup log line. It uses `rerun-if-changed=__force_rerun__` (a non-existent path) so Cargo always re-runs it and the timestamp is never stale.
-- The `--denoise` flag enables **RNNoise** noise suppression (via `nnnoiseless`) on the capture
-  side in `audio.rs::start_capture`. It processes 480-sample (10 ms) frames scaled to the i16
-  range; the denoiser is stateful and created once per capture stream. The flag threads from both
-  frontends → `run_mumble_stack` → `start_capture` only (it is *not* a per-client concern).
+- The `--denoise` flag / GUI checkbox enables **RNNoise** noise suppression (via `nnnoiseless`)
+  on the capture side in `audio.rs::start_capture`. Gain is applied *after* denoising; VAD
+  probability below 0.5 silences the frame (noise gate). The denoiser is stateful and created
+  once per capture stream; it threads from both frontends → `run_mumble_stack` → `start_capture`
+  only (it is *not* a per-client concern).
 
 ## CI / release (`.github/workflows/build.yml`)
 Matrix build of the plugin on Linux/macOS/Windows on push to `main`, PRs, and manual dispatch.
