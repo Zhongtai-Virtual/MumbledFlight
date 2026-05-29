@@ -186,8 +186,10 @@ are all `Arc<AtomicU32>` (f32 bits) so the GUI can adjust them live without reco
 
 **Denoise** (`--denoise` flag / GUI checkbox): RNNoise via `nnnoiseless`, 480-sample (10 ms)
 frames. Gain is applied *after* `process_frame` so the denoiser always sees a normalised signal.
-`process_frame` returns a VAD probability; frames below `VAD_THRESHOLD` (0.5) are replaced with
-silence, acting as a noise gate. The denoiser is stateful and created once per capture stream;
+`process_frame` returns a VAD probability used as a **soft gate**: frames at or above `VAD_THRESHOLD`
+(0.5, module-level const in `audio.rs`) pass at full gain; frames below are attenuated by
+`gain * vad / VAD_THRESHOLD`, approaching zero smoothly rather than stepping to silence — avoiding
+click artifacts at speech boundaries. The denoiser is stateful and created once per capture stream;
 the flag cannot be toggled while connected.
 
 ### 6. Plugin GUI (`plugin/src/gui/`)
@@ -202,11 +204,18 @@ disabled, 1 = auto-sink (`__auto__`), 2+ = input devices; on macOS/Windows index
 1+ = input devices (auto-sink entry is hidden). `radio_params()`, `radio_source_str()`, and
 `refresh_output_devices()` all use the same offset constant.
 
-**Sliders** — Voice Vol, IC Vol, Mic Gain, and Spatial all share a single parametric `slider`
-closure (min, max, `SliderFlags`, default). Double-clicking any slider resets it to its default.
-The Spatial slider (`spatial_width`, 0–2, linear, `NO_INPUT`) controls stereo width: 0 = mono,
-1 = natural geometry (default), 2 = super-stereo. It is live-adjustable via `spatial_width_live:
-Option<Arc<AtomicU32>>` — same pattern as `mic_gain_live`, `ambient_vol_live`, `ic_vol_live`.
+**Draw loop structure** (`draw.rs`): `GuiState::draw` snapshots mutable fields into locals,
+renders via imgui, then writes them back — necessary to avoid borrow conflicts with `imgui::Ui`.
+The rendering logic is split into panel methods on a local `struct Ctx<'ui> { ui, fw }` that
+carries the two shared draw-time constants. Primitives (`row`, `slider`, `combo`) and panels
+(`connection_fields`, `audio_controls`, `denoise_toggle`, `output_device_pickers`, `mic_picker`,
+`radio_picker`, `log_level_picker`, `connect_button`, `status_display`) are all methods on `Ctx`.
+
+**Sliders** — Voice Vol, IC Vol, Mic Gain, and Spatial all go through `Ctx::slider` (min, max,
+`SliderFlags`, default). Double-clicking any slider resets it to its default. The Spatial slider
+(`spatial_width`, 0–2, linear, `NO_INPUT`) controls stereo width: 0 = mono, 1 = natural geometry
+(default), 2 = super-stereo. It is live-adjustable via `spatial_width_live: Option<Arc<AtomicU32>>`
+— same pattern as `mic_gain_live`, `ambient_vol_live`, `ic_vol_live`.
 
 ## Conventions & gotchas
 
@@ -219,10 +228,10 @@ Option<Arc<AtomicU32>>` — same pattern as `mic_gain_live`, `ambient_vol_live`,
   must only be touched on the main thread.
 - `build.rs` in the plugin injects `BUILD_TIMESTAMP` (chrono) used in the startup log line. It uses `rerun-if-changed=__force_rerun__` (a non-existent path) so Cargo always re-runs it and the timestamp is never stale.
 - The `--denoise` flag / GUI checkbox enables **RNNoise** noise suppression (via `nnnoiseless`)
-  on the capture side in `audio.rs::start_capture`. Gain is applied *after* denoising; VAD
-  probability below 0.5 silences the frame (noise gate). The denoiser is stateful and created
-  once per capture stream; it threads from both frontends → `run_mumble_stack` → `start_capture`
-  only (it is *not* a per-client concern).
+  on the capture side in `audio.rs::start_capture`. Gain is applied *after* denoising; VAD uses
+  a soft gate (see §5) to avoid click artifacts. The denoiser is stateful and created once per
+  capture stream; it threads from both frontends → `run_mumble_stack` → `start_capture` only
+  (it is *not* a per-client concern).
 
 ## CI / release (`.github/workflows/build.yml`)
 Matrix build of the plugin on Linux/macOS/Windows on push to `main`, PRs, and manual dispatch.

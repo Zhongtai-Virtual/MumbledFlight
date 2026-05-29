@@ -7,6 +7,7 @@ use std::os::raw::c_void;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use mumbled_flight_core::mumble::{ClientStatus, VoipStatuses};
 use xplane_sys::{
     XPLMGetScreenBoundsGlobal, XPLMGetScreenSize, XPLMGetWindowGeometry, XPLMSetGraphicsState,
     XPLMWindowID,
@@ -73,7 +74,6 @@ impl GuiState {
         let is_connected = self.is_connected;
         let status = self.status.clone();
         let voip_statuses = self.voip_statuses.clone();
-        let output_devices = self.output_devices.clone();
         let output_device_labels = self.output_device_labels.clone();
         let mic_input_device_labels = self.mic_input_device_labels.clone();
         let mut selected_mic = self.selected_mic;
@@ -99,6 +99,7 @@ impl GuiState {
         {
             let ui = ctx.frame();
             let fw = (width as f32 - 115.0).max(80.0);
+            let p = Ctx { ui: &ui, fw };
 
             ui.window("##main")
                 .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
@@ -108,221 +109,19 @@ impl GuiState {
                 .movable(false)
                 .scroll_bar(false)
                 .build(|| {
-                    let row = |label: &str, id: &str, buf: &mut String| {
-                        ui.text(label);
-                        ui.same_line();
-                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                        ui.set_next_item_width(fw);
-                        ui.input_text(id, buf).build();
-                    };
-
-                    row("Server", "##srv", &mut server);
-                    row("Flight ID", "##fid", &mut flight_id);
-                    row("Username", "##usr", &mut user_name);
-
-                    let slider = |label: &str, id: &str, v: &mut f32,
-                                      min: f32, max: f32,
-                                      flags: imgui::SliderFlags, default: f32| {
-                        ui.text(label);
-                        ui.same_line();
-                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                        ui.set_next_item_width(fw);
-                        ui.slider_config(id, min, max)
-                            .flags(flags)
-                            .display_format("")
-                            .build(v);
-                        if ui.is_item_hovered() && ui.is_mouse_double_clicked(imgui::MouseButton::Left) {
-                            *v = default;
-                        }
-                    };
-                    let vol_flags = imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT;
-                    slider("Voice Vol", "##ambient_vol", &mut ambient_vol, 0.1, 20.0, vol_flags, 1.0);
-                    slider("IC Vol",    "##ic_vol",      &mut ic_vol,      0.1, 20.0, vol_flags, 1.0);
-                    slider("Mic Gain",  "##gain",        &mut gain,        0.1, 20.0, vol_flags, 1.0);
-                    slider("Spatial",   "##spatial",     &mut spatial_width, 0.0, 2.0, imgui::SliderFlags::NO_INPUT, 1.0);
-
-                    ui.text("Denoise");
-                    ui.same_line();
-                    ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                    let _dis = ui.begin_disabled(is_connected);
-                    ui.checkbox("##denoise", &mut denoise);
-                    drop(_dis);
-
-                    if !output_devices.is_empty() {
-                        let _dis = ui.begin_disabled(is_connected);
-                        let output_combo = |label: &str, id: &str, selected: &mut i32| {
-                            let preview = output_device_labels
-                                .get(*selected as usize)
-                                .map(|s| s.as_str())
-                                .unwrap_or("(default)");
-                            ui.text(label);
-                            ui.same_line();
-                            ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                            ui.set_next_item_width(fw);
-                            if let Some(_tok) = ui.begin_combo(id, preview) {
-                                let avail_w = ui.content_region_avail()[0];
-                                for (i, lbl) in output_device_labels.iter().enumerate() {
-                                    let display = fit_label(ui, lbl, avail_w);
-                                    if ui
-                                        .selectable_config(&*display)
-                                        .selected(*selected == i as i32)
-                                        .build()
-                                    {
-                                        *selected = i as i32;
-                                    }
-                                }
-                            }
-                        };
-                        output_combo("Voice Out", "##dev_ambient", &mut selected_ambient);
-                        output_combo("IC Out", "##dev_ic", &mut selected_ic);
-                        drop(_dis);
+                    p.connection_fields(&mut server, &mut flight_id, &mut user_name);
+                    p.audio_controls(&mut ambient_vol, &mut ic_vol, &mut gain, &mut spatial_width);
+                    p.denoise_toggle(&mut denoise, is_connected);
+                    if !output_device_labels.is_empty() {
+                        p.output_device_pickers(is_connected, &output_device_labels, &mut selected_ambient, &mut selected_ic);
                     }
-
-                    if !mic_input_device_labels.is_empty() {
-                        let mic_labels: Vec<String> =
-                            std::iter::once("(system default)".to_string())
-                                .chain(mic_input_device_labels.iter().cloned())
-                                .collect();
-                        let mic_preview = mic_labels
-                            .get(selected_mic as usize)
-                            .map(|s| s.as_str())
-                            .unwrap_or("(system default)");
-                        let _dis = ui.begin_disabled(is_connected);
-                        ui.text("Mic In");
-                        ui.same_line();
-                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                        ui.set_next_item_width(fw);
-                        if let Some(_tok) = ui.begin_combo("##mic_in", mic_preview) {
-                            let avail_w = ui.content_region_avail()[0];
-                            for (i, label) in mic_labels.iter().enumerate() {
-                                let display = fit_label(ui, label, avail_w);
-                                if ui
-                                    .selectable_config(&*display)
-                                    .selected(selected_mic == i as i32)
-                                    .build()
-                                {
-                                    selected_mic = i as i32;
-                                }
-                            }
-                        }
-                        drop(_dis);
-                    }
-
-                    {
-                        let radio_labels: Vec<String> = {
-                            let mut v = vec!["(disabled)".to_string()];
-                            #[cfg(target_os = "linux")]
-                            v.push("MumblingRadio (auto-sink)".to_string());
-                            v.extend(radio_input_device_labels.iter().cloned());
-                            v
-                        };
-                        let radio_preview = radio_labels
-                            .get(selected_radio as usize)
-                            .map(|s| s.as_str())
-                            .unwrap_or("(disabled)");
-                        let _dis = ui.begin_disabled(is_connected);
-                        ui.text("Radio Source");
-                        ui.same_line();
-                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                        ui.set_next_item_width(fw);
-                        if let Some(_tok) = ui.begin_combo("##radio", radio_preview) {
-                            let avail_w = ui.content_region_avail()[0];
-                            for (i, label) in radio_labels.iter().enumerate() {
-                                let display = fit_label(ui, label, avail_w);
-                                if ui
-                                    .selectable_config(&*display)
-                                    .selected(selected_radio == i as i32)
-                                    .build()
-                                {
-                                    selected_radio = i as i32;
-                                }
-                            }
-                        }
-                        drop(_dis);
-                    }
-
-                    const LOG_LEVELS: &[LevelFilter] = &[
-                        LevelFilter::Error,
-                        LevelFilter::Warn,
-                        LevelFilter::Info,
-                        LevelFilter::Debug,
-                    ];
-                    let level_preview = format!("{log_level}");
-                    ui.text("Log Level");
-                    ui.same_line();
-                    ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                    ui.set_next_item_width(fw);
-                    if let Some(_tok) = ui.begin_combo("##loglevel", &level_preview) {
-                        for &lvl in LOG_LEVELS {
-                            if ui
-                                .selectable_config(format!("{lvl}"))
-                                .selected(log_level == lvl)
-                                .build()
-                            {
-                                log_level = lvl;
-                            }
-                        }
-                    }
-
-                    ui.spacing();
-                    ui.separator();
-                    ui.spacing();
-
-                    if is_connected {
-                        if ui.button("Disconnect") {
-                            should_disconnect = true;
-                        }
-                    } else {
-                        if ui.button("Connect") {
-                            debug!(
-                                "Connect pressed — flight_id='{}' user='{}'",
-                                flight_id.trim(),
-                                user_name.trim()
-                            );
-                            if !flight_id.trim().is_empty() && !user_name.trim().is_empty() {
-                                should_connect = true;
-                            } else {
-                                warn!("Connect blocked — flight_id or username is empty");
-                            }
-                        }
-                    }
-
-                    ui.spacing();
-                    if let Some(ref statuses) = voip_statuses {
-                        use mumbled_flight_core::mumble::ClientStatus;
-                        let map = statuses.lock().unwrap();
-                        // Known clients in display order; unknown keys (future clients) follow.
-                        const KNOWN: &[&str] = &["Voice", "IC", "PA", "Radio"];
-                        let extras: Vec<&str> = map
-                            .keys()
-                            .map(|s| s.as_str())
-                            .filter(|k| !KNOWN.contains(k))
-                            .collect();
-                        for &label in KNOWN.iter().chain(extras.iter()) {
-                            if let Some(slot) = map.get(label) {
-                                let s = slot.lock().unwrap();
-                                let (color, tag) = match *s {
-                                    ClientStatus::Connecting => {
-                                        ([1.0f32, 0.8, 0.2, 1.0], "connecting")
-                                    }
-                                    ClientStatus::Connected => ([0.3, 1.0, 0.3, 1.0], "connected"),
-                                    ClientStatus::Disconnected => {
-                                        ([0.8, 0.3, 0.3, 1.0], "disconnected")
-                                    }
-                                };
-                                ui.text_disabled(format!("{label}: "));
-                                ui.same_line();
-                                ui.text_colored(color, tag);
-                            }
-                        }
-                    } else {
-                        ui.text_colored([0.8, 0.3, 0.3, 1.0], "Disconnected");
-                    }
-
-                    if !status.is_empty() {
-                        ui.spacing();
-                        ui.text_disabled(&status);
-                    }
+                    p.mic_picker(is_connected, &mic_input_device_labels, &mut selected_mic);
+                    p.radio_picker(is_connected, &radio_input_device_labels, &mut selected_radio);
+                    p.log_level_picker(&mut log_level);
+                    let (conn, disc) = p.connect_button(is_connected, &flight_id, &user_name);
+                    should_connect = conn;
+                    should_disconnect = disc;
+                    p.status_display(voip_statuses.as_ref(), &status);
                 });
         } // ui borrow ends here
         let draw_data = ctx.render();
@@ -415,6 +214,233 @@ impl GuiState {
                     }
                 }
             })
+        }
+    }
+}
+
+// ── Panel renderer ────────────────────────────────────────────────────────────
+//
+// Groups shared draw-time state (`ui`, `fw`) so panel methods don't repeat
+// those two parameters on every call.
+
+struct Ctx<'ui> {
+    ui: &'ui imgui::Ui,
+    fw: f32,
+}
+
+impl<'ui> Ctx<'ui> {
+    // ── Primitive helpers ─────────────────────────────────────────────────────
+
+    fn row(&self, label: &str, id: &str, buf: &mut String) {
+        self.ui.text(label);
+        self.ui.same_line();
+        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_next_item_width(self.fw);
+        self.ui.input_text(id, buf).build();
+    }
+
+    fn slider(&self, label: &str, id: &str, v: &mut f32, min: f32, max: f32, flags: imgui::SliderFlags, default: f32) {
+        let icon_sz = self.ui.current_font_size();
+        let spacing = self.ui.clone_style().item_spacing[0];
+
+        self.ui.text(label);
+        self.ui.same_line();
+        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_next_item_width(self.fw - icon_sz - spacing);
+        self.ui.slider_config(id, min, max)
+            .flags(flags)
+            .display_format("")
+            .build(v);
+        self.ui.same_line();
+        // id is "##foo"; "_r" suffix gives the button a distinct imgui ID ("foo_r" vs "foo").
+        if self.reset_icon_button(&format!("{id}_r")) {
+            *v = default;
+        }
+    }
+
+    /// Draws a circular-arrow icon button and returns `true` when clicked.
+    /// Occupies `current_font_size` × `frame_height` so the icon sits centred
+    /// against any adjacent widget with standard frame padding.
+    fn reset_icon_button(&self, id: &str) -> bool {
+        let icon_sz = self.ui.current_font_size();
+        let frame_h = self.ui.frame_height();
+
+        let clicked  = self.ui.invisible_button(id, [icon_sz, frame_h]);
+        let hovered  = self.ui.is_item_hovered();
+        let rect_min = self.ui.item_rect_min();
+        let rect_max = self.ui.item_rect_max();
+
+        // Centre derived from the actual placed rect — immune to spacing offsets.
+        let cx = (rect_min[0] + rect_max[0]) * 0.5;
+        let cy = (rect_min[1] + rect_max[1]) * 0.5;
+        let r  = icon_sz * 0.28;
+
+        let col: [f32; 4] = if hovered { [1.0, 1.0, 1.0, 1.0] } else { [0.55, 0.55, 0.55, 1.0] };
+
+        // Arc: ~306° clockwise (increasing θ = clockwise in screen/y-down coords).
+        // Starts at ~36° (lower-right), ends at ~342° (upper-right); gap on the right side.
+        use std::f32::consts::PI;
+        let start_a = PI * 0.2;
+        let sweep   = PI * 1.7;
+        let end_a   = start_a + sweep;
+        const N: usize = 14;
+        let arc: Vec<[f32; 2]> = (0..=N)
+            .map(|i| {
+                let a = start_a + sweep * i as f32 / N as f32;
+                [cx + r * a.cos(), cy + r * a.sin()]
+            })
+            .collect();
+        let draw = self.ui.get_window_draw_list();
+        draw.add_polyline(arc, col).thickness(1.5).build();
+
+        // Filled arrowhead at arc end pointing in the clockwise tangent direction.
+        // Clockwise tangent at θ in screen (y-down) coords: (−sin θ, cos θ).
+        let tip = [cx + r * end_a.cos(), cy + r * end_a.sin()];
+        let (tx, ty) = (-end_a.sin(), end_a.cos()); // clockwise tangent
+        let (nx, ny) = ( end_a.cos(), end_a.sin()); // outward radial normal
+        let al = r * 0.55;
+        let aw = r * 0.40;
+        let p2 = [tip[0] - al * tx + aw * nx, tip[1] - al * ty + aw * ny];
+        let p3 = [tip[0] - al * tx - aw * nx, tip[1] - al * ty - aw * ny];
+        draw.add_triangle(tip, p2, p3, col).filled(true).build();
+
+        if hovered { self.ui.tooltip_text("Reset"); }
+        clicked
+    }
+
+    fn combo(&self, label: &str, id: &str, labels: &[String], selected: &mut i32) {
+        let preview = labels.get(*selected as usize).map(|s| s.as_str()).unwrap_or("(default)");
+        self.ui.text(label);
+        self.ui.same_line();
+        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_next_item_width(self.fw);
+        if let Some(_tok) = self.ui.begin_combo(id, preview) {
+            let avail_w = self.ui.content_region_avail()[0];
+            for (i, lbl) in labels.iter().enumerate() {
+                let display = fit_label(self.ui, lbl, avail_w);
+                if self.ui.selectable_config(&*display).selected(*selected == i as i32).build() {
+                    *selected = i as i32;
+                }
+            }
+        }
+    }
+
+    // ── Panels ────────────────────────────────────────────────────────────────
+
+    fn connection_fields(&self, server: &mut String, flight_id: &mut String, user_name: &mut String) {
+        self.row("Server",    "##srv", server);
+        self.row("Flight ID", "##fid", flight_id);
+        self.row("Username",  "##usr", user_name);
+    }
+
+    fn audio_controls(&self, ambient_vol: &mut f32, ic_vol: &mut f32, gain: &mut f32, spatial_width: &mut f32) {
+        let vol_flags = imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT;
+        self.slider("Voice Vol", "##ambient_vol", ambient_vol,   0.1, 20.0, vol_flags, 1.0);
+        self.slider("IC Vol",    "##ic_vol",      ic_vol,        0.1, 20.0, vol_flags, 1.0);
+        self.slider("Mic Gain",  "##gain",        gain,          0.1, 20.0, vol_flags, 1.0);
+        self.slider("Spatial",   "##spatial",     spatial_width, 0.0,  2.0, imgui::SliderFlags::NO_INPUT, 1.0);
+    }
+
+    fn denoise_toggle(&self, denoise: &mut bool, is_connected: bool) {
+        self.ui.text("Denoise");
+        self.ui.same_line();
+        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        let _dis = self.ui.begin_disabled(is_connected);
+        self.ui.checkbox("##denoise", denoise);
+    }
+
+    fn output_device_pickers(&self, is_connected: bool, output_device_labels: &[String], selected_ambient: &mut i32, selected_ic: &mut i32) {
+        let _dis = self.ui.begin_disabled(is_connected);
+        self.combo("Voice Out", "##dev_ambient", output_device_labels, selected_ambient);
+        self.combo("IC Out",    "##dev_ic",      output_device_labels, selected_ic);
+    }
+
+    fn mic_picker(&self, is_connected: bool, mic_input_device_labels: &[String], selected_mic: &mut i32) {
+        if mic_input_device_labels.is_empty() { return; }
+        let mic_labels: Vec<String> = std::iter::once("(system default)".to_string())
+            .chain(mic_input_device_labels.iter().cloned())
+            .collect();
+        let _dis = self.ui.begin_disabled(is_connected);
+        self.combo("Mic In", "##mic_in", &mic_labels, selected_mic);
+    }
+
+    fn radio_picker(&self, is_connected: bool, radio_input_device_labels: &[String], selected_radio: &mut i32) {
+        let radio_labels: Vec<String> = {
+            let mut v = vec!["(disabled)".to_string()];
+            #[cfg(target_os = "linux")]
+            v.push("MumblingRadio (auto-sink)".to_string());
+            v.extend(radio_input_device_labels.iter().cloned());
+            v
+        };
+        let _dis = self.ui.begin_disabled(is_connected);
+        self.combo("Radio Source", "##radio", &radio_labels, selected_radio);
+    }
+
+    fn log_level_picker(&self, log_level: &mut LevelFilter) {
+        const LOG_LEVELS: &[LevelFilter] = &[
+            LevelFilter::Error,
+            LevelFilter::Warn,
+            LevelFilter::Info,
+            LevelFilter::Debug,
+        ];
+        let level_preview = format!("{log_level}");
+        self.ui.text("Log Level");
+        self.ui.same_line();
+        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_next_item_width(self.fw);
+        if let Some(_tok) = self.ui.begin_combo("##loglevel", &level_preview) {
+            for &lvl in LOG_LEVELS {
+                if self.ui.selectable_config(format!("{lvl}")).selected(*log_level == lvl).build() {
+                    *log_level = lvl;
+                }
+            }
+        }
+    }
+
+    /// Returns `(should_connect, should_disconnect)`.
+    fn connect_button(&self, is_connected: bool, flight_id: &str, user_name: &str) -> (bool, bool) {
+        self.ui.spacing();
+        self.ui.separator();
+        self.ui.spacing();
+        if is_connected {
+            (false, self.ui.button("Disconnect"))
+        } else {
+            if self.ui.button("Connect") {
+                debug!("Connect pressed — flight_id='{}' user='{}'", flight_id.trim(), user_name.trim());
+                if !flight_id.trim().is_empty() && !user_name.trim().is_empty() {
+                    return (true, false);
+                }
+                warn!("Connect blocked — flight_id or username is empty");
+            }
+            (false, false)
+        }
+    }
+
+    fn status_display(&self, voip_statuses: Option<&VoipStatuses>, status: &str) {
+        self.ui.spacing();
+        if let Some(statuses) = voip_statuses {
+            let map = statuses.lock().unwrap();
+            const KNOWN: &[&str] = &["Voice", "IC", "PA", "Radio"];
+            let extras: Vec<&str> = map.keys().map(|s| s.as_str()).filter(|k| !KNOWN.contains(k)).collect();
+            for &label in KNOWN.iter().chain(extras.iter()) {
+                if let Some(slot) = map.get(label) {
+                    let s = slot.lock().unwrap();
+                    let (color, tag) = match *s {
+                        ClientStatus::Connecting   => ([1.0f32, 0.8, 0.2, 1.0], "connecting"),
+                        ClientStatus::Connected    => ([0.3,    1.0, 0.3, 1.0], "connected"),
+                        ClientStatus::Disconnected => ([0.8,    0.3, 0.3, 1.0], "disconnected"),
+                    };
+                    self.ui.text_disabled(format!("{label}: "));
+                    self.ui.same_line();
+                    self.ui.text_colored(color, tag);
+                }
+            }
+        } else {
+            self.ui.text_colored([0.8, 0.3, 0.3, 1.0], "Disconnected");
+        }
+        if !status.is_empty() {
+            self.ui.spacing();
+            self.ui.text_disabled(status);
         }
     }
 }
