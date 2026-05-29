@@ -165,7 +165,7 @@ impl MumbleVoipClient {
 
     fn position_bytes(&self, s: &CockpitState) -> Option<Bytes> {
         match self.role {
-            ClientRole::Ic => None,
+            ClientRole::Ic | ClientRole::Pa => None,
             _ => if let Some(tp) = self.test_pos {
                 Some(encode_pos(tp[0], tp[1], tp[2]))
             } else {
@@ -188,7 +188,30 @@ impl MumbleVoipClient {
         };
 
         let (gain_l, gain_r, debug_msg) = match source_pos {
-            None => (0.5f32, 0.5f32, format!("[Spatial:{}] no pos data", remote_sid)),
+            None => {
+                // PA: omnidirectional in the cabin. Beyond the cabin door the listener hears the
+                // speakers through the doorway — attenuated by door openness and by distance from
+                // the door (quadratic falloff, matching the spatial.rs voice model).
+                // Cabin door at Mumble Z=4.1; cockpit is Z > 4.1.
+                const CABIN_DOOR_Z: f32 = 4.1;
+                const PA_DIST_MAX:  f32 = 8.0;  // metres beyond door → effectively silent
+                let att = if lpos[2] > CABIN_DOOR_Z {
+                    let door_factor = super::spatial::door_attenuation(lpos[2], 0.0, CABIN_DOOR_Z, door, 0.95);
+                    let dist = lpos[2] - CABIN_DOOR_Z;
+                    let dist_factor = if dist >= PA_DIST_MAX { 0.0 } else {
+                        let t = 1.0 - dist / PA_DIST_MAX;
+                        t * t
+                    };
+                    door_factor * dist_factor
+                } else {
+                    1.0
+                };
+                let g = 0.5 * att;
+                (g, g, format!(
+                    "[Spatial:PA:{}] door={door:.2} dist_from_door={:.2} att={att:.3} gain={g:.3}",
+                    remote_sid, (lpos[2] - CABIN_DOOR_Z).max(0.0),
+                ))
+            }
             Some(spos) => {
                 let (gl, gr) = compute_stereo_gains(spos, lpos, lrot, door, door_lav);
                 let [lx, ly, lz] = lpos;

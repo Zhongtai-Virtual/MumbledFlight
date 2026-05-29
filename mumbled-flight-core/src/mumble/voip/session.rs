@@ -415,7 +415,7 @@ impl Session {
                     let active = s.role == SharedCockpitRole::Pilot
                         && s.mic == AcpMicSelection::Pa
                         && (s.acp_rt || s.contwheel_rt);
-                    (active, 1.0)
+                    (active, 2.0)
                 }
                 ClientRole::Voice => (true, 1.0),
             }

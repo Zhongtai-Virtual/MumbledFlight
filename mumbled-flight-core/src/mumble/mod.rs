@@ -107,9 +107,9 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     std::thread::spawn(move || {
         let (sync_tx, mut sync_rx) = mpsc::channel(128);
         match input_type {
-            InputType::Sine          => audio::start_sine_capture(sync_tx, mic_gain),
-            InputType::File(path)    => audio::start_file_capture(path, sync_tx, mic_gain),
-            InputType::Real          => start_capture(sync_tx, d_mic, mic_gain, 0.0, mic_device, shutdown),
+            InputType::Sine => audio::start_sine_capture(sync_tx, mic_gain),
+            InputType::File(path) => audio::start_file_capture(path, sync_tx, mic_gain),
+            InputType::Real => start_capture(sync_tx, d_mic, mic_gain, 0.0, mic_device, shutdown),
         }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);
@@ -202,12 +202,6 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     }
 
     // 6. PA (Public Address) Client — always in aircraft channel
-    // TODO: PA is broadcast from multiple speakers (PSUs above each seat, lavatory ceiling).
-    //       A single fixed point source does not accurately simulate this. Consider rendering
-    //       PA as a non-positional flat mix, or blending several source positions, to replicate
-    //       the enveloping "speakers everywhere" effect. Door attenuation should also be
-    //       bypassed since the speakers are inside the fuselage.
-    const PA_POSITION: [f32; 3] = [0.0, 0.0, 0.0]; // placeholder until rendering is redesigned
     if !matches!(test_client, TestClient::Ic | TestClient::Radio) {
         spawn_client(
             MumbleVoipClient {
@@ -217,7 +211,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 voip_status: mk_status("PA"),
                 target_channel: aircraft_ch.clone(),
                 zone_channels: None,
-                test_pos: Some(PA_POSITION),
+                test_pos: None,
             },
             server_addr,
             Arc::clone(&state),
