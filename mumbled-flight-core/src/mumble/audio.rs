@@ -9,10 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::collections::VecDeque;
 use std::io::Read;
 
-// Serialises the PIPEWIRE_NODE env-var mutation + CPAL device-open sequence.
-// std::env::set_var is unsound when called concurrently from multiple threads;
-// holding this lock across set_var → build_*_stream prevents the race.
-fn pipewire_env_lock() -> &'static Mutex<()> {
+// Serialises concurrent CPAL device-open calls. On Linux also gates the
+// PIPEWIRE_NODE env-var mutation, which is unsound under concurrent writes.
+fn device_open_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -336,9 +335,15 @@ fn pw_null_sink_loop(
     Ok(())
 }
 
-fn pipewire_device(node: Option<&str>, input: bool) -> cpal::Device {
-    // Route to a specific PipeWire node when requested; clear the var otherwise
-    // so a previous selection from the same process doesn't leak into the next stream.
+/// Select a CPAL device by optional name, falling back to the system default.
+///
+/// On Linux: routes PipeWire to the requested node via `PIPEWIRE_NODE` and
+/// returns the generic "pipewire" CPAL device. Must be called with
+/// `device_open_lock` held so the env-var write is not concurrent.
+///
+/// On macOS/Windows: iterates CPAL devices and matches by exact name.
+#[cfg(target_os = "linux")]
+fn select_device(node: Option<&str>, input: bool) -> cpal::Device {
     unsafe {
         match node {
             Some(n) => std::env::set_var("PIPEWIRE_NODE", n),
@@ -363,6 +368,23 @@ fn pipewire_device(node: Option<&str>, input: bool) -> cpal::Device {
                 host.default_output_device()
             })
             .expect("No PipeWire output device")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn select_device(node: Option<&str>, input: bool) -> cpal::Device {
+    let host = cpal::default_host();
+    if let Some(name) = node {
+        let devices = if input { host.input_devices() } else { host.output_devices() };
+        if let Some(d) = devices.ok().and_then(|mut it| it.find(|d| d.name().unwrap_or_default() == name)) {
+            return d;
+        }
+        warn!("[Audio] device '{name}' not found, falling back to system default");
+    }
+    if input {
+        host.default_input_device().expect("no default input device")
+    } else {
+        host.default_output_device().expect("no default output device")
     }
 }
 
@@ -627,11 +649,11 @@ pub fn start_capture(
     shutdown: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        // Hold the env lock across set_var → build_input_stream → play() so that
-        // PIPEWIRE_NODE is not mutated by a concurrent stream-open in another thread.
+        // Hold the lock across device selection → build_input_stream → play() to
+        // serialise concurrent opens (on Linux also guards the PIPEWIRE_NODE write).
         let _stream = {
-            let _guard = pipewire_env_lock().lock().unwrap();
-            let device = pipewire_device(device_name_filter.as_deref(), true);
+            let _guard = device_open_lock().lock().unwrap();
+            let device = select_device(device_name_filter.as_deref(), true);
             let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
             let config = match device.supported_input_configs() {
                 Ok(mut cfgs) => cfgs
@@ -701,7 +723,7 @@ pub fn start_capture(
                 return;
             }
             s
-        }; // PIPEWIRE_NODE lock released — stream is already connected
+        }; // device_open_lock released — stream is already connected
         // Keep the stream alive until the connection is torn down, then drop it so the
         // CPAL/PipeWire input stream is released instead of leaking across reconnects.
         while !shutdown.load(Ordering::Acquire) {
@@ -720,8 +742,8 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
         let pending_samples_cb = Arc::clone(&pending_samples);
 
         let (stream, device_channels) = {
-            let _guard = pipewire_env_lock().lock().unwrap();
-            let device = pipewire_device(preferred_device.as_deref(), false);
+            let _guard = device_open_lock().lock().unwrap();
+            let device = select_device(preferred_device.as_deref(), false);
             let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
 
             let config = match device.supported_output_configs() {
@@ -764,7 +786,7 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
                 return;
             }
             (s, device_channels)
-        }; // PIPEWIRE_NODE lock released — stream is already connected
+        }; // device_open_lock released — stream is already connected
 
         let mut last_log = std::time::Instant::now();
         while let Some(mut stereo_frame_48k) = rx.blocking_recv() {
