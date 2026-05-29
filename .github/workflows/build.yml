@@ -15,8 +15,11 @@ jobs:
           - os: ubuntu-latest
             xpl_dir: lin_x64
             lib: libmumbled_flight_plugin.so
-          - os: macos-latest
-            xpl_dir: mac_x64
+          - os: macos-13 # Intel
+            xpl_dir: mac_x86_64
+            lib: libmumbled_flight_plugin.dylib
+          - os: macos-latest # ARM
+            xpl_dir: mac_arm64
             lib: libmumbled_flight_plugin.dylib
           - os: windows-latest
             xpl_dir: win_x64
@@ -103,15 +106,29 @@ jobs:
   # Extract into Resources/plugins/ to install.
   bundle:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist/MumbledFlight
+          path: artifacts
 
-      - name: Upload bundle
+      - name: Assemble X-Plane Plugin Directory
+        run: |
+          mkdir -p staging/MumbledFlight/64
+          
+          # Combine macOS binaries into a Fat Binary (Universal 2)
+          lipo -create \
+            artifacts/mac_x86_64/MumbledFlight.xpl \
+            artifacts/mac_arm64/MumbledFlight.xpl \
+            -output staging/MumbledFlight/64/mac.xpl
+            
+          # Copy other platforms with standard names
+          cp artifacts/lin_x64/MumbledFlight.xpl staging/MumbledFlight/64/lin.xpl
+          cp artifacts/win_x64/MumbledFlight.xpl staging/MumbledFlight/64/win.xpl
+
+      - name: Upload MumbledFlight Bundle
         uses: actions/upload-artifact@v4
         with:
           name: MumbledFlight
-          path: dist/
+          path: staging/
