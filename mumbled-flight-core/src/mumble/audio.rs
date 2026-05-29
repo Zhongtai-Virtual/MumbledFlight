@@ -723,30 +723,38 @@ pub fn start_capture(
                 &config.into(),
                 move |data: &[f32], _| {
                     let gain = f32::from_bits(mic_gain.load(Ordering::Relaxed));
+                    // Downmix to mono without gain so RNNoise sees a normalised signal.
                     if num_channels > 1 {
                         for chunk in data.chunks_exact(num_channels) {
                             let sum: f32 = chunk.iter().sum();
-                            capture_buffer.push((sum / num_channels as f32) * gain);
+                            capture_buffer.push(sum / num_channels as f32);
                         }
                     } else {
-                        for &s in data { capture_buffer.push(s * gain); }
+                        capture_buffer.extend_from_slice(data);
                     }
 
                     if let Some(d) = denoiser.as_mut() {
                         // RNNoise processes fixed 480-sample frames scaled to the i16 range.
                         // Stack scratch buffers — no heap allocation on the audio callback thread.
+                        // Gain is applied after denoising so the denoiser sees normalised levels.
+                        // VAD probability < 0.5 → emit silence to suppress non-speech noise.
                         const FRAME: usize = DenoiseState::FRAME_SIZE;
+                        const VAD_THRESHOLD: f32 = 0.5;
                         let mut scaled = [0.0f32; FRAME];
                         let mut out = [0.0f32; FRAME];
                         while capture_buffer.len() >= FRAME {
                             for (dst, src) in scaled.iter_mut().zip(capture_buffer.drain(..FRAME)) {
                                 *dst = src * 32768.0;
                             }
-                            d.process_frame(&mut out, &scaled);
-                            output_buffer.extend(out.iter().map(|s| s / 32768.0));
+                            let vad = d.process_frame(&mut out, &scaled);
+                            if vad >= VAD_THRESHOLD {
+                                output_buffer.extend(out.iter().map(|s| s / 32768.0 * gain));
+                            } else {
+                                output_buffer.resize(output_buffer.len() + FRAME, 0.0);
+                            }
                         }
                     } else {
-                        output_buffer.append(&mut capture_buffer);
+                        output_buffer.extend(capture_buffer.drain(..).map(|s| s * gain));
                     }
 
                     while output_buffer.len() >= 960 {
