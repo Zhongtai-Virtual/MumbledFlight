@@ -120,33 +120,26 @@ impl GuiState {
                     row("Flight ID", "##fid", &mut flight_id);
                     row("Username", "##usr", &mut user_name);
 
-                    let vol_slider = |label: &str, id: &str, v: &mut f32, default: f32| {
+                    let slider = |label: &str, id: &str, v: &mut f32,
+                                      min: f32, max: f32,
+                                      flags: imgui::SliderFlags, default: f32| {
                         ui.text(label);
                         ui.same_line();
                         ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                         ui.set_next_item_width(fw);
-                        ui.slider_config(id, 0.1_f32, 20.0_f32)
-                            .flags(imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT)
+                        ui.slider_config(id, min, max)
+                            .flags(flags)
                             .display_format("")
                             .build(v);
                         if ui.is_item_hovered() && ui.is_mouse_double_clicked(imgui::MouseButton::Left) {
                             *v = default;
                         }
                     };
-                    vol_slider("Voice Vol", "##ambient_vol", &mut ambient_vol, 1.0);
-                    vol_slider("IC Vol", "##ic_vol", &mut ic_vol, 1.0);
-                    vol_slider("Mic Gain", "##gain", &mut gain, 1.0);
-
-                    ui.text("Spatial");
-                    ui.same_line();
-                    ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                    ui.set_next_item_width(fw);
-                    ui.slider_config("##spatial", 0.0_f32, 2.0_f32)
-                        .display_format("")
-                        .build(&mut spatial_width);
-                    if ui.is_item_hovered() && ui.is_mouse_double_clicked(imgui::MouseButton::Left) {
-                        spatial_width = 1.0;
-                    }
+                    let vol_flags = imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT;
+                    slider("Voice Vol", "##ambient_vol", &mut ambient_vol, 0.1, 20.0, vol_flags, 1.0);
+                    slider("IC Vol",    "##ic_vol",      &mut ic_vol,      0.1, 20.0, vol_flags, 1.0);
+                    slider("Mic Gain",  "##gain",        &mut gain,        0.1, 20.0, vol_flags, 1.0);
+                    slider("Spatial",   "##spatial",     &mut spatial_width, 0.0, 2.0, imgui::SliderFlags::empty(), 1.0);
 
                     ui.text("Denoise");
                     ui.same_line();
