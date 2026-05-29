@@ -138,7 +138,7 @@ impl GuiState {
                     ui.same_line();
                     ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
                     ui.set_next_item_width(fw);
-                    ui.slider_config("##spatial", 0.0_f32, 1.0_f32)
+                    ui.slider_config("##spatial", 0.0_f32, 2.0_f32)
                         .display_format("")
                         .build(&mut spatial_width);
 

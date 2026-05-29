@@ -229,7 +229,10 @@ impl MumbleVoipClient {
         let width = f32::from_bits(self.spatial_width.load(std::sync::atomic::Ordering::Relaxed));
         let (gain_l, gain_r) = if (width - 1.0).abs() > 1e-4 {
             let mid = (gain_l + gain_r) * 0.5;
-            (mid + (gain_l - mid) * width, mid + (gain_r - mid) * width)
+            (
+                (mid + (gain_l - mid) * width).max(0.0),
+                (mid + (gain_r - mid) * width).max(0.0),
+            )
         } else {
             (gain_l, gain_r)
         };
