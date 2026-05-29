@@ -9,6 +9,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::collections::VecDeque;
 use std::io::Read;
 
+// RNNoise VAD probability below this value is treated as non-speech.
+// Exposed at module scope so hold/fade extensions can reference it without
+// navigating into the capture closure.
+const VAD_THRESHOLD: f32 = 0.5;
+
 // Serialises concurrent CPAL device-open calls. On Linux also gates the
 // PIPEWIRE_NODE env-var mutation, which is unsound under concurrent writes.
 fn device_open_lock() -> &'static Mutex<()> {
@@ -737,9 +742,9 @@ pub fn start_capture(
                         // RNNoise processes fixed 480-sample frames scaled to the i16 range.
                         // Stack scratch buffers — no heap allocation on the audio callback thread.
                         // Gain is applied after denoising so the denoiser sees normalised levels.
-                        // VAD probability < 0.5 → emit silence to suppress non-speech noise.
+                        // Below VAD_THRESHOLD, scale by vad/threshold rather than hard-zeroing:
+                        // a binary step to zero creates an audible click at speech boundaries.
                         const FRAME: usize = DenoiseState::FRAME_SIZE;
-                        const VAD_THRESHOLD: f32 = 0.5;
                         let mut scaled = [0.0f32; FRAME];
                         let mut out = [0.0f32; FRAME];
                         while capture_buffer.len() >= FRAME {
@@ -747,14 +752,16 @@ pub fn start_capture(
                                 *dst = src * 32768.0;
                             }
                             let vad = d.process_frame(&mut out, &scaled);
-                            if vad >= VAD_THRESHOLD {
-                                output_buffer.extend(out.iter().map(|s| s / 32768.0 * gain));
-                            } else {
-                                output_buffer.resize(output_buffer.len() + FRAME, 0.0);
-                            }
+                            let scale = if vad >= VAD_THRESHOLD { gain } else { gain * (vad / VAD_THRESHOLD) };
+                            output_buffer.extend(out.iter().map(|s| s / 32768.0 * scale));
                         }
                     } else {
-                        output_buffer.extend(capture_buffer.drain(..).map(|s| s * gain));
+                        // Apply gain in-place before the O(1) append so the hot path
+                        // (gain == 1.0, the default) avoids per-sample work entirely.
+                        if gain != 1.0 {
+                            for s in &mut capture_buffer { *s *= gain; }
+                        }
+                        output_buffer.append(&mut capture_buffer);
                     }
 
                     while output_buffer.len() >= 960 {
