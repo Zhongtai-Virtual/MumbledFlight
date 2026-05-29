@@ -26,7 +26,7 @@ use tokio_util::codec::Framed;
 
 use crate::state::CockpitState;
 use super::session::{Control, Session};
-use super::spatial::{aircraft_skin_gains, compute_stereo_gains, encode_pos, is_inside_aircraft, point_gain, xplane_to_mumble, MAIN_DOOR_POS};
+use super::spatial::{aircraft_skin_gains, compute_stereo_gains, encode_pos, is_inside_aircraft, pa_gain, xplane_to_mumble};
 
 const MUMBLE_VERSION: u32 = 0x00010400;
 
@@ -189,42 +189,14 @@ impl MumbleVoipClient {
 
         let (gain_l, gain_r, debug_msg) = match source_pos {
             None => {
-                // PA: omnidirectional in the cabin.
-                // The main door sits in the cockpit zone (Mumble Z=5.0 > cabin door Z=4.1),
-                // so `att_at_door` — the inside-model gain at that position — already accounts
-                // for cabin-door and distance attenuation. Using it as the starting level for
-                // the outside two-step ensures the gain is continuous when crossing the doorway.
-                const CABIN_DOOR_Z: f32 = 4.1;
-                const PA_DIST_MAX:  f32 = 8.0;
-                const SKIN_BASE:    f32 = 0.15;
-
-                let pa_att_inside = |z: f32| -> f32 {
-                    if z > CABIN_DOOR_Z {
-                        let door_factor = super::spatial::door_attenuation(z, 0.0, CABIN_DOOR_Z, door, 0.95);
-                        let dist = z - CABIN_DOOR_Z;
-                        if dist >= PA_DIST_MAX { 0.0 } else {
-                            let t = 1.0 - dist / PA_DIST_MAX;
-                            door_factor * t * t
-                        }
-                    } else {
-                        1.0
-                    }
-                };
-
-                let att = if !is_inside_aircraft(lpos) {
-                    // Outside: start from the gain at the main door opening, then apply
-                    // door openness and distance falloff from door to listener.
-                    let att_at_door = pa_att_inside(MAIN_DOOR_POS[2]);
-                    (SKIN_BASE + door_main * point_gain(MAIN_DOOR_POS, lpos)) * att_at_door
-                } else {
-                    pa_att_inside(lpos[2])
-                };
-                let g = 0.5 * att;
+                // PA: omnidirectional, equal-power flat stereo. pa_gain handles the cabin /
+                // through-the-door / outside-the-hull attenuation (see spatial::pa_gain).
+                let g = pa_gain(lpos, door, door_main);
                 let outside = !is_inside_aircraft(lpos);
                 (g, g, format!(
                     "[Spatial:PA:{}] outside={outside} door={door:.2} door_main={door_main:.2} \
-                     dist_from_cabin_door={:.2} att={att:.3} gain={g:.3}",
-                    remote_sid, (lpos[2] - CABIN_DOOR_Z).max(0.0),
+                     dist_from_cabin_door={:.2} gain={g:.3}",
+                    remote_sid, (lpos[2] - 4.1).max(0.0),
                 ))
             }
             Some(spos) => {

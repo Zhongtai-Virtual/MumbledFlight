@@ -89,6 +89,45 @@ pub fn aircraft_skin_gains(
     (hull.0 + door_path.0, hull.1 + door_path.1)
 }
 
+/// Public-address attenuation for a listener at `listener_pos`. PA is omnidirectional and
+/// rendered as equal-power flat stereo, so this returns the single per-channel gain (L == R).
+///
+/// - Inside the cabin (Mumble Z ≤ cabin-door Z) PA plays at full level.
+/// - Past the cabin door it falls off by door openness × quadratic distance.
+/// - Outside the fuselage the level is seeded from the gain at the main-door opening (so it is
+///   continuous through the doorway), then attenuated by hull transmission plus the open
+///   main-door aperture path.
+pub fn pa_gain(listener_pos: [f32; 3], door: f32, door_main: f32) -> f32 {
+    const CABIN_DOOR_Z: f32 = 4.1;
+    const PA_DIST_MAX: f32 = 8.0;
+    const SKIN_BASE: f32 = 0.15;
+
+    // Inside-cabin PA attenuation as a function of the listener's Mumble Z.
+    let att_inside = |z: f32| -> f32 {
+        if z > CABIN_DOOR_Z {
+            let door_factor = door_attenuation(z, 0.0, CABIN_DOOR_Z, door, 0.95);
+            let dist = z - CABIN_DOOR_Z;
+            if dist >= PA_DIST_MAX {
+                0.0
+            } else {
+                let t = 1.0 - dist / PA_DIST_MAX;
+                door_factor * t * t
+            }
+        } else {
+            1.0
+        }
+    };
+
+    let att = if is_inside_aircraft(listener_pos) {
+        att_inside(listener_pos[2])
+    } else {
+        let att_at_door = att_inside(MAIN_DOOR_POS[2]);
+        (SKIN_BASE + door_main * point_gain(MAIN_DOOR_POS, listener_pos)) * att_at_door
+    };
+
+    0.5 * att
+}
+
 /// Returns 1.0 when source and listener are on the same side of the door,
 /// otherwise scales by how open it is.
 pub fn door_attenuation(listener_z: f32, source_z: f32, door_z: f32, open: f32, open_threshold: f32) -> f32 {
@@ -306,5 +345,33 @@ mod tests {
         // can only raise the gain — and here the positions give a strictly louder result.
         assert!(open.0 > shut.0, "open {} should exceed shut {}", open.0, shut.0);
         assert!(open.1 > shut.1, "open {} should exceed shut {}", open.1, shut.1);
+    }
+
+    #[test]
+    fn pa_full_volume_in_cabin() {
+        // Listener inside the fuselage, forward of the cabin door (Z ≤ 4.1) → full PA,
+        // equal-power flat stereo at 0.5 per channel.
+        assert!(approx(pa_gain([0.0, 0.0, 0.0], 1.0, 1.0), 0.5));
+    }
+
+    #[test]
+    fn pa_muffled_through_closed_cabin_door() {
+        // Listener inside the hull but past the cabin door (cockpit side, Z > 4.1):
+        // an open cabin door passes more PA than a closed one, and both are below cabin level.
+        let cockpit = [0.0, 0.0, 6.0];
+        let open = pa_gain(cockpit, 1.0, 1.0);
+        let closed = pa_gain(cockpit, 0.0, 1.0);
+        assert!(open > closed, "open door {open} should pass more than closed {closed}");
+        assert!(open < 0.5, "through-door PA {open} should be quieter than in-cabin 0.5");
+    }
+
+    #[test]
+    fn pa_outside_hull_is_quietest_and_door_helps() {
+        let outside = [5.0, 0.0, 0.0]; // x beyond the fuselage
+        let g_out = pa_gain(outside, 1.0, 1.0);
+        // Quieter than standing in the cabin.
+        assert!(g_out < pa_gain([0.0, 0.0, 0.0], 1.0, 1.0));
+        // Opening the main door can only add the aperture path, never reduce the level.
+        assert!(g_out >= pa_gain(outside, 1.0, 0.0));
     }
 }
