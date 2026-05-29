@@ -493,10 +493,52 @@ pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
     });
 
     #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (source_name, tx);
-        warn!("[Audio:Loopback] Loopback capture is only supported on Linux (via PipeWire)");
-    }
+    std::thread::spawn(move || {
+        let _guard = device_open_lock().lock().unwrap();
+        let device = select_device(Some(&source_name), true);
+        let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
+        let config = match device.supported_input_configs() {
+            Ok(mut cfgs) => cfgs.find(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000),
+            Err(e) => { error!("[Audio:Loopback] failed to query configs for '{device_name}': {e}"); return; }
+        };
+        let config = match config {
+            Some(c) => c.with_sample_rate(cpal::SampleRate(48000)),
+            None => { error!("[Audio:Loopback] '{device_name}' does not support 48 kHz"); return; }
+        };
+        let num_channels = config.channels() as usize;
+        info!("[Audio:Loopback] Active: {device_name} (48kHz, {num_channels} ch)");
+
+        let mut accum: Vec<f32> = Vec::new();
+        let _stream = match device.build_input_stream(
+            &config.into(),
+            move |data: &[f32], _| {
+                // Downmix to mono then accumulate into 960-sample Opus frames.
+                if num_channels > 1 {
+                    for chunk in data.chunks_exact(num_channels) {
+                        let sum: f32 = chunk.iter().sum();
+                        accum.push(sum / num_channels as f32);
+                    }
+                } else {
+                    accum.extend_from_slice(data);
+                }
+                while accum.len() >= 960 {
+                    let frame: Vec<f32> = accum.drain(..960).collect();
+                    let _ = tx.try_send(frame);
+                }
+            },
+            |err| error!("[Audio:Loopback] stream error: {err}"),
+            None,
+        ) {
+            Ok(s) => s,
+            Err(e) => { error!("[Audio:Loopback] failed to build stream for '{device_name}': {e}"); return; }
+        };
+        if let Err(e) = _stream.play() {
+            error!("[Audio:Loopback] failed to start stream for '{device_name}': {e}");
+            return;
+        }
+        // Park the thread — the stream keeps running as long as this thread lives.
+        loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
+    });
 }
 
 #[cfg(target_os = "linux")]
