@@ -422,4 +422,27 @@ mod tests {
         cs.update_from_float(DataRefId::SharedCkptZone, 1.999);
         assert_eq!(cs.zone, SharedCockpitZone::AroundOrInAircraft);
     }
+
+    #[test]
+    fn dataref_names_unique_and_round_trip() {
+        // Guards the "add a DataRef in three places" convention: every variant listed in
+        // all() must have a unique name() that round-trips through from_name().
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for &id in DataRefId::all() {
+            let name = id.name();
+            assert!(seen.insert(name), "duplicate DataRef name: {name}");
+            assert_eq!(DataRefId::from_name(name), Some(id), "from_name failed for {name}");
+        }
+        // The fuselage skin model's main-door DataRef is registered.
+        assert!(DataRefId::all().contains(&DataRefId::DoorMain));
+    }
+
+    #[test]
+    fn door_main_updates_and_defaults_open() {
+        let mut cs = CockpitState::default();
+        assert_eq!(cs.door_main, 1.0); // open by default — no spurious attenuation pre-DataRef
+        cs.update_from_float(DataRefId::DoorMain, 0.0);
+        assert_eq!(cs.door_main, 0.0);
+    }
 }

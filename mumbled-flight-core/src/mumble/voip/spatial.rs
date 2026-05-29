@@ -258,4 +258,53 @@ mod tests {
         let (l, r) = compute_stereo_gains([0.0, 0.0, 0.005], listener_pos, listener_rot, 1.0, 1.0);
         assert!(approx(l, 1.0) && approx(r, 1.0));
     }
+
+    #[test]
+    fn aircraft_aabb_membership() {
+        assert!(is_inside_aircraft([0.0, 0.0, 0.0]));
+        assert!(is_inside_aircraft(MAIN_DOOR_POS)); // door sits in the hull wall, treated as inside
+        // Outside on each axis.
+        assert!(!is_inside_aircraft([2.0, 0.0, 0.0]));   // x beyond ±1.2
+        assert!(!is_inside_aircraft([0.0, 2.0, 0.0]));   // y beyond +1.2
+        assert!(!is_inside_aircraft([0.0, 0.0, 10.0]));  // z beyond +8 (tail)
+        assert!(!is_inside_aircraft([0.0, 0.0, -3.0]));  // z beyond -1.7 (nose)
+    }
+
+    #[test]
+    fn point_gain_curve() {
+        // Same 1.5 m → 8 m quadratic falloff as compute_stereo_gains.
+        assert!(approx(point_gain([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]), 1.0));   // ≤ 1.5 m
+        assert!(approx(point_gain([0.0, 0.0, 0.0], [0.0, 0.0, 10.0]), 0.0));  // ≥ 8 m
+        // dist 4.75 m → t = 1 - (4.75-1.5)/6.5 = 0.5 → 0.25
+        assert!(approx(point_gain([0.0, 0.0, 0.0], [0.0, 0.0, 4.75]), 0.25));
+    }
+
+    #[test]
+    fn skin_gains_hull_only_when_main_door_shut() {
+        const SKIN_BASE: f32 = 0.15;
+        let src = [0.0, 0.0, 0.0];          // inside the fuselage
+        let listener = [5.0, 0.0, 0.0];     // outside (x beyond +1.2)
+        let rot = [0.0, 0.0, 0.0];
+
+        // With the main door shut, only the hull-transmission path survives:
+        // SKIN_BASE × the normal spatial gain.
+        let (hl, hr) = compute_stereo_gains(src, listener, rot, 1.0, 1.0);
+        let (sl, sr) = aircraft_skin_gains(src, listener, rot, 1.0, 1.0, 0.0);
+        assert!(approx(sl, hl * SKIN_BASE));
+        assert!(approx(sr, hr * SKIN_BASE));
+    }
+
+    #[test]
+    fn skin_gains_open_main_door_adds_aperture_path() {
+        let src = [0.0, 0.0, 0.0];
+        let listener = [5.0, 0.0, 0.0];
+        let rot = [0.0, 0.0, 0.0];
+
+        let shut = aircraft_skin_gains(src, listener, rot, 1.0, 1.0, 0.0);
+        let open = aircraft_skin_gains(src, listener, rot, 1.0, 1.0, 1.0);
+        // The door-aperture path is additive and non-negative, so opening the main door
+        // can only raise the gain — and here the positions give a strictly louder result.
+        assert!(open.0 > shut.0, "open {} should exceed shut {}", open.0, shut.0);
+        assert!(open.1 > shut.1, "open {} should exceed shut {}", open.1, shut.1);
+    }
 }

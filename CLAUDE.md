@@ -46,9 +46,11 @@ cargo test -p mumbled-flight-core stereo_gains_pan_toward_source_side
 ```
 
 Unit tests currently cover the two pure modules, `spatial.rs` (gain curve, door attenuation,
-position round-trip, stereo panning/falloff) and `state.rs` (seat-gated control ownership,
-`from_int` boundaries, the f32 update path). The audio I/O and protocol layers are not yet
-tested. `cargo clippy --workspace` is expected to be **clean** — keep it that way.
+position round-trip, stereo panning/falloff, fuselage AABB, point falloff, the skin-crossing
+model) and `state.rs` (seat-gated control ownership, `from_int` boundaries, the f32 update path,
+and a DataRef name uniqueness/round-trip guard for the "three places" convention). The audio I/O
+and protocol layers are not yet tested. `cargo clippy --workspace` is expected to be **clean** —
+keep it that way.
 
 > Building/testing `mumbled-flight-core` pulls in CPAL → ALSA and PipeWire, so the Linux system
 > deps below must be installed or `cargo test` fails at the `alsa-sys` build script.
