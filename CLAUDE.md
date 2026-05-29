@@ -82,7 +82,7 @@ cargo run -p mumbled-flight-cli -- --list-devices
 
 ### 1. Cockpit state is the single source of truth (`core/src/state.rs`)
 `CockpitState` is a plain struct holding head pose, seat, role, zone, PTT switches, mic selector,
-speaker/IC volumes, door positions, and xPilot radio flags. It is wrapped in `Arc<Mutex<_>>` and
+speaker/IC volumes, door positions (`door` cabin, `door_lav` lavatory, `door_main` main entry), and xPilot radio flags. It is wrapped in `Arc<Mutex<_>>` and
 shared across every async client.
 
 - `DataRefId` is the **canonical enum of every X-Plane DataRef** the app cares about. Each variant
@@ -153,7 +153,13 @@ channel, spawned through the shared `spawn_client` helper:
 - `spatial.rs` — **pure math, no I/O.** `compute_stereo_gains` builds the listener's head basis
   (forward/top/right from psi/the/phi), projects the source direction onto the right vector
   (`calc_gain`, Mumble's curve), applies distance falloff (1.5 m→8 m), and `door_attenuation` for
-  the cabin and lavatory doors. Also Opus encode/decode and position byte (de)serialization.
+  the cabin and lavatory doors. `aircraft_skin_gains` handles voice sources crossing the fuselage
+  boundary: two summed paths (hull transmission 0.15 + two-step door aperture: scalar `point_gain`
+  from source to `MAIN_DOOR_POS`, then full stereo from door to listener). `pa_gain` computes the
+  scalar PA attenuation for a listener position: full in cabin, cabin-door-attenuated in cockpit,
+  and seeded from the gain at the main-door opening when outside (so the level is continuous through
+  the doorway). `is_inside_aircraft` tests a Mumble-coord position against the CL650 fuselage AABB.
+  Also Opus encode/decode and position byte (de)serialization.
 
 > **Coordinate convention (gotcha):** X-Plane is **aft-positive Z**, Mumble is **forward-positive
 > Z** — they differ only in the sign of Z. Convert at every X-Plane↔Mumble boundary with the single
@@ -184,7 +190,7 @@ combo encodes: index 0 = disabled, 1 = auto-sink (`__auto__`), 2+ = an input dev
 - The plugin must export `XPlugin*` symbols (`#[no_mangle] extern "C"`); callbacks invoked by
   X-Plane use `extern "C-unwind"`. XPLM handle types are raw pointers, hand-marked `Send`, and
   must only be touched on the main thread.
-- `build.rs` in the plugin injects `BUILD_TIMESTAMP` (chrono) used in the startup log line.
+- `build.rs` in the plugin injects `BUILD_TIMESTAMP` (chrono) used in the startup log line. It uses `rerun-if-changed=__force_rerun__` (a non-existent path) so Cargo always re-runs it and the timestamp is never stale.
 - The `--denoise` flag enables **RNNoise** noise suppression (via `nnnoiseless`) on the capture
   side in `audio.rs::start_capture`. It processes 480-sample (10 ms) frames scaled to the i16
   range; the denoiser is stateful and created once per capture stream. The flag threads from both

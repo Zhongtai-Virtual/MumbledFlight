@@ -61,6 +61,8 @@ impl GuiState {
         let mut flight_id = self.flight_id.clone();
         let mut user_name = self.user_name.clone();
         let mut gain = self.gain;
+        let mut ambient_vol = self.ambient_vol;
+        let mut ic_vol = self.ic_vol;
         let mut denoise = self.denoise;
         let mut selected_ambient = self.selected_ambient;
         let mut selected_ic = self.selected_ic;
@@ -72,8 +74,8 @@ impl GuiState {
         let voip_statuses = self.voip_statuses.clone();
         let output_devices = self.output_devices.clone();
         let output_device_labels = self.output_device_labels.clone();
-        let mic_input_device_labels   = self.mic_input_device_labels.clone();
-        let mut selected_mic          = self.selected_mic;
+        let mic_input_device_labels = self.mic_input_device_labels.clone();
+        let mut selected_mic = self.selected_mic;
         let radio_input_device_labels = self.radio_input_device_labels.clone();
         let mut selected_radio = self.selected_radio;
         let mouse_pos = self.mouse_pos;
@@ -117,14 +119,19 @@ impl GuiState {
                     row("Flight ID", "##fid", &mut flight_id);
                     row("Username", "##usr", &mut user_name);
 
-                    ui.text("Mic Gain");
-                    ui.same_line();
-                    ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
-                    ui.set_next_item_width(fw);
-                    ui.slider_config("##gain", 0.1_f32, 20.0_f32)
-                        .flags(imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT)
-                        .display_format("")
-                        .build(&mut gain);
+                    let vol_slider = |label: &str, id: &str, v: &mut f32| {
+                        ui.text(label);
+                        ui.same_line();
+                        ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                        ui.set_next_item_width(fw);
+                        ui.slider_config(id, 0.1_f32, 20.0_f32)
+                            .flags(imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT)
+                            .display_format("")
+                            .build(v);
+                    };
+                    vol_slider("Voice Vol", "##ambient_vol", &mut ambient_vol);
+                    vol_slider("IC Vol", "##ic_vol", &mut ic_vol);
+                    vol_slider("Mic Gain", "##gain", &mut gain);
 
                     ui.text("Denoise");
                     ui.same_line();
@@ -164,9 +171,10 @@ impl GuiState {
                     }
 
                     if !mic_input_device_labels.is_empty() {
-                        let mic_labels: Vec<String> = std::iter::once("(system default)".to_string())
-                            .chain(mic_input_device_labels.iter().cloned())
-                            .collect();
+                        let mic_labels: Vec<String> =
+                            std::iter::once("(system default)".to_string())
+                                .chain(mic_input_device_labels.iter().cloned())
+                                .collect();
                         let mic_preview = mic_labels
                             .get(selected_mic as usize)
                             .map(|s| s.as_str())
@@ -180,7 +188,8 @@ impl GuiState {
                             let avail_w = ui.content_region_avail()[0];
                             for (i, label) in mic_labels.iter().enumerate() {
                                 let display = fit_label(ui, label, avail_w);
-                                if ui.selectable_config(&*display)
+                                if ui
+                                    .selectable_config(&*display)
                                     .selected(selected_mic == i as i32)
                                     .build()
                                 {
@@ -277,7 +286,8 @@ impl GuiState {
                         let map = statuses.lock().unwrap();
                         // Known clients in display order; unknown keys (future clients) follow.
                         const KNOWN: &[&str] = &["Voice", "IC", "PA", "Radio"];
-                        let extras: Vec<&str> = map.keys()
+                        let extras: Vec<&str> = map
+                            .keys()
                             .map(|s| s.as_str())
                             .filter(|k| !KNOWN.contains(k))
                             .collect();
@@ -285,9 +295,13 @@ impl GuiState {
                             if let Some(slot) = map.get(label) {
                                 let s = slot.lock().unwrap();
                                 let (color, tag) = match *s {
-                                    ClientStatus::Connecting   => ([1.0f32, 0.8, 0.2, 1.0], "connecting"),
-                                    ClientStatus::Connected    => ([0.3, 1.0, 0.3, 1.0], "connected"),
-                                    ClientStatus::Disconnected => ([0.8, 0.3, 0.3, 1.0], "disconnected"),
+                                    ClientStatus::Connecting => {
+                                        ([1.0f32, 0.8, 0.2, 1.0], "connecting")
+                                    }
+                                    ClientStatus::Connected => ([0.3, 1.0, 0.3, 1.0], "connected"),
+                                    ClientStatus::Disconnected => {
+                                        ([0.8, 0.3, 0.3, 1.0], "disconnected")
+                                    }
                                 };
                                 ui.text_disabled(format!("{label}: "));
                                 ui.same_line();
@@ -318,10 +332,18 @@ impl GuiState {
         if let Some(ref atomic) = self.mic_gain_live {
             atomic.store(gain.to_bits(), Ordering::Relaxed);
         }
+        self.ambient_vol = ambient_vol;
+        if let Some(ref atomic) = self.ambient_vol_live {
+            atomic.store(ambient_vol.to_bits(), Ordering::Relaxed);
+        }
+        self.ic_vol = ic_vol;
+        if let Some(ref atomic) = self.ic_vol_live {
+            atomic.store(ic_vol.to_bits(), Ordering::Relaxed);
+        }
         self.selected_ambient = selected_ambient;
-        self.selected_ic      = selected_ic;
-        self.selected_mic     = selected_mic;
-        self.selected_radio   = selected_radio;
+        self.selected_ic = selected_ic;
+        self.selected_mic = selected_mic;
+        self.selected_radio = selected_radio;
         self.denoise = denoise;
         if log_level != self.log_level {
             self.log_level = log_level;

@@ -712,7 +712,7 @@ pub fn start_capture(
     });
 }
 
-pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option<String>) {
+pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option<String>, vol: Arc<AtomicU32>) {
     // Build and run entirely inside one thread — CPAL Stream is !Send on ALSA,
     // so creating and dropping it in the same thread avoids any Send requirement.
     std::thread::spawn(move || {
@@ -767,7 +767,11 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
         }; // PIPEWIRE_NODE lock released — stream is already connected
 
         let mut last_log = std::time::Instant::now();
-        while let Some(stereo_frame_48k) = rx.blocking_recv() {
+        while let Some(mut stereo_frame_48k) = rx.blocking_recv() {
+            let v = f32::from_bits(vol.load(std::sync::atomic::Ordering::Relaxed));
+            if (v - 1.0).abs() > 1e-4 {
+                for s in &mut stereo_frame_48k { *s *= v; }
+            }
             let mut lock = pending_samples.lock().unwrap();
 
             if device_channels == 2 {

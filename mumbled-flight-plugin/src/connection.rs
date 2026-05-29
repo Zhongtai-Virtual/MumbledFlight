@@ -57,6 +57,10 @@ pub fn start(ps: &mut PluginState) {
     let flight_id = ps.gui.flight_id.clone();
     let mic_gain = Arc::new(AtomicU32::new(ps.gui.gain.to_bits()));
     let mic_gain_for_thread = Arc::clone(&mic_gain);
+    let ambient_vol = Arc::new(AtomicU32::new(ps.gui.ambient_vol.to_bits()));
+    let ambient_vol_for_thread = Arc::clone(&ambient_vol);
+    let ic_vol = Arc::new(AtomicU32::new(ps.gui.ic_vol.to_bits()));
+    let ic_vol_for_thread = Arc::clone(&ic_vol);
     let denoise = ps.gui.denoise;
     let ambient_output = ps.gui.ambient_output();
     let ic_output      = ps.gui.ic_output();
@@ -85,13 +89,17 @@ pub fn start(ps: &mut PluginState) {
             server_addr,
             ambient_output,
             ic_output,
+            ambient_vol: ambient_vol_for_thread,
+            ic_vol: ic_vol_for_thread,
             statuses: statuses_clone,
             shutdown: shutdown_for_stack,
         })
         .await;
     });
 
-    ps.gui.mic_gain_live = Some(Arc::clone(&mic_gain));
+    ps.gui.mic_gain_live    = Some(Arc::clone(&mic_gain));
+    ps.gui.ambient_vol_live = Some(Arc::clone(&ambient_vol));
+    ps.gui.ic_vol_live      = Some(Arc::clone(&ic_vol));
     ps.gui.voip_statuses = Some(statuses);
     ps.connection = Some(MumbleConnection {
         cockpit_state,
@@ -110,7 +118,9 @@ pub fn start(ps: &mut PluginState) {
 
 pub fn stop(ps: &mut PluginState) {
     ps.connection = None;
-    ps.gui.mic_gain_live = None;
+    ps.gui.mic_gain_live    = None;
+    ps.gui.ambient_vol_live = None;
+    ps.gui.ic_vol_live      = None;
     ps.gui.voip_statuses = None;
     ps.gui.is_connected = false;
     ps.gui.status = String::new();

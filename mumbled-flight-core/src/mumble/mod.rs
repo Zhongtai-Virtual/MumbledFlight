@@ -57,6 +57,8 @@ pub struct MumbleStackConfig {
     pub server_addr: SocketAddr,
     pub ambient_output: Option<String>,
     pub ic_output: Option<String>,
+    pub ambient_vol: Arc<AtomicU32>,
+    pub ic_vol: Arc<AtomicU32>,
     pub statuses: VoipStatuses,
     /// Set to `true` by the frontend when the connection is torn down. The microphone capture
     /// stream watches this and exits, dropping its CPAL/PipeWire stream instead of leaking it
@@ -96,6 +98,8 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         server_addr,
         ambient_output,
         ic_output,
+        ambient_vol,
+        ic_vol,
         statuses,
         shutdown,
     } = cfg;
@@ -138,8 +142,8 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     let (ambient_pb_tx, ambient_pb_rx) = mpsc::channel(1024);
     let (ic_pb_tx, ic_pb_rx) = mpsc::channel(1024);
     let ic_monitor_tx = ic_pb_tx.clone();
-    start_playback(ambient_pb_rx, ambient_output);
-    start_playback(ic_pb_rx, ic_output);
+    start_playback(ambient_pb_rx, ambient_output, ambient_vol);
+    start_playback(ic_pb_rx, ic_output, ic_vol);
 
     // Helper: allocate a status slot and register it in the shared map.
     let mk_status = |label: &str| -> Arc<Mutex<VoipClientStatus>> {

@@ -12,6 +12,8 @@ pub struct PluginConfig {
     pub user_name: String,
     /// Microphone input gain multiplier (applies to captured audio only, not playback).
     pub gain: f32,
+    pub ambient_vol: f32,
+    pub ic_vol: f32,
     pub denoise: bool,
     pub ambient_device: String,
     pub ic_device: String,
@@ -28,6 +30,8 @@ impl Default for PluginConfig {
             flight_id: String::new(),
             user_name: String::new(),
             gain: 1.0,
+            ambient_vol: 1.0,
+            ic_vol: 1.0,
             denoise: false,
             ambient_device: String::new(),
             ic_device: String::new(),

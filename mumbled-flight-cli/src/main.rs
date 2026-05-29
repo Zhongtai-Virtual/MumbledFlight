@@ -209,6 +209,8 @@ async fn main() -> Result<()> {
             server_addr,
             ambient_output: None,
             ic_output: None,
+            ambient_vol: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            ic_vol:      Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             statuses,
             // One-shot process — never torn down, so the flag is never set.
             shutdown: Arc::new(AtomicBool::new(false)),
