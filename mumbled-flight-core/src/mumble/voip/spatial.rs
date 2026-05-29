@@ -18,6 +18,77 @@ pub fn calc_gain(dot: f32) -> f32 {
     df + (1.0 - df) * 0.25
 }
 
+/// CL650 fuselage AABB in Mumble coordinates (forward-positive Z).
+/// Source X-Plane bounds: x[-1.2,1.2] y[-1,1.2] z[-8,1.7]; Z is negated for Mumble.
+const FUSELAGE_X_MIN: f32 = -1.2;
+const FUSELAGE_X_MAX: f32 =  1.2;
+const FUSELAGE_Y_MIN: f32 = -1.0;
+const FUSELAGE_Y_MAX: f32 =  1.2;
+const FUSELAGE_Z_MIN: f32 = -1.7;  // X-Plane Z=1.7 (nose-ish)
+const FUSELAGE_Z_MAX: f32 =  8.0;  // X-Plane Z=-8 (tail-ish)
+
+/// CL650 main entry door position in Mumble coordinates (X-Plane: x=-1, y=0.5, z=-5).
+pub const MAIN_DOOR_POS: [f32; 3] = [-1.0, 0.5, 5.0];
+
+pub fn is_inside_aircraft(pos: [f32; 3]) -> bool {
+    let [x, y, z] = pos;
+    x > FUSELAGE_X_MIN && x < FUSELAGE_X_MAX
+        && y > FUSELAGE_Y_MIN && y < FUSELAGE_Y_MAX
+        && z > FUSELAGE_Z_MIN && z < FUSELAGE_Z_MAX
+}
+
+/// Scalar distance falloff using the same 1.5 m → 8 m curve as `compute_stereo_gains`.
+pub(super) fn point_gain(from: [f32; 3], to: [f32; 3]) -> f32 {
+    let [fx, fy, fz] = from;
+    let [tx, ty, tz] = to;
+    let dist = ((tx - fx).powi(2) + (ty - fy).powi(2) + (tz - fz).powi(2)).sqrt();
+    const MIN_DIST: f32 = 1.5;
+    const MAX_DIST: f32 = 8.0;
+    if dist <= MIN_DIST {
+        1.0
+    } else if dist >= MAX_DIST {
+        0.0
+    } else {
+        let t = 1.0 - (dist - MIN_DIST) / (MAX_DIST - MIN_DIST);
+        t * t
+    }
+}
+
+/// Aircraft skin attenuation for a voice source crossing the fuselage boundary.
+///
+/// Two acoustic paths are summed:
+/// - Hull transmission (always active): `SKIN_BASE` regardless of door state.
+/// - Door path (when door is open): step 1 — scalar falloff from source to door aperture,
+///   scaled by `door_main`; step 2 — full stereo spatial from door to listener.
+///
+/// Returns `(left, right)` gain multipliers. When source and listener are on the same side
+/// of the fuselage this function is not called — normal `compute_stereo_gains` applies.
+pub fn aircraft_skin_gains(
+    source_pos:  [f32; 3],
+    listener_pos: [f32; 3],
+    listener_rot: [f32; 3],
+    door:         f32,
+    door_lav:     f32,
+    door_main:    f32,
+) -> (f32, f32) {
+    const SKIN_BASE: f32 = 0.15;
+
+    // Path 1: hull transmission — source position, full spatial, attenuated.
+    let (hl, hr) = compute_stereo_gains(source_pos, listener_pos, listener_rot, door, door_lav);
+    let hull = (hl * SKIN_BASE, hr * SKIN_BASE);
+
+    // Path 2: door aperture — step 1 scalar from source to door, step 2 spatial from door to listener.
+    let door_path = if door_main > 0.0 {
+        let step1 = point_gain(source_pos, MAIN_DOOR_POS) * door_main;
+        let (dl, dr) = compute_stereo_gains(MAIN_DOOR_POS, listener_pos, listener_rot, door, door_lav);
+        (step1 * dl, step1 * dr)
+    } else {
+        (0.0, 0.0)
+    };
+
+    (hull.0 + door_path.0, hull.1 + door_path.1)
+}
+
 /// Returns 1.0 when source and listener are on the same side of the door,
 /// otherwise scales by how open it is.
 pub fn door_attenuation(listener_z: f32, source_z: f32, door_z: f32, open: f32, open_threshold: f32) -> f32 {

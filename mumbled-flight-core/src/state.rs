@@ -98,6 +98,8 @@ pub enum DataRefId {
     Contwheel0Rt, Contwheel1Rt,
     DoorCabin,
     DoorLavatory,
+    /// CL650/doors/main/door: 0 = closed, 1 = open
+    DoorMain,
     /// CL650/shared_ckpt/is_guest: user is a shared-cockpit guest (not the host)
     SharedCkptIsGuest,
     /// xpilot/audio/com1_rx: xPilot COM1 receiver active
@@ -139,6 +141,7 @@ impl DataRefId {
             DataRefId::Contwheel1Rt   => "CL650/contwheel/1/rt",
             DataRefId::DoorCabin         => "CL650/doors/cabin/door",
             DataRefId::DoorLavatory      => "CL650/doors/cabin/lavatory",
+            DataRefId::DoorMain          => "CL650/doors/main/door",
             DataRefId::SharedCkptIsGuest => "CL650/shared_ckpt/is_guest",
             DataRefId::XpilotCom1Rx      => "xpilot/audio/com1_rx",
             DataRefId::XpilotCom2Rx      => "xpilot/audio/com2_rx",
@@ -163,6 +166,7 @@ impl DataRefId {
             DataRefId::Contwheel0Rt, DataRefId::Contwheel1Rt,
             DataRefId::DoorCabin,
             DataRefId::DoorLavatory,
+            DataRefId::DoorMain,
             DataRefId::SharedCkptIsGuest,
             DataRefId::XpilotCom1Rx,
             DataRefId::XpilotCom2Rx,
@@ -203,6 +207,8 @@ pub struct CockpitState {
     pub door: f32,
     /// CL650/doors/cabin/lavatory: 0.0 = closed, 1.0 = open
     pub door_lav: f32,
+    /// CL650/doors/main/door: 0.0 = closed, 1.0 = open
+    pub door_main: f32,
     /// xpilot/audio/com1_rx: xPilot COM1 receiver active
     pub com1_rx: bool,
     /// xpilot/audio/com2_rx: xPilot COM2 receiver active
@@ -231,6 +237,7 @@ impl Default for CockpitState {
             ic_vol: 0.0,
             door: 1.0,      // open by default — no spurious attenuation before DataRefs are read
             door_lav: 1.0,
+            door_main: 1.0,
             com1_rx: false,
             com2_rx: false,
             is_guest: false,
@@ -266,7 +273,7 @@ impl CockpitState {
             // Non-seat-specific — always apply
             HeadX | HeadY | HeadZ | HeadPsi | HeadThe | HeadPhi | PlanePsi
             | PilotSeat | SharedCkptRole | SharedCkptZone
-            | DoorCabin | DoorLavatory | SharedCkptIsGuest
+            | DoorCabin | DoorLavatory | DoorMain | SharedCkptIsGuest
             | XpilotCom1Rx | XpilotCom2Rx => true,
         }
     }
@@ -316,8 +323,9 @@ impl CockpitState {
             DataRefId::Contwheel0Ic  | DataRefId::Contwheel1Ic  => if mine { self.contwheel_ic = Self::f32_to_bool(val) },
             DataRefId::Contwheel0Rt  | DataRefId::Contwheel1Rt  => if mine { self.contwheel_rt = Self::f32_to_bool(val) },
 
-            DataRefId::DoorCabin    => self.door     = val,
-            DataRefId::DoorLavatory => self.door_lav = val,
+            DataRefId::DoorCabin    => self.door      = val,
+            DataRefId::DoorLavatory => self.door_lav  = val,
+            DataRefId::DoorMain     => self.door_main = val,
             DataRefId::XpilotCom1Rx     => self.com1_rx  = Self::f32_to_bool(val),
             DataRefId::XpilotCom2Rx     => self.com2_rx  = Self::f32_to_bool(val),
             DataRefId::SharedCkptIsGuest => self.is_guest = Self::f32_to_bool(val),
