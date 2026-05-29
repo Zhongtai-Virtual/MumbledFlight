@@ -98,8 +98,12 @@ impl GuiState {
 
         {
             let ui = ctx.frame();
-            let fw = (width as f32 - 115.0).max(80.0);
-            let p = Ctx { ui: &ui, fw };
+            // Right edge of the widget column = content-region edge. Subtracting the window
+            // padding keeps the right margin symmetric with the left and stops the trailing
+            // reset icons from being jammed against the window's outer edge.
+            let pad_r = ui.clone_style().window_padding[0];
+            let fw = (width as f32 - 115.0 - pad_r).max(80.0);
+            let p = Ctx { ui: &*ui, fw };
 
             ui.window("##main")
                 .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
@@ -239,6 +243,8 @@ impl<'ui> Ctx<'ui> {
         self.ui.input_text(id, buf).build();
     }
 
+    // A labelled slider plus a reset icon; the parameters map 1:1 to imgui's slider config.
+    #[allow(clippy::too_many_arguments)]
     fn slider(&self, label: &str, id: &str, v: &mut f32, min: f32, max: f32, flags: imgui::SliderFlags, default: f32) {
         let icon_sz = self.ui.current_font_size();
         let spacing = self.ui.clone_style().item_spacing[0];
