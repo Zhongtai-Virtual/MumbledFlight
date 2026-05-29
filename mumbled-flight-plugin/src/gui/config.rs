@@ -21,6 +21,8 @@ pub struct PluginConfig {
     pub log_level: String,
     /// "" = disabled, "__auto__" = MumblingRadio auto-sink, anything else = device name.
     pub radio_source: String,
+    /// Stereo width for spatialized playback: 0.0 = mono, 1.0 = full spatial.
+    pub spatial_width: f32,
 }
 
 impl Default for PluginConfig {
@@ -38,6 +40,7 @@ impl Default for PluginConfig {
             mic_device: String::new(),
             log_level: "info".to_string(),
             radio_source: String::new(),
+            spatial_width: 1.0,
         }
     }
 }

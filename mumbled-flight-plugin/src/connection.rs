@@ -66,6 +66,7 @@ pub fn start(ps: &mut PluginState) {
     let ic_output      = ps.gui.ic_output();
     let mic_input      = ps.gui.mic_input();
     let (radio_source, auto_sink) = ps.gui.radio_params();
+    let spatial_width = Arc::new(AtomicU32::new(ps.gui.spatial_width.to_bits()));
 
     let statuses: VoipStatuses = Arc::new(Mutex::new(HashMap::new()));
     let statuses_clone = Arc::clone(&statuses);
@@ -73,6 +74,7 @@ pub fn start(ps: &mut PluginState) {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_for_stack = Arc::clone(&shutdown);
 
+    let spatial_width_for_thread = Arc::clone(&spatial_width);
     runtime.spawn(async move {
         mumble::run_mumble_stack(MumbleStackConfig {
             state: state_clone,
@@ -93,6 +95,7 @@ pub fn start(ps: &mut PluginState) {
             ic_vol: ic_vol_for_thread,
             statuses: statuses_clone,
             shutdown: shutdown_for_stack,
+            spatial_width: spatial_width_for_thread,
         })
         .await;
     });
@@ -100,6 +103,7 @@ pub fn start(ps: &mut PluginState) {
     ps.gui.mic_gain_live    = Some(Arc::clone(&mic_gain));
     ps.gui.ambient_vol_live = Some(Arc::clone(&ambient_vol));
     ps.gui.ic_vol_live      = Some(Arc::clone(&ic_vol));
+    ps.gui.spatial_width_live = Some(spatial_width);
     ps.gui.voip_statuses = Some(statuses);
     ps.connection = Some(MumbleConnection {
         cockpit_state,
@@ -118,9 +122,10 @@ pub fn start(ps: &mut PluginState) {
 
 pub fn stop(ps: &mut PluginState) {
     ps.connection = None;
-    ps.gui.mic_gain_live    = None;
-    ps.gui.ambient_vol_live = None;
-    ps.gui.ic_vol_live      = None;
+    ps.gui.mic_gain_live       = None;
+    ps.gui.ambient_vol_live    = None;
+    ps.gui.ic_vol_live         = None;
+    ps.gui.spatial_width_live  = None;
     ps.gui.voip_statuses = None;
     ps.gui.is_connected = false;
     ps.gui.status = String::new();

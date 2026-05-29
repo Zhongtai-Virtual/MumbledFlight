@@ -56,6 +56,8 @@ pub struct MumbleVoipClient {
     /// None for IC, PA, and radio clients — they never switch channels.
     pub zone_channels: Option<(String, String)>,
     pub test_pos: Option<[f32; 3]>,
+    /// Stereo width for spatialized audio: 0.0 = mono, 1.0 = full spatial. Live-adjustable.
+    pub spatial_width: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl MumbleVoipClient {
@@ -223,6 +225,14 @@ impl MumbleVoipClient {
         if PACKET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(400) {
             log::debug!("{}", debug_msg);
         }
+
+        let width = f32::from_bits(self.spatial_width.load(std::sync::atomic::Ordering::Relaxed));
+        let (gain_l, gain_r) = if (width - 1.0).abs() > 1e-4 {
+            let mid = (gain_l + gain_r) * 0.5;
+            (mid + (gain_l - mid) * width, mid + (gain_r - mid) * width)
+        } else {
+            (gain_l, gain_r)
+        };
 
         let mut out = Vec::with_capacity(mono.len() * 2);
         for &s in mono { out.push(s * gain_l); out.push(s * gain_r); }

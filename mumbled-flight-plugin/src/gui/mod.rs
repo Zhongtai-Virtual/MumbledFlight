@@ -55,6 +55,7 @@ pub struct GuiState {
     pub gain: f32,
     pub ambient_vol: f32,
     pub ic_vol: f32,
+    pub spatial_width: f32,
     pub denoise: bool,
     pub output_devices: Vec<String>,
     pub output_device_labels: Vec<String>,
@@ -89,6 +90,8 @@ pub struct GuiState {
     /// Shared with playback threads while connected — None when disconnected.
     pub ambient_vol_live: Option<Arc<AtomicU32>>,
     pub ic_vol_live: Option<Arc<AtomicU32>>,
+    /// Shared with VoIP clients while connected — None when disconnected.
+    pub spatial_width_live: Option<Arc<AtomicU32>>,
 }
 
 // XPLMWindowID is *mut c_void — all XPLM + GL access is on the X-Plane main thread.
@@ -203,6 +206,7 @@ impl GuiState {
             gain: cfg.gain,
             ambient_vol: cfg.ambient_vol,
             ic_vol: cfg.ic_vol,
+            spatial_width: cfg.spatial_width,
             denoise: cfg.denoise,
             output_devices,
             output_device_labels,
@@ -227,6 +231,7 @@ impl GuiState {
             mic_gain_live: None,
             ambient_vol_live: None,
             ic_vol_live: None,
+            spatial_width_live: None,
         }
     }
 
@@ -244,6 +249,7 @@ impl GuiState {
             gain: self.gain,
             ambient_vol: self.ambient_vol,
             ic_vol: self.ic_vol,
+            spatial_width: self.spatial_width,
             denoise: self.denoise,
             ambient_device: out_name(self.selected_ambient),
             ic_device:      out_name(self.selected_ic),

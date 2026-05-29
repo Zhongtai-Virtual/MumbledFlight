@@ -214,6 +214,7 @@ async fn main() -> Result<()> {
             statuses,
             // One-shot process — never torn down, so the flag is never set.
             shutdown: Arc::new(AtomicBool::new(false)),
+            spatial_width: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         })
         .await;
     });

@@ -64,6 +64,8 @@ pub struct MumbleStackConfig {
     /// stream watches this and exits, dropping its CPAL/PipeWire stream instead of leaking it
     /// across reconnects. CLI (one-shot) can pass a flag that is never set.
     pub shutdown: Arc<AtomicBool>,
+    /// Stereo width for spatialized playback: 0.0 = mono, 1.0 = full spatial. Live-adjustable.
+    pub spatial_width: Arc<AtomicU32>,
 }
 
 /// Spawns a single Mumble client's run loop, logging a disconnect at error level.
@@ -102,6 +104,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         ic_vol,
         statuses,
         shutdown,
+        spatial_width,
     } = cfg;
 
     // 1. MIC Chain
@@ -174,6 +177,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 target_channel: initial_ambient_ch,
                 zone_channels: Some((fbo_ch.clone(), aircraft_ch.clone())),
                 test_pos,
+                spatial_width: Arc::clone(&spatial_width),
             },
             server_addr,
             Arc::clone(&state),
@@ -197,6 +201,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 target_channel: format!("{session_id}_ic"),
                 zone_channels: None,
                 test_pos,
+                spatial_width: Arc::clone(&spatial_width),
             },
             server_addr,
             Arc::clone(&state),
@@ -216,6 +221,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 target_channel: aircraft_ch.clone(),
                 zone_channels: None,
                 test_pos: None,
+                spatial_width: Arc::clone(&spatial_width),
             },
             server_addr,
             Arc::clone(&state),
@@ -238,6 +244,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 target_channel: aircraft_ch.clone(),
                 zone_channels: None,
                 test_pos: test_pos.or(Some(RADIO_SPEAKER_POSITION)),
+                spatial_width: Arc::clone(&spatial_width),
             },
             server_addr,
             Arc::clone(&state),

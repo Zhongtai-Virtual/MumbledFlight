@@ -63,6 +63,7 @@ impl GuiState {
         let mut gain = self.gain;
         let mut ambient_vol = self.ambient_vol;
         let mut ic_vol = self.ic_vol;
+        let mut spatial_width = self.spatial_width;
         let mut denoise = self.denoise;
         let mut selected_ambient = self.selected_ambient;
         let mut selected_ic = self.selected_ic;
@@ -132,6 +133,14 @@ impl GuiState {
                     vol_slider("Voice Vol", "##ambient_vol", &mut ambient_vol);
                     vol_slider("IC Vol", "##ic_vol", &mut ic_vol);
                     vol_slider("Mic Gain", "##gain", &mut gain);
+
+                    ui.text("Spatial");
+                    ui.same_line();
+                    ui.set_cursor_pos([115.0, ui.cursor_pos()[1]]);
+                    ui.set_next_item_width(fw);
+                    ui.slider_config("##spatial", 0.0_f32, 1.0_f32)
+                        .display_format("")
+                        .build(&mut spatial_width);
 
                     ui.text("Denoise");
                     ui.same_line();
@@ -338,6 +347,10 @@ impl GuiState {
         self.ic_vol = ic_vol;
         if let Some(ref atomic) = self.ic_vol_live {
             atomic.store(ic_vol.to_bits(), Ordering::Relaxed);
+        }
+        self.spatial_width = spatial_width;
+        if let Some(ref atomic) = self.spatial_width_live {
+            atomic.store(spatial_width.to_bits(), Ordering::Relaxed);
         }
         self.selected_ambient = selected_ambient;
         self.selected_ic = selected_ic;
