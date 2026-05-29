@@ -15,10 +15,10 @@ jobs:
           - os: ubuntu-latest
             xpl_dir: lin_x64
             lib: libmumbled_flight_plugin.so
-          - os: macos-13 # Intel
+          - os: macos-26-intel # Intel
             xpl_dir: mac_x86_64
             lib: libmumbled_flight_plugin.dylib
-          - os: macos-latest # ARM
+          - os: macos-26 # ARM
             xpl_dir: mac_arm64
             lib: libmumbled_flight_plugin.dylib
           - os: windows-latest
@@ -106,7 +106,7 @@ jobs:
   # Extract into Resources/plugins/ to install.
   bundle:
     needs: build
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
