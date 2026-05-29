@@ -139,7 +139,7 @@ impl GuiState {
                     slider("Voice Vol", "##ambient_vol", &mut ambient_vol, 0.1, 20.0, vol_flags, 1.0);
                     slider("IC Vol",    "##ic_vol",      &mut ic_vol,      0.1, 20.0, vol_flags, 1.0);
                     slider("Mic Gain",  "##gain",        &mut gain,        0.1, 20.0, vol_flags, 1.0);
-                    slider("Spatial",   "##spatial",     &mut spatial_width, 0.0, 2.0, imgui::SliderFlags::empty(), 1.0);
+                    slider("Spatial",   "##spatial",     &mut spatial_width, 0.0, 2.0, imgui::SliderFlags::NO_INPUT, 1.0);
 
                     ui.text("Denoise");
                     ui.same_line();
