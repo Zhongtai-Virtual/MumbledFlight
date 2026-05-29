@@ -202,10 +202,9 @@ impl GuiState {
 
                     {
                         let radio_labels: Vec<String> = {
-                            let mut v = vec![
-                                "(disabled)".to_string(),
-                                "MumblingRadio (auto-sink)".to_string(),
-                            ];
+                            let mut v = vec!["(disabled)".to_string()];
+                            #[cfg(target_os = "linux")]
+                            v.push("MumblingRadio (auto-sink)".to_string());
                             v.extend(radio_input_device_labels.iter().cloned());
                             v
                         };

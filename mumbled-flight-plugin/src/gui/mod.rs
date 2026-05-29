@@ -26,6 +26,14 @@ use xplane_sys::{XPLMMouseStatus, XPLMTakeKeyboardFocus, XPLMWindowID};
 /// Sentinel stored in config when the auto-sink option is selected.
 pub const RADIO_AUTO_SINK: &str = "__auto__";
 
+/// Index offset from `selected_radio` to the `radio_input_devices` slice.
+/// On Linux: 0=disabled, 1=auto-sink, 2+=devices.
+/// Elsewhere: 0=disabled, 1+=devices (no auto-sink option).
+#[cfg(target_os = "linux")]
+const RADIO_DEVICE_OFFSET: usize = 2;
+#[cfg(not(target_os = "linux"))]
+const RADIO_DEVICE_OFFSET: usize = 1;
+
 pub struct GuiState {
     pub window_id: XPLMWindowID,
     config_path: PathBuf,
@@ -297,11 +305,12 @@ impl GuiState {
             self.radio_source_str().to_string()
         };
         self.selected_radio = match current_radio.as_str() {
-            ""              => 0,
+            "" => 0,
+            #[cfg(target_os = "linux")]
             RADIO_AUTO_SINK => 1,
-            name            => snap.input_names.iter()
+            name => snap.input_names.iter()
                 .position(|d| d == name)
-                .map(|i| i as i32 + 2)
+                .map(|i| i as i32 + RADIO_DEVICE_OFFSET as i32)
                 .unwrap_or(0),
         };
         // Mic input — index 0 = system default.
@@ -329,17 +338,19 @@ impl GuiState {
     pub fn radio_params(&self) -> (Option<String>, bool) {
         match self.selected_radio {
             0 => (None, false),
+            #[cfg(target_os = "linux")]
             1 => (None, true),
-            i => (self.radio_input_devices.get(i as usize - 2).cloned(), false),
+            i => (self.radio_input_devices.get(i as usize - RADIO_DEVICE_OFFSET).cloned(), false),
         }
     }
 
     fn radio_source_str(&self) -> &str {
         match self.selected_radio {
             0 => "",
+            #[cfg(target_os = "linux")]
             1 => RADIO_AUTO_SINK,
             i => self.radio_input_devices
-                .get(i as usize - 2)
+                .get(i as usize - RADIO_DEVICE_OFFSET)
                 .map(|s| s.as_str())
                 .unwrap_or(""),
         }
