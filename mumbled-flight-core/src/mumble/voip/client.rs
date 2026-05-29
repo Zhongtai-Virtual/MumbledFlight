@@ -58,8 +58,35 @@ pub struct MumbleVoipClient {
     pub test_pos: Option<[f32; 3]>,
     /// Mumble server password (empty = none). Sent in the Authenticate message on connect.
     pub password: String,
+    /// Optional user-supplied client certificate used as the TLS identity. When `None`, a
+    /// throwaway self-signed identity is generated per connection. Shared by all four clients.
+    pub client_cert: Option<Arc<ClientCert>>,
     /// Stereo width for spatialized audio: 0.0 = mono, 1.0 = full spatial. Live-adjustable.
     pub spatial_width: Arc<std::sync::atomic::AtomicU32>,
+}
+
+/// A user-supplied client certificate (PKCS#12 / `.p12`) used as the Mumble TLS identity —
+/// the native, strong alternative to password auth. Optionally passphrase-protected.
+pub struct ClientCert {
+    pkcs12: Vec<u8>,
+    passphrase: String,
+}
+
+impl ClientCert {
+    /// Reads a PKCS#12 file and eagerly validates it opens with `passphrase`, so a wrong
+    /// path/passphrase fails fast with a clear error instead of four silent connect failures.
+    pub fn load(path: &std::path::Path, passphrase: &str) -> Result<Self> {
+        let pkcs12 = std::fs::read(path)
+            .map_err(|e| anyhow!("reading client certificate '{}': {e}", path.display()))?;
+        Identity::from_pkcs12(&pkcs12, passphrase)
+            .map_err(|e| anyhow!("invalid client certificate or passphrase: {e}"))?;
+        Ok(Self { pkcs12, passphrase: passphrase.to_string() })
+    }
+
+    fn identity(&self) -> Result<Identity> {
+        Identity::from_pkcs12(&self.pkcs12, &self.passphrase)
+            .map_err(|e| anyhow!("client certificate: {e}"))
+    }
 }
 
 impl MumbleVoipClient {
@@ -111,8 +138,12 @@ impl MumbleVoipClient {
 
     pub(super) async fn connect(&self, addr: SocketAddr) -> Result<Control> {
         let tcp = TcpStream::connect(&addr).await?;
+        let identity = match &self.client_cert {
+            Some(cert) => cert.identity()?,
+            None => self.generate_temp_identity()?,
+        };
         let connector = native_tls::TlsConnector::builder()
-            .identity(self.generate_temp_identity()?)
+            .identity(identity)
             .danger_accept_invalid_certs(true)
             .build()?;
         let tls = TlsConnector::from(connector)
@@ -266,5 +297,50 @@ impl MumbleVoipClient {
         let cert = cert_builder.build();
         let p12  = Pkcs12::builder().name(&self.username).pkey(&pkey).cert(&cert).build2("")?;
         Identity::from_pkcs12(&p12.to_der()?, "").map_err(|e| anyhow!("Identity error: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a throwaway PKCS#12 protected by `passphrase`.
+    fn make_pkcs12(passphrase: &str) -> Vec<u8> {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+        let mut nb = X509Name::builder().unwrap();
+        nb.append_entry_by_text("CN", "test").unwrap();
+        let name = nb.build();
+        let mut cb = X509::builder().unwrap();
+        cb.set_version(2).unwrap();
+        cb.set_subject_name(&name).unwrap();
+        cb.set_issuer_name(&name).unwrap();
+        cb.set_pubkey(&pkey).unwrap();
+        cb.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+        cb.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+        cb.sign(&pkey, MessageDigest::sha256()).unwrap();
+        let cert = cb.build();
+        Pkcs12::builder().name("test").pkey(&pkey).cert(&cert).build2(passphrase).unwrap()
+            .to_der().unwrap()
+    }
+
+    #[test]
+    fn loads_valid_pkcs12_and_rejects_wrong_passphrase() {
+        let path = std::env::temp_dir().join("mumbledflight_clientcert_test.p12");
+        std::fs::write(&path, make_pkcs12("secret")).unwrap();
+
+        assert!(ClientCert::load(&path, "secret").is_ok());
+        assert!(ClientCert::load(&path, "wrong").is_err(), "wrong passphrase must fail");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn missing_file_reports_clear_error() {
+        // `.err().unwrap()` rather than `.unwrap_err()` so ClientCert needn't be Debug.
+        let err = ClientCert::load(std::path::Path::new("/no/such/mf_cert.p12"), "")
+            .err()
+            .expect("missing file must error");
+        assert!(err.to_string().contains("reading client certificate"));
     }
 }

@@ -69,6 +69,22 @@ pub fn start(ps: &mut PluginState) {
     let (radio_source, auto_sink) = ps.gui.radio_params();
     let spatial_width = Arc::new(AtomicU32::new(ps.gui.spatial_width.to_bits()));
 
+    // Optional client-certificate auth. A bad path/passphrase aborts the connect with a
+    // status message instead of failing silently inside the four spawned clients.
+    let client_cert = if ps.gui.cert_path.trim().is_empty() {
+        None
+    } else {
+        match mumble::ClientCert::load(std::path::Path::new(ps.gui.cert_path.trim()), &ps.gui.cert_pass) {
+            Ok(c) => Some(Arc::new(c)),
+            Err(e) => {
+                let msg = format!("Client certificate error: {e}");
+                warn!("{msg}");
+                ps.gui.status = msg;
+                return;
+            }
+        }
+    };
+
     let statuses: VoipStatuses = Arc::new(Mutex::new(HashMap::new()));
     let statuses_clone = Arc::clone(&statuses);
 
@@ -80,6 +96,7 @@ pub fn start(ps: &mut PluginState) {
         mumble::run_mumble_stack(MumbleStackConfig {
             state: state_clone,
             server_password,
+            client_cert,
             user_name,
             session_id: flight_id,
             mic_gain: mic_gain_for_thread,

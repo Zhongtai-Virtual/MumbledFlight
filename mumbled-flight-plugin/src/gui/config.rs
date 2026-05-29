@@ -10,6 +10,10 @@ pub struct PluginConfig {
     pub server: String,
     /// Mumble server password (empty = none). Stored in plain text in config.toml.
     pub server_password: String,
+    /// Optional client certificate (PKCS#12 / .p12) path used instead of password auth.
+    pub cert_path: String,
+    /// Passphrase for `cert_path`. Stored in plain text in config.toml.
+    pub cert_pass: String,
     pub flight_id: String,
     pub user_name: String,
     /// Microphone input gain multiplier (applies to captured audio only, not playback).
@@ -32,6 +36,8 @@ impl Default for PluginConfig {
         Self {
             server: "127.0.0.1:64738".to_string(),
             server_password: String::new(),
+            cert_path: String::new(),
+            cert_pass: String::new(),
             flight_id: String::new(),
             user_name: String::new(),
             gain: 1.0,

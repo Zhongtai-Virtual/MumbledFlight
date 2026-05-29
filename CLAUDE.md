@@ -135,7 +135,11 @@ channel, spawned through the shared `spawn_client` helper:
 - `client.rs` — `MumbleVoipClient` holds the *static* per-client config (role, channel, context,
   fixed test position, `spatial_width: Arc<AtomicU32>`). `run()` is the tokio `select!` event loop:
   TCP/UDP pings, zone-channel checks, inbound UDP voice, inbound TLS control messages, outbound mic
-  PCM. It generates a self-signed throwaway TLS identity per connection (`generate_temp_identity`).
+  PCM. Authentication: each client sends the optional Mumble server `password` in its
+  `Authenticate` message; for the TLS identity it uses an optional user-supplied client
+  certificate (`ClientCert`, PKCS#12 / `.p12`, validated eagerly on load) when provided, otherwise
+  a self-signed throwaway identity per connection (`generate_temp_identity`). **Note:** the TLS
+  connector sets `danger_accept_invalid_certs(true)` — the server cert is *not* verified.
   Audio is Opus, 48 kHz mono, position info attached to each voice packet.
   `spatialize()` applies a stereo-width blend after all gain/attenuation math:
   `mid + (L/R − mid) × width`, where `width` is read from `spatial_width` at each packet.

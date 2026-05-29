@@ -51,6 +51,8 @@ pub struct GuiState {
 
     pub server: String,
     pub server_password: String,
+    pub cert_path: String,
+    pub cert_pass: String,
     pub flight_id: String,
     pub user_name: String,
     pub gain: f32,
@@ -203,6 +205,8 @@ impl GuiState {
             mouse_down: [false; 5],
             server: cfg.server,
             server_password: cfg.server_password,
+            cert_path: cfg.cert_path,
+            cert_pass: cfg.cert_pass,
             flight_id: cfg.flight_id,
             user_name,
             gain: cfg.gain,
@@ -247,6 +251,8 @@ impl GuiState {
         let cfg = config::PluginConfig {
             server: self.server.clone(),
             server_password: self.server_password.clone(),
+            cert_path: self.cert_path.clone(),
+            cert_pass: self.cert_pass.clone(),
             flight_id: self.flight_id.clone(),
             user_name: self.user_name.clone(),
             gain: self.gain,

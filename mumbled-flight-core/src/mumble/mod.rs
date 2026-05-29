@@ -5,6 +5,7 @@ pub mod voip;
 
 use self::audio::{create_linux_sink, start_capture, start_loopback_capture, start_playback};
 use self::voip::client::{ClientRole, MumbleVoipClient, VoipClientStatus};
+pub use self::voip::client::ClientCert;
 use crate::state::{CockpitState, SharedCockpitZone};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -47,6 +48,8 @@ pub struct MumbleStackConfig {
     pub session_id: String,
     /// Mumble server password (empty = none). Shared by all four clients on connect.
     pub server_password: String,
+    /// Optional client certificate for TLS identity (alternative to password auth).
+    pub client_cert: Option<Arc<ClientCert>>,
     pub mic_gain: Arc<AtomicU32>,
     pub denoise: bool,
     pub radio_source: Option<String>,
@@ -92,6 +95,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         user_name,
         session_id,
         server_password,
+        client_cert,
         mic_gain,
         denoise,
         radio_source,
@@ -181,6 +185,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 zone_channels: Some((fbo_ch.clone(), aircraft_ch.clone())),
                 test_pos,
                 password: server_password.clone(),
+                client_cert: client_cert.clone(),
                 spatial_width: Arc::clone(&spatial_width),
             },
             server_addr,
@@ -206,6 +211,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 zone_channels: None,
                 test_pos,
                 password: server_password.clone(),
+                client_cert: client_cert.clone(),
                 spatial_width: Arc::clone(&spatial_width),
             },
             server_addr,
@@ -227,6 +233,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 zone_channels: None,
                 test_pos: None,
                 password: server_password.clone(),
+                client_cert: client_cert.clone(),
                 spatial_width: Arc::clone(&spatial_width),
             },
             server_addr,
@@ -251,6 +258,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 zone_channels: None,
                 test_pos: test_pos.or(Some(RADIO_SPEAKER_POSITION)),
                 password: server_password.clone(),
+                client_cert: client_cert.clone(),
                 spatial_width: Arc::clone(&spatial_width),
             },
             server_addr,

@@ -74,6 +74,14 @@ struct Args {
     #[arg(short = 'P', long, value_name = "PASSWORD")]
     password: Option<String>,
 
+    /// Client certificate (PKCS#12 / .p12) used as the TLS identity instead of password auth.
+    #[arg(long, value_name = "FILE")]
+    client_cert: Option<PathBuf>,
+
+    /// Passphrase for the --client-cert file, if it is protected.
+    #[arg(long, value_name = "PASSPHRASE")]
+    cert_pass: Option<String>,
+
     /// List all available audio input and output devices on your system.
     #[arg(long, default_value_t = false)]
     list_devices: bool,
@@ -180,6 +188,15 @@ async fn main() -> Result<()> {
             _ => {}
         }
     }
+    // Load the optional client certificate up front so a bad path/passphrase aborts cleanly.
+    let client_cert = match &args.client_cert {
+        Some(path) => Some(Arc::new(mumble::ClientCert::load(
+            path,
+            args.cert_pass.as_deref().unwrap_or(""),
+        )?)),
+        None => None,
+    };
+
     let state_mumble = Arc::clone(&state);
     tokio::spawn(async move {
         use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -203,6 +220,7 @@ async fn main() -> Result<()> {
             user_name: user_prefix,
             session_id: flight_id,
             server_password: args.password.unwrap_or_default(),
+            client_cert,
             mic_gain: Arc::new(AtomicU32::new(args.gain.to_bits())),
             denoise: args.denoise,
             radio_source: args.radio_source,
