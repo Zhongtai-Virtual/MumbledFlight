@@ -57,7 +57,9 @@ RUST_LOG=debug cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice
 
 ```bash
 # Send a 500 Hz sine wave through the Voice client at a fixed position
+# --zone defaults to aircraft for voice; override with --zone fbo for FBO testing
 cargo run -p mumbled-flight-cli -- testflight --user Alice --test voice --sine --pos 2,0,-6.8
+cargo run -p mumbled-flight-cli -- testflight --user Alice --test voice --sine --zone fbo
 
 # Loop an audio file through the IC client
 cargo run -p mumbled-flight-cli -- testflight --user Bob --test ic --file clip.wav
@@ -66,7 +68,7 @@ cargo run -p mumbled-flight-cli -- testflight --user Bob --test ic --file clip.w
 cargo run -p mumbled-flight-cli -- --list-devices
 ```
 
-`--sine` and `--file` use **ffmpeg** as the audio source (must be on `PATH`). `--test` skips the X-Plane bridge entirely.
+`--zone` sets the cockpit zone for the Voice client (`aircraft` or `fbo`); it defaults to `aircraft` for `--test voice`. `--sine` and `--file` use **ffmpeg** as the audio source (must be on `PATH`). `--test` skips the X-Plane bridge entirely.
 
 ## Build & install
 

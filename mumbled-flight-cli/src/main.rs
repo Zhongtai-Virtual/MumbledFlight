@@ -38,10 +38,20 @@ enum CliClient {
     Radio,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 enum CliZone {
     Fbo,
+    #[default]
     Aircraft,
+}
+
+impl From<CliZone> for mumbled_flight_core::state::SharedCockpitZone {
+    fn from(z: CliZone) -> Self {
+        match z {
+            CliZone::Fbo => Self::InFbo,
+            CliZone::Aircraft => Self::AroundOrInAircraft,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -191,15 +201,10 @@ async fn main() -> Result<()> {
     });
     // Pre-configure state for single-client test mode — DataRef bridge is skipped below.
     if args.test.is_some() {
-        use mumbled_flight_core::state::{AcpMicSelection, SharedCockpitRole, SharedCockpitZone};
+        use mumbled_flight_core::state::{AcpMicSelection, SharedCockpitRole};
         let mut s = state.lock().unwrap();
         s.role = SharedCockpitRole::Pilot;
-        if let Some(zone) = args.zone {
-            s.zone = match zone {
-                CliZone::Fbo => SharedCockpitZone::InFbo,
-                CliZone::Aircraft => SharedCockpitZone::AroundOrInAircraft,
-            };
-        }
+        s.zone = args.zone.unwrap_or_default().into();
         match args.test {
             Some(CliClient::Ic) => {
                 s.acp_ic = true;
