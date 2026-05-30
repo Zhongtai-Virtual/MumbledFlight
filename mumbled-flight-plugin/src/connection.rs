@@ -121,8 +121,13 @@ pub fn start(ps: &mut PluginState) {
             Some(pem) => match mumble::ServerTrust::from_pem(pem.clone().into_bytes()) {
                 Ok(t) => Some(Arc::new(t)),
                 Err(e) => {
-                    warn!("ignoring invalid pinned cert for {key}: {e}");
-                    None
+                    let msg = format!(
+                        "Stored server certificate for {key} is corrupt: {e}. \
+                         Reconnect to re-trust the server."
+                    );
+                    warn!("{msg}");
+                    ps.gui.status = msg;
+                    return;
                 }
             },
             None => None,

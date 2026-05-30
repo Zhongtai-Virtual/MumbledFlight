@@ -129,7 +129,11 @@ impl GuiState {
         let mut trust_state = std::mem::replace(&mut self.trust_state, TrustState::Idle);
         let probe_slot = Arc::clone(&self.probe_slot);
         let known_key = KnownHosts::key(&self.server, self.port);
-        let known_stored = self.known_hosts.get(&known_key).cloned();
+        // Only clone the pinned PEM when idle — during Probing/Decide it is already held
+        // inside trust_state, so cloning here every frame would be wasted.
+        let known_stored = matches!(trust_state, TrustState::Idle)
+            .then(|| self.known_hosts.get(&known_key).cloned())
+            .flatten();
         let mut trust_to_store: Option<(String, String)> = None;
         let is_connected = self.is_connected;
         let status = self.status.clone();
@@ -211,7 +215,8 @@ impl GuiState {
                         &mut selected_radio,
                     );
                     p.log_level_picker(&mut log_level);
-                    let (conn, disc) = p.connect_button(is_connected, &flight_id, &user_name);
+                    let is_probing = matches!(trust_state, TrustState::Probing { .. });
+                    let (conn, disc) = p.connect_button(is_connected || is_probing, &flight_id, &user_name);
                     should_disconnect = disc;
                     if conn {
                         if !server_ca.trim().is_empty() {
@@ -312,9 +317,15 @@ impl GuiState {
                                 Some(Ok(probed)) => {
                                     let new_fp = probed.sha256;
                                     let pem = String::from_utf8_lossy(&probed.pem).into_owned();
-                                    let old_fp = stored
-                                        .as_deref()
-                                        .and_then(|p| mumble::cert_fingerprint(p.as_bytes()).ok());
+                                    let old_fp = stored.as_deref().and_then(|p| {
+                                        match mumble::cert_fingerprint(p.as_bytes()) {
+                                            Ok(fp) => Some(fp),
+                                            Err(e) => {
+                                                warn!("stored cert for {key} could not be fingerprinted (corrupt?): {e}");
+                                                None
+                                            }
+                                        }
+                                    });
                                     match old_fp {
                                         Some(old) if old == new_fp => {
                                             // Cert unchanged — already trusted, connect silently.

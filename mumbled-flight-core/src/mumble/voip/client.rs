@@ -199,14 +199,20 @@ pub struct ProbedCert {
 /// the server's leaf certificate (PEM) plus its SHA-256 fingerprint.
 ///
 /// This is the TOFU primitive: a frontend probes the server, shows the fingerprint to the user,
-/// and on approval persists the PEM as a pinned [`ServerTrust`]. Read/write timeouts bound a
-/// stalled handshake; run it off any latency-sensitive thread.
+/// and on approval persists the PEM as a pinned [`ServerTrust`]. A 10-second timeout covers both
+/// the TCP connect and the subsequent TLS handshake; run it off any latency-sensitive thread.
 pub fn probe_server_cert(host: &str, port: u16) -> Result<ProbedCert> {
+    use std::net::ToSocketAddrs;
     let connector = native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true)
         .build()?;
-    let tcp = std::net::TcpStream::connect((host, port))
+    let addr = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| anyhow!("resolving {host}:{port}: {e}"))?
+        .next()
+        .ok_or_else(|| anyhow!("no address resolved for {host}:{port}"))?;
+    let tcp = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| anyhow!("connecting to {host}:{port}: {e}"))?;
     tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(10)))?;
