@@ -36,6 +36,7 @@ use openssl::stack::Stack;
 use openssl::x509::store::X509StoreBuilder;
 use openssl::x509::{X509, X509Name, X509StoreContext};
 use std::marker::PhantomData;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpStream, UdpSocket};
@@ -186,10 +187,12 @@ impl MumbleVoipClient {
         playback_tx: mpsc::Sender<Vec<f32>>,
     ) -> Result<()> {
         info!("[VoIP:{}] Connecting to {}:{}...", self.username, host, port);
-        let mut control = self.connect(host, port).await?;
+        let (mut control, addr) = self.connect(host, port).await?;
         *self.voip_status.lock().unwrap() = VoipClientStatus::Connected;
-        let udp = UdpSocket::bind("0.0.0.0:0").await?;
-        udp.connect((host, port)).await?;
+
+        let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+        let udp = UdpSocket::bind(bind_addr).await?;
+        udp.connect(addr).await?;
 
         let mut session    = Session::new()?;
         let mut udp_buf    = vec![0u8; 2048];
@@ -224,8 +227,9 @@ impl MumbleVoipClient {
         Ok(())
     }
 
-    pub(super) async fn connect(&self, host: &str, port: u16) -> Result<Control> {
+    pub(super) async fn connect(&self, host: &str, port: u16) -> Result<(Control, SocketAddr)> {
         let tcp = TcpStream::connect((host, port)).await?;
+        let addr = tcp.peer_addr()?;
         let identity = match &self.client_cert {
             Some(cert) => cert.identity()?,
             None => self.generate_temp_identity()?,
@@ -267,7 +271,7 @@ impl MumbleVoipClient {
         auth.set_opus(true);
         control.send(ControlPacket::Authenticate(Box::new(auth))).await?;
 
-        Ok(control)
+        Ok((control, addr))
     }
 
     // Encoder/seq/crypt are borrowed from the caller's Session; grouping them would just move
