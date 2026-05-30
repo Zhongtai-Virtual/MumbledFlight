@@ -371,14 +371,41 @@ impl<'ui> Ctx<'ui> {
     #[allow(clippy::too_many_arguments)]
     fn connection_fields(&self, server: &mut String, server_password: &mut String, cert_path: &mut String, cert_pass: &mut String, server_ca: &mut String, flight_id: &mut String, user_name: &mut String) {
         self.row("Server",    "##srv", server);
-        self.password_row("Password", "##pwd", server_password);
-        // Optional client-certificate auth (PKCS#12 .p12) — leave blank to use password auth.
-        self.row("Client Cert", "##cert", cert_path);
-        self.password_row("Cert Pass", "##certpw", cert_pass);
-        // Optional server CA / pinned cert (PEM/DER) — verifies the server's certificate.
-        self.row("Server CA", "##sca", server_ca);
         self.row("Flight ID", "##fid", flight_id);
         self.row("Username",  "##usr", user_name);
+        self.optional_header();
+        self.password_row("Password",   "##pwd",    server_password);
+        self.password_row("Cert Pass",  "##certpw", cert_pass);
+        self.row("Client Cert", "##cert", cert_path);
+        self.row("Server CA",   "##sca",  server_ca);
+    }
+
+    /// Draws a centred "optional" label between two dim horizontal rules,
+    /// mimicking imgui's `SeparatorText` (unavailable in imgui-rs 0.12).
+    fn optional_header(&self) {
+        self.ui.spacing();
+        let text = "optional";
+        let text_w = self.ui.calc_text_size(text)[0];
+        let total_w = self.fw + 115.0;
+        let text_x = ((total_w - text_w) * 0.5).max(0.0);
+        let line_y = self.ui.cursor_screen_pos()[1] + self.ui.text_line_height() * 0.5;
+        let origin_x = self.ui.cursor_screen_pos()[0];
+        let col = [0.38f32, 0.38, 0.38, 1.0];
+        let draw = self.ui.get_window_draw_list();
+        let gap = 4.0;
+        draw.add_line(
+            [origin_x, line_y],
+            [origin_x + text_x - gap, line_y],
+            col,
+        ).build();
+        draw.add_line(
+            [origin_x + text_x + text_w + gap, line_y],
+            [origin_x + total_w, line_y],
+            col,
+        ).build();
+        self.ui.set_cursor_pos([text_x, self.ui.cursor_pos()[1]]);
+        self.ui.text_colored([0.45, 0.45, 0.45, 1.0], text);
+        self.ui.spacing();
     }
 
     fn audio_controls(&self, ambient_vol: &mut f32, ic_vol: &mut f32, gain: &mut f32, spatial_width: &mut f32) {
