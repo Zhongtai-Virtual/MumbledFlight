@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with MumbledFlight.  If not, see <https://www.gnu.org/licenses/>.
 
-
 //! ImGui draw loop and renderer initialisation for GuiState.
 
 use log::{debug, warn, LevelFilter};
@@ -135,14 +134,31 @@ impl GuiState {
                 .movable(false)
                 .scroll_bar(false)
                 .build(|| {
-                    p.connection_fields(&mut server, &mut server_password, &mut cert_path, &mut cert_pass, &mut server_ca, &mut flight_id, &mut user_name);
+                    p.connection_fields(
+                        &mut server,
+                        &mut server_password,
+                        &mut cert_path,
+                        &mut cert_pass,
+                        &mut server_ca,
+                        &mut flight_id,
+                        &mut user_name,
+                    );
                     p.audio_controls(&mut ambient_vol, &mut ic_vol, &mut gain, &mut spatial_width);
                     p.denoise_toggle(&mut denoise, is_connected);
                     if !output_device_labels.is_empty() {
-                        p.output_device_pickers(is_connected, &output_device_labels, &mut selected_ambient, &mut selected_ic);
+                        p.output_device_pickers(
+                            is_connected,
+                            &output_device_labels,
+                            &mut selected_ambient,
+                            &mut selected_ic,
+                        );
                     }
                     p.mic_picker(is_connected, &mic_input_device_labels, &mut selected_mic);
-                    p.radio_picker(is_connected, &radio_input_device_labels, &mut selected_radio);
+                    p.radio_picker(
+                        is_connected,
+                        &radio_input_device_labels,
+                        &mut selected_radio,
+                    );
                     p.log_level_picker(&mut log_level);
                     let (conn, disc) = p.connect_button(is_connected, &flight_id, &user_name);
                     should_connect = conn;
@@ -280,7 +296,16 @@ impl<'ui> Ctx<'ui> {
 
     // A labelled slider plus a reset icon; the parameters map 1:1 to imgui's slider config.
     #[allow(clippy::too_many_arguments)]
-    fn slider(&self, label: &str, id: &str, v: &mut f32, min: f32, max: f32, flags: imgui::SliderFlags, default: f32) {
+    fn slider(
+        &self,
+        label: &str,
+        id: &str,
+        v: &mut f32,
+        min: f32,
+        max: f32,
+        flags: imgui::SliderFlags,
+        default: f32,
+    ) {
         let icon_sz = self.ui.current_font_size();
         let spacing = self.ui.clone_style().item_spacing[0];
 
@@ -288,7 +313,8 @@ impl<'ui> Ctx<'ui> {
         self.ui.same_line();
         self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw - icon_sz - spacing);
-        self.ui.slider_config(id, min, max)
+        self.ui
+            .slider_config(id, min, max)
             .flags(flags)
             .display_format("")
             .build(v);
@@ -306,24 +332,28 @@ impl<'ui> Ctx<'ui> {
         let icon_sz = self.ui.current_font_size();
         let frame_h = self.ui.frame_height();
 
-        let clicked  = self.ui.invisible_button(id, [icon_sz, frame_h]);
-        let hovered  = self.ui.is_item_hovered();
+        let clicked = self.ui.invisible_button(id, [icon_sz, frame_h]);
+        let hovered = self.ui.is_item_hovered();
         let rect_min = self.ui.item_rect_min();
         let rect_max = self.ui.item_rect_max();
 
         // Centre derived from the actual placed rect — immune to spacing offsets.
         let cx = (rect_min[0] + rect_max[0]) * 0.5;
         let cy = (rect_min[1] + rect_max[1]) * 0.5;
-        let r  = icon_sz * 0.28;
+        let r = icon_sz * 0.28;
 
-        let col: [f32; 4] = if hovered { [1.0, 1.0, 1.0, 1.0] } else { [0.55, 0.55, 0.55, 1.0] };
+        let col: [f32; 4] = if hovered {
+            [1.0, 1.0, 1.0, 1.0]
+        } else {
+            [0.55, 0.55, 0.55, 1.0]
+        };
 
         // Arc: ~306° clockwise (increasing θ = clockwise in screen/y-down coords).
         // Starts at ~36° (lower-right), ends at ~342° (upper-right); gap on the right side.
         use std::f32::consts::PI;
         let start_a = PI * 0.2;
-        let sweep   = PI * 1.7;
-        let end_a   = start_a + sweep;
+        let sweep = PI * 1.7;
+        let end_a = start_a + sweep;
         const N: usize = 14;
         let arc: Vec<[f32; 2]> = (0..=N)
             .map(|i| {
@@ -338,19 +368,24 @@ impl<'ui> Ctx<'ui> {
         // Clockwise tangent at θ in screen (y-down) coords: (−sin θ, cos θ).
         let tip = [cx + r * end_a.cos(), cy + r * end_a.sin()];
         let (tx, ty) = (-end_a.sin(), end_a.cos()); // clockwise tangent
-        let (nx, ny) = ( end_a.cos(), end_a.sin()); // outward radial normal
+        let (nx, ny) = (end_a.cos(), end_a.sin()); // outward radial normal
         let al = r * 0.55;
         let aw = r * 0.40;
         let p2 = [tip[0] - al * tx + aw * nx, tip[1] - al * ty + aw * ny];
         let p3 = [tip[0] - al * tx - aw * nx, tip[1] - al * ty - aw * ny];
         draw.add_triangle(tip, p2, p3, col).filled(true).build();
 
-        if hovered { self.ui.tooltip_text("Reset"); }
+        if hovered {
+            self.ui.tooltip_text("Reset");
+        }
         clicked
     }
 
     fn combo(&self, label: &str, id: &str, labels: &[String], selected: &mut i32) {
-        let preview = labels.get(*selected as usize).map(|s| s.as_str()).unwrap_or("(default)");
+        let preview = labels
+            .get(*selected as usize)
+            .map(|s| s.as_str())
+            .unwrap_or("(default)");
         self.ui.text(label);
         self.ui.same_line();
         self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
@@ -359,7 +394,12 @@ impl<'ui> Ctx<'ui> {
             let avail_w = self.ui.content_region_avail()[0];
             for (i, lbl) in labels.iter().enumerate() {
                 let display = fit_label(self.ui, lbl, avail_w);
-                if self.ui.selectable_config(&*display).selected(*selected == i as i32).build() {
+                if self
+                    .ui
+                    .selectable_config(&*display)
+                    .selected(*selected == i as i32)
+                    .build()
+                {
                     *selected = i as i32;
                 }
             }
@@ -369,51 +409,70 @@ impl<'ui> Ctx<'ui> {
     // ── Panels ────────────────────────────────────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
-    fn connection_fields(&self, server: &mut String, server_password: &mut String, cert_path: &mut String, cert_pass: &mut String, server_ca: &mut String, flight_id: &mut String, user_name: &mut String) {
-        self.row("Server",    "##srv", server);
+    fn connection_fields(
+        &self,
+        server: &mut String,
+        server_password: &mut String,
+        cert_path: &mut String,
+        cert_pass: &mut String,
+        server_ca: &mut String,
+        flight_id: &mut String,
+        user_name: &mut String,
+    ) {
+        self.row("Server", "##srv", server);
         self.row("Flight ID", "##fid", flight_id);
-        self.row("Username",  "##usr", user_name);
-        self.optional_header();
-        self.password_row("Password",   "##pwd",    server_password);
-        self.password_row("Cert Pass",  "##certpw", cert_pass);
-        self.row("Client Cert", "##cert", cert_path);
-        self.row("Server CA",   "##sca",  server_ca);
-    }
+        self.row("Username", "##usr", user_name);
 
-    /// Draws a centred "optional" label between two dim horizontal rules,
-    /// mimicking imgui's `SeparatorText` (unavailable in imgui-rs 0.12).
-    fn optional_header(&self) {
         self.ui.spacing();
-        let text = "optional";
-        let text_w = self.ui.calc_text_size(text)[0];
-        let total_w = self.fw + 115.0;
-        let text_x = ((total_w - text_w) * 0.5).max(0.0);
-        let line_y = self.ui.cursor_screen_pos()[1] + self.ui.text_line_height() * 0.5;
-        let origin_x = self.ui.cursor_screen_pos()[0];
-        let col = [0.38f32, 0.38, 0.38, 1.0];
-        let draw = self.ui.get_window_draw_list();
-        let gap = 4.0;
-        draw.add_line(
-            [origin_x, line_y],
-            [origin_x + text_x - gap, line_y],
-            col,
-        ).build();
-        draw.add_line(
-            [origin_x + text_x + text_w + gap, line_y],
-            [origin_x + total_w, line_y],
-            col,
-        ).build();
-        self.ui.set_cursor_pos([text_x, self.ui.cursor_pos()[1]]);
-        self.ui.text_colored([0.45, 0.45, 0.45, 1.0], text);
+        // Default open when any optional field already carries a value so saved
+        // credentials don't silently disappear behind a collapsed header.
+        let fields: [&str; 4] = [server_password, cert_path, cert_pass, server_ca];
+        let any_set = fields.iter().any(|s| !s.is_empty());
+        let flags = if any_set {
+            imgui::TreeNodeFlags::DEFAULT_OPEN
+        } else {
+            imgui::TreeNodeFlags::empty()
+        };
+        if self
+            .ui
+            .collapsing_header("Optional auth & security##opt", flags)
+        {
+            self.password_row("Password", "##pwd", server_password);
+            self.password_row("Cert Pass", "##certpw", cert_pass);
+            self.row("Client Cert", "##cert", cert_path);
+            self.row("Server CA", "##sca", server_ca);
+        }
         self.ui.spacing();
     }
 
-    fn audio_controls(&self, ambient_vol: &mut f32, ic_vol: &mut f32, gain: &mut f32, spatial_width: &mut f32) {
+    fn audio_controls(
+        &self,
+        ambient_vol: &mut f32,
+        ic_vol: &mut f32,
+        gain: &mut f32,
+        spatial_width: &mut f32,
+    ) {
         let vol_flags = imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT;
-        self.slider("Voice Vol", "##ambient_vol", ambient_vol,   0.1, 20.0, vol_flags, 1.0);
-        self.slider("IC Vol",    "##ic_vol",      ic_vol,        0.1, 20.0, vol_flags, 1.0);
-        self.slider("Mic Gain",  "##gain",        gain,          0.1, 20.0, vol_flags, 1.0);
-        self.slider("Spatial",   "##spatial",     spatial_width, 0.0,  2.0, imgui::SliderFlags::NO_INPUT, 1.0);
+        self.slider(
+            "Ambient Vol",
+            "##ambient_vol",
+            ambient_vol,
+            0.1,
+            20.0,
+            vol_flags,
+            1.0,
+        );
+        self.slider("IC Vol", "##ic_vol", ic_vol, 0.1, 20.0, vol_flags, 1.0);
+        self.slider("Mic Gain", "##gain", gain, 0.1, 20.0, vol_flags, 1.0);
+        self.slider(
+            "Spatial",
+            "##spatial",
+            spatial_width,
+            0.0,
+            2.0,
+            imgui::SliderFlags::NO_INPUT,
+            1.0,
+        );
     }
 
     fn denoise_toggle(&self, denoise: &mut bool, is_connected: bool) {
@@ -424,14 +483,32 @@ impl<'ui> Ctx<'ui> {
         self.ui.checkbox("##denoise", denoise);
     }
 
-    fn output_device_pickers(&self, is_connected: bool, output_device_labels: &[String], selected_ambient: &mut i32, selected_ic: &mut i32) {
+    fn output_device_pickers(
+        &self,
+        is_connected: bool,
+        output_device_labels: &[String],
+        selected_ambient: &mut i32,
+        selected_ic: &mut i32,
+    ) {
         let _dis = self.ui.begin_disabled(is_connected);
-        self.combo("Voice Out", "##dev_ambient", output_device_labels, selected_ambient);
-        self.combo("IC Out",    "##dev_ic",      output_device_labels, selected_ic);
+        self.combo(
+            "Ambient Out",
+            "##dev_ambient",
+            output_device_labels,
+            selected_ambient,
+        );
+        self.combo("IC Out", "##dev_ic", output_device_labels, selected_ic);
     }
 
-    fn mic_picker(&self, is_connected: bool, mic_input_device_labels: &[String], selected_mic: &mut i32) {
-        if mic_input_device_labels.is_empty() { return; }
+    fn mic_picker(
+        &self,
+        is_connected: bool,
+        mic_input_device_labels: &[String],
+        selected_mic: &mut i32,
+    ) {
+        if mic_input_device_labels.is_empty() {
+            return;
+        }
         let mic_labels: Vec<String> = std::iter::once("(system default)".to_string())
             .chain(mic_input_device_labels.iter().cloned())
             .collect();
@@ -439,7 +516,12 @@ impl<'ui> Ctx<'ui> {
         self.combo("Mic In", "##mic_in", &mic_labels, selected_mic);
     }
 
-    fn radio_picker(&self, is_connected: bool, radio_input_device_labels: &[String], selected_radio: &mut i32) {
+    fn radio_picker(
+        &self,
+        is_connected: bool,
+        radio_input_device_labels: &[String],
+        selected_radio: &mut i32,
+    ) {
         let radio_labels: Vec<String> = {
             let mut v = vec!["(disabled)".to_string()];
             #[cfg(target_os = "linux")]
@@ -465,7 +547,12 @@ impl<'ui> Ctx<'ui> {
         self.ui.set_next_item_width(self.fw);
         if let Some(_tok) = self.ui.begin_combo("##loglevel", &level_preview) {
             for &lvl in LOG_LEVELS {
-                if self.ui.selectable_config(format!("{lvl}")).selected(*log_level == lvl).build() {
+                if self
+                    .ui
+                    .selectable_config(format!("{lvl}"))
+                    .selected(*log_level == lvl)
+                    .build()
+                {
                     *log_level = lvl;
                 }
             }
@@ -481,7 +568,11 @@ impl<'ui> Ctx<'ui> {
             (false, self.ui.button("Disconnect"))
         } else {
             if self.ui.button("Connect") {
-                debug!("Connect pressed — flight_id='{}' user='{}'", flight_id.trim(), user_name.trim());
+                debug!(
+                    "Connect pressed — flight_id='{}' user='{}'",
+                    flight_id.trim(),
+                    user_name.trim()
+                );
                 if !flight_id.trim().is_empty() && !user_name.trim().is_empty() {
                     return (true, false);
                 }
@@ -496,14 +587,18 @@ impl<'ui> Ctx<'ui> {
         if let Some(statuses) = voip_statuses {
             let map = statuses.lock().unwrap();
             const KNOWN: &[&str] = &["Voice", "IC", "PA", "Radio"];
-            let extras: Vec<&str> = map.keys().map(|s| s.as_str()).filter(|k| !KNOWN.contains(k)).collect();
+            let extras: Vec<&str> = map
+                .keys()
+                .map(|s| s.as_str())
+                .filter(|k| !KNOWN.contains(k))
+                .collect();
             for &label in KNOWN.iter().chain(extras.iter()) {
                 if let Some(slot) = map.get(label) {
                     let s = slot.lock().unwrap();
                     let (color, tag) = match *s {
-                        ClientStatus::Connecting   => ([1.0f32, 0.8, 0.2, 1.0], "connecting"),
-                        ClientStatus::Connected    => ([0.3,    1.0, 0.3, 1.0], "connected"),
-                        ClientStatus::Disconnected => ([0.8,    0.3, 0.3, 1.0], "disconnected"),
+                        ClientStatus::Connecting => ([1.0f32, 0.8, 0.2, 1.0], "connecting"),
+                        ClientStatus::Connected => ([0.3, 1.0, 0.3, 1.0], "connected"),
+                        ClientStatus::Disconnected => ([0.8, 0.3, 0.3, 1.0], "disconnected"),
                     };
                     self.ui.text_disabled(format!("{label}: "));
                     self.ui.same_line();
