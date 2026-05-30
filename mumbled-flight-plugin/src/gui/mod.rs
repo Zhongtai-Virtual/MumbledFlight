@@ -52,11 +52,14 @@ pub struct FilePicker {
     pub selected: Option<usize>,
     pub target: FilePickTarget,
     pub filter_exts: &'static [&'static str],
+    /// Offset of the picker centre from the XPLM window centre, in screen pixels.
+    /// `None` until the first frame after opening (initialised to [0, 0] = centred).
+    pub win_offset: Option<[f32; 2]>,
 }
 
 impl FilePicker {
     pub fn new(start: PathBuf, target: FilePickTarget, filter_exts: &'static [&'static str]) -> Self {
-        let mut s = Self { current_dir: start, entries: Vec::new(), selected: None, target, filter_exts };
+        let mut s = Self { current_dir: start, entries: Vec::new(), selected: None, target, filter_exts, win_offset: None };
         s.refresh();
         s
     }

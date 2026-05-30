@@ -440,20 +440,27 @@ impl<'ui> Ctx<'ui> {
     /// `FilePick::Open` while the user is browsing, and `FilePick::Selected` when a
     /// file is confirmed.
     fn file_picker_modal(&self, picker: &mut FilePicker) -> FilePick {
+        // Resolve the picker's centre position in screen space.
+        // On the first frame win_offset is None → start centred; after that we read back
+        // ImGui's own window position so user drags are preserved even if the XPLM window moves.
+        let win_cx = self.win_x + self.win_w * 0.5;
+        let win_cy = self.win_y + self.win_h * 0.5;
+        let [off_x, off_y] = picker.win_offset.unwrap_or([0.0, 0.0]);
         unsafe {
-            // Centre on first appearance; user can then resize freely.
             imgui_sys::igSetNextWindowPos(
                 imgui_sys::ImVec2 {
-                    x: self.win_x + self.win_w * 0.5,
-                    y: self.win_y + self.win_h * 0.5,
+                    x: win_cx + off_x,
+                    y: win_cy + off_y,
                 },
-                imgui::Condition::Appearing as i32,
+                imgui::Condition::Always as i32,
                 imgui_sys::ImVec2 { x: 0.5, y: 0.5 },
             );
-            imgui_sys::igSetNextWindowSize(
-                imgui_sys::ImVec2 { x: 430.0, y: 330.0 },
-                imgui::Condition::Appearing as i32,
-            );
+            if picker.win_offset.is_none() {
+                imgui_sys::igSetNextWindowSize(
+                    imgui_sys::ImVec2 { x: 430.0, y: 330.0 },
+                    imgui::Condition::Always as i32,
+                );
+            }
             // Min: enough vertical room for path bar + ~6 list rows + button row.
             // Max: never exceed the XPLM window, which is the boundary for mouse-event delivery.
             let row_h = self.ui.frame_height_with_spacing();
@@ -469,11 +476,22 @@ impl<'ui> Ctx<'ui> {
         let Some(_token) = self
             .ui
             .modal_popup_config("##fp")
-            .movable(false)
+            .movable(true)
             .begin_popup()
         else {
             return FilePick::Closed;
         };
+
+        // Record where the picker ended up so we can re-anchor it next frame.
+        // Skip the readback on the very first frame: window_pos() returns stale values before
+        // ImGui has committed the initial layout, which would corrupt the offset immediately.
+        if picker.win_offset.is_some() {
+            let [px, py] = self.ui.window_pos();
+            let [pw, ph] = self.ui.window_size();
+            picker.win_offset = Some([px + pw * 0.5 - win_cx, py + ph * 0.5 - win_cy]);
+        } else {
+            picker.win_offset = Some([0.0, 0.0]);
+        }
 
         // ── Path bar ────────────────────────────────────────────────────────
         let path_str = picker.current_dir.display().to_string();
