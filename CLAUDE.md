@@ -149,7 +149,7 @@ helper in `stack.rs`:
   CA) — verifies the server's presented cert against *only* those anchors with openssl
   (`X509StoreContext`). Done this way because native-tls can't drop the system trust store. With no
   anchor, the server cert is **not** verified. Audio is Opus, 48 kHz mono, position info attached to each voice packet.
-  Connection: uses the idiomatic `(host, port)` pattern for `TcpStream::connect` and `UdpSocket::connect`, which robustly handles hostname resolution and IPv6 formatting.
+  Connection: uses the idiomatic `(host, port)` pattern for `TcpStream::connect` and `UdpSocket::connect`, which robustly handles hostname resolution and IPv6 formatting. UDP sockets are dynamically bound to the correct address family (`0.0.0.0:0` or `[::]:0`) to support IPv6 connectivity.
   `spatialize()` applies a stereo-width blend after all gain/attenuation math:
   `mid + (L/R − mid) × width`, where `width` is read from `spatial_width` at each packet.
   Values in [0, 1] blend toward mono; values in (1, 2] exaggerate the stereo spread beyond

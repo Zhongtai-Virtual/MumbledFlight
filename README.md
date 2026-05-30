@@ -49,6 +49,9 @@ cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice
 # Override the Mumble server (default: 127.0.0.1) and port (default: 64738)
 cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice --server my.server --port 64738
 
+# Connect to an IPv6 server
+cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice --server 2a12:cb41:401::1
+
 # Verbose logging
 RUST_LOG=debug cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice
 ```
