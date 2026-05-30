@@ -148,7 +148,10 @@ helper in `stack.rs`:
   handshake, then — if a `ServerTrust` anchor is configured (the server's cert for pinning, or its
   CA) — verifies the server's presented cert against *only* those anchors with openssl
   (`X509StoreContext`). Done this way because native-tls can't drop the system trust store. With no
-  anchor, the server cert is **not** verified. Audio is Opus, 48 kHz mono, position info attached to each voice packet.
+  anchor, the server cert is **not** verified — so each frontend warns the user about the unverified
+  server at connect time: `run_mumble_stack` logs a `warn!` once per connection (covers both
+  frontends' logs), the CLI also prints an unconditional `eprintln!` (its logger is error-only by
+  default), and the plugin shows a persistent warning in the GUI status area. Audio is Opus, 48 kHz mono, position info attached to each voice packet.
   Connection: uses the idiomatic `(host, port)` pattern for `TcpStream::connect` and `UdpSocket::connect`, which robustly handles hostname resolution and IPv6 formatting. UDP sockets are dynamically bound to the correct address family (`0.0.0.0:0` or `[::]:0`) to support IPv6 connectivity.
   `spatialize()` applies a stereo-width blend after all gain/attenuation math:
   `mid + (L/R − mid) × width`, where `width` is read from `spatial_width` at each packet.

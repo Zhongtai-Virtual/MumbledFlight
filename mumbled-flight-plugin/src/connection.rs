@@ -123,6 +123,10 @@ pub fn start(ps: &mut PluginState) {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_for_stack = Arc::clone(&shutdown);
 
+    // Captured before `server_trust` is moved into the stack: when no anchor is configured the
+    // server's TLS certificate is not verified, so warn the user in the status area.
+    let server_unverified = server_trust.is_none();
+
     runtime.spawn(async move {
         mumble::run_mumble_stack(MumbleStackConfig {
             state: state_clone,
@@ -164,7 +168,11 @@ pub fn start(ps: &mut PluginState) {
         _runtime: runtime,
     });
     ps.gui.is_connected = true;
-    ps.gui.status = String::new();
+    ps.gui.status = if server_unverified {
+        "Warning: server identity unverified — set a Server CA to authenticate the server.".to_string()
+    } else {
+        String::new()
+    };
     ps.gui.save_config();
     info!(
         "connected — user={} flight={}",

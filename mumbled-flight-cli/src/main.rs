@@ -234,6 +234,16 @@ async fn main() -> Result<()> {
         Some(path) => Some(Arc::new(mumble::ServerTrust::load(path)?)),
         None => None,
     };
+    if server_trust.is_none() {
+        // Printed unconditionally (not via the logger, which is error-only by default) so the
+        // unverified-server risk is always visible. With no --server-ca the TLS handshake accepts
+        // any certificate, leaving the connection — and the server password — open to interception.
+        eprintln!(
+            "WARNING: connecting without --server-ca; the Mumble server's certificate is NOT \
+             verified and the connection could be intercepted. Pass --server-ca <cert/CA> to \
+             authenticate the server."
+        );
+    }
 
     let state_mumble = Arc::clone(&state);
     tokio::spawn(async move {
