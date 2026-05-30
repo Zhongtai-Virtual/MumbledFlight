@@ -118,6 +118,8 @@ GitHub Actions builds the plugin for all three platforms on every push to `main`
 
 ## Acknowledgements
 
+**PilotEdge / Keith Smith** — The concept of simulating full aircraft audio for shared-cockpit flying — positional voice, crew intercom, PA to passengers, cockpit speaker monitoring of COM radio, and proximity-based conversations in the FBO and cabin — originates from **Keith Smith** at [PilotEdge](https://www.pilotedge.net), who built this system in collaboration with the Hotstart CL650 shared cockpit feature. MumbledFlight reimplements these ideas on top of Mumble so they are accessible outside the PilotEdge network.
+
 **Spatial audio** — The stereo spatialization math (head-basis projection, Mumble's gain curve, distance falloff, and the `spatialize()` stereo-width blend) is derived from and designed to be compatible with the [Mumble](https://github.com/mumble-voip/mumble) open-source VoIP client's positional audio model. Mumble is licensed under the BSD 2-Clause License.
 
 **Claude** — Architecture, implementation, and iteration on this project were developed with the assistance of [Claude](https://claude.ai) (Anthropic). Spatial math, protocol integration, and the plugin GUI were all shaped through that collaboration.
