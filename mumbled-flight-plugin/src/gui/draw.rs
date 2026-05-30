@@ -143,7 +143,7 @@ impl GuiState {
             // padding keeps the right margin symmetric with the left and stops the trailing
             // reset icons from being jammed against the window's outer edge.
             let pad_r = ui.clone_style().window_padding[0];
-            let fw = (width as f32 - 115.0 - pad_r).max(80.0);
+            let fw = (width as f32 - LABEL_COL_X - pad_r).max(80.0);
             let p = Ctx {
                 ui: &*ui,
                 fw,
@@ -354,6 +354,10 @@ impl GuiState {
 // Groups shared draw-time state (`ui`, `fw`) so panel methods don't repeat
 // those two parameters on every call.
 
+/// X-coordinate where the widget column begins (pixels from window left edge).
+/// Must match the `width - LABEL_COL_X` subtraction in `GuiState::draw`.
+const LABEL_COL_X: f32 = 115.0;
+
 struct BrowseClicks {
     cert: bool,
     ca: bool,
@@ -375,7 +379,7 @@ impl<'ui> Ctx<'ui> {
     fn row(&self, label: &str, id: &str, buf: &mut String) {
         self.ui.text(label);
         self.ui.same_line();
-        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw);
         self.ui.input_text(id, buf).build();
     }
@@ -384,7 +388,7 @@ impl<'ui> Ctx<'ui> {
     fn password_row(&self, label: &str, id: &str, buf: &mut String) {
         self.ui.text(label);
         self.ui.same_line();
-        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw);
         self.ui.input_text(id, buf).password(true).build();
     }
@@ -427,7 +431,7 @@ impl<'ui> Ctx<'ui> {
         let spacing = style.item_spacing[0];
         self.ui.text(label);
         self.ui.same_line();
-        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw - btn_w - spacing);
         self.ui.input_text(id, buf).build();
         self.ui.same_line();
@@ -495,12 +499,13 @@ impl<'ui> Ctx<'ui> {
 
         // ── Path bar ────────────────────────────────────────────────────────
         let path_str = picker.current_dir.display().to_string();
-        let display_path = if path_str.len() > 48 {
-            &path_str[path_str.len() - 48..]
-        } else {
-            &path_str
+        let start = {
+            let s = path_str.len().saturating_sub(48);
+            (s..=path_str.len())
+                .find(|&i| path_str.is_char_boundary(i))
+                .unwrap_or(0)
         };
-        self.ui.text(display_path);
+        self.ui.text(&path_str[start..]);
 
         // ── Entry list ───────────────────────────────────────────────────────
         let mut navigate_to: Option<PathBuf> = None;
@@ -602,7 +607,7 @@ impl<'ui> Ctx<'ui> {
 
         self.ui.text(label);
         self.ui.same_line();
-        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw - icon_sz - spacing);
         self.ui
             .slider_config(id, min, max)
@@ -679,7 +684,7 @@ impl<'ui> Ctx<'ui> {
             .unwrap_or("(default)");
         self.ui.text(label);
         self.ui.same_line();
-        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw);
         if let Some(_tok) = self.ui.begin_combo(id, preview) {
             let avail_w = self.ui.content_region_avail()[0];
@@ -715,7 +720,7 @@ impl<'ui> Ctx<'ui> {
         {
             self.ui.text("Port");
             self.ui.same_line();
-            self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+            self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
             self.ui.set_next_item_width(self.fw);
             let mut p = *port as i32;
             if self
@@ -792,7 +797,7 @@ impl<'ui> Ctx<'ui> {
     fn denoise_toggle(&self, denoise: &mut bool, is_connected: bool) {
         self.ui.text("Denoise");
         self.ui.same_line();
-        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         let _dis = self.ui.begin_disabled(is_connected);
         self.ui.checkbox("##denoise", denoise);
     }
@@ -857,7 +862,7 @@ impl<'ui> Ctx<'ui> {
         let level_preview = format!("{log_level}");
         self.ui.text("Log Level");
         self.ui.same_line();
-        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw);
         if let Some(_tok) = self.ui.begin_combo("##loglevel", &level_preview) {
             for &lvl in LOG_LEVELS {

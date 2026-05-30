@@ -20,7 +20,7 @@
 
 use log::warn;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::Path;
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -75,14 +75,14 @@ impl Default for PluginConfig {
 }
 
 impl PluginConfig {
-    pub fn load(path: &PathBuf) -> Self {
+    pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|s| toml::from_str(&s).ok())
             .unwrap_or_default()
     }
 
-    pub fn save(&self, path: &PathBuf) {
+    pub fn save(&self, path: &Path) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
