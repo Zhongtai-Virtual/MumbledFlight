@@ -217,18 +217,19 @@ disabled, 1 = auto-sink (`__auto__`), 2+ = input devices; on macOS/Windows index
 1+ = input devices (auto-sink entry is hidden). `radio_params()`, `radio_source_str()`, and
 `refresh_output_devices()` all use the same offset constant.
 
-**Draw loop structure** (`draw.rs`): `GuiState::draw` snapshots mutable fields into locals,
-renders via imgui, then writes them back — necessary to avoid borrow conflicts with `imgui::Ui`.
-The rendering logic is split into panel methods on a local `struct Ctx<'ui> { ui, fw }` that
-carries the two shared draw-time constants. Primitives (`row`, `slider`, `combo`) and panels
-(`connection_fields`, `audio_controls`, `denoise_toggle`, `output_device_pickers`, `mic_picker`,
-`radio_picker`, `log_level_picker`, `connect_button`, `status_display`) are all methods on `Ctx`.
+**Draw loop structure** (`draw.rs`): `GuiState::draw` snapshots mutable fields into locals via `.take()` or `.clone()`, renders via imgui, then writes them back — necessary to avoid borrow conflicts with `imgui::Ui`. The rendering logic is split into panel methods on a local `struct Ctx<'ui> { ui, fw }` that carries the two shared draw-time constants. Primitives (`row`, `password_row`, `file_row`, `slider`, `combo`) and panels (`connection_fields`, `audio_controls`, `denoise_toggle`, `output_device_pickers`, `mic_picker`, `radio_picker`, `log_level_picker`, `connect_button`, `status_display`) are all methods on `Ctx`.
+
+**Connection fields layout**: required fields first (Server → Flight ID → Username), then an `Optional auth & security` collapsing header (Password, Cert Pass, Client Cert, Server CA). The header defaults open when any of those four fields is non-empty (`[&str; 4]` typed array + `.any(|s| !s.is_empty())`). File-path fields (Client Cert, Server CA) use `file_row`, which renders a text input + `...` browse button.
 
 **Sliders** — Voice Vol, IC Vol, Mic Gain, and Spatial all go through `Ctx::slider` (min, max,
 `SliderFlags`, default). Double-clicking any slider resets it to its default. The Spatial slider
 (`spatial_width`, 0–2, linear, `NO_INPUT`) controls stereo width: 0 = mono, 1 = natural geometry
 (default), 2 = super-stereo. It is live-adjustable via `spatial_width_live: Option<Arc<AtomicU32>>`
 — same pattern as `mic_gain_live`, `ambient_vol_live`, `ic_vol_live`.
+
+**Window size**: default 630×600 (`left: 60, top: 660, right: 690, bottom: 60` in `window.rs`).
+
+**X-Plane 12 plugin path**: install as `Resources/plugins/MumbledFlight/lin_x64/MumbledFlight.xpl` (Linux), `mac_x64/`, `win_x64/`. The old XP10/11 `64/lin.xpl` layout is not used.
 
 ## Conventions & gotchas
 
