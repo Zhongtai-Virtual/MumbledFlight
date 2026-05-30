@@ -94,8 +94,8 @@ pub unsafe fn create_xplm_window() -> XPLMWindowID {
     let mut params = xplane_sys::XPLMCreateWindow_t {
         structSize: std::mem::size_of::<xplane_sys::XPLMCreateWindow_t>() as c_int,
         left: 60,
-        top: 460,
-        right: 480,
+        top: 660,
+        right: 690,
         bottom: 60,
         visible: 0,
         drawWindowFunc: Some(draw_cb),
