@@ -8,16 +8,11 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct PluginConfig {
     pub server: String,
-    /// Mumble server password. **Not** persisted here — stored in the OS secret store. The field
-    /// is retained only to read (and migrate) legacy plain-text values; it is never written
-    /// back (kept empty + skipped on serialize).
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub server_password: String,
+    // Secrets (server password, client-cert passphrase) are intentionally absent — they live in
+    // the OS secret store (`gui/secrets.rs`), never in this file. Any such keys in an existing
+    // config.toml are ignored on load and dropped on the next save.
     /// Optional client certificate (PKCS#12 / .p12) path used instead of password auth.
     pub cert_path: String,
-    /// Passphrase for `cert_path`. Stored in the OS secret store, not here (legacy-read only).
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub cert_pass: String,
     /// Optional CA / pinned-cert path (PEM/DER) used to verify the server certificate.
     pub server_ca: String,
     pub flight_id: String,
@@ -41,9 +36,7 @@ impl Default for PluginConfig {
     fn default() -> Self {
         Self {
             server: "127.0.0.1:64738".to_string(),
-            server_password: String::new(),
             cert_path: String::new(),
-            cert_pass: String::new(),
             server_ca: String::new(),
             flight_id: String::new(),
             user_name: String::new(),
