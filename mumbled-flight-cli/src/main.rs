@@ -282,7 +282,7 @@ async fn main() -> Result<()> {
     // 5. Run the X-Plane WebAPI bridge (Main Thread) — skipped in single-client test mode
     //    to prevent DataRef updates from overwriting the pre-configured state above.
     if args.test.is_none() {
-        xplane::bridge::run_bridge_forever(state).await?;
+        xplane::run_bridge_forever(state).await?;
     } else {
         std::future::pending::<()>().await;
     }

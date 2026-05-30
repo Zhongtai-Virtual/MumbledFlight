@@ -265,7 +265,7 @@ impl Default for CockpitState {
 
 impl CockpitState {
     /// DataRef booleans are encoded as 0.0/1.0; treat anything meaningfully above zero as true.
-    fn f32_to_bool(v: f32) -> bool {
+    pub fn f32_to_bool(v: f32) -> bool {
         v > 0.1
     }
 
@@ -296,11 +296,31 @@ impl CockpitState {
         }
     }
 
+    /// Whether the IC client should transmit: seated as Pilot, IC keyed, RT not active.
+    pub fn should_transmit_ic(&self) -> bool {
+        self.role == SharedCockpitRole::Pilot
+            && (self.acp_ic || self.contwheel_ic)
+            && !self.acp_rt
+            && !self.contwheel_rt
+    }
+
+    /// Whether the PA client should transmit: seated as Pilot, mic selector on PA, RT active.
+    pub fn should_transmit_pa(&self) -> bool {
+        self.role == SharedCockpitRole::Pilot
+            && self.mic == AcpMicSelection::Pa
+            && (self.acp_rt || self.contwheel_rt)
+    }
+
+    /// Whether the Radio relay client should transmit.
+    pub fn should_transmit_radio(&self, has_source: bool) -> bool {
+        has_source && !self.is_guest && (self.com1_rx || self.com2_rx) && self.spkr_tog
+    }
+
     /// Applies a raw f32 DataRef value to the cockpit state. This is the single update path:
     /// the plugin reads f32/i32 XPLM handles directly, and the CLI bridge converts its JSON
     /// values to f32 at the bridge boundary (see `cli/src/xplane/bridge.rs`).
     pub fn update_from_float(&mut self, id: DataRefId, val: f32) {
-        let old_state = self.clone();
+        let old = (self.acp_ic, self.contwheel_ic, self.mic, self.seat, self.role, self.zone);
 
         // Seat-specific controls (ACP*, contwheel*) only apply when `owns(id)` is true.
         let mine = self.owns(id);
@@ -349,10 +369,8 @@ impl CockpitState {
             DataRefId::SharedCkptIsGuest => self.is_guest = Self::f32_to_bool(val),
         }
 
-        if self.acp_ic != old_state.acp_ic || self.contwheel_ic != old_state.contwheel_ic
-            || self.mic != old_state.mic
-            || self.seat != old_state.seat || self.role != old_state.role || self.zone != old_state.zone
-        {
+        let new = (self.acp_ic, self.contwheel_ic, self.mic, self.seat, self.role, self.zone);
+        if new != old {
             debug!("[State] seat={:?} role={:?} zone={:?} ic={} contwheel_ic={} mic={:?} (via {:?})",
                 self.seat, self.role, self.zone, self.acp_ic, self.contwheel_ic, self.mic, id);
         }

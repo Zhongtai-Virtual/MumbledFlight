@@ -221,7 +221,7 @@ impl GuiState {
     fn make_gl() -> glow::Context {
         unsafe {
             glow::Context::from_loader_function(|s| {
-                let cstr = CString::new(s).unwrap_or_default();
+                let cstr = CString::new(s).expect("GL symbol names contain no interior nul bytes");
                 #[cfg(not(target_os = "windows"))]
                 {
                     // RTLD_DEFAULT (null) searches already-loaded libs — libGL is loaded by X-Plane.

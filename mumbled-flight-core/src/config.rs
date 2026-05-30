@@ -39,8 +39,8 @@ impl Config {
 
         for line in reader.lines().map_while(Result::ok) {
             let line = line.trim();
-            if line.starts_with("netlink/user_name = ") {
-                user_name = Some(line.replace("netlink/user_name = ", "").trim().to_string());
+            if let Some(value) = line.strip_prefix("netlink/user_name = ") {
+                user_name = Some(value.trim().to_string());
             }
         }
 

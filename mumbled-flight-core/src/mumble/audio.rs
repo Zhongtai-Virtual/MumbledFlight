@@ -18,6 +18,8 @@
 
 //! High-Performance Audio Engine for MumbledFlight.
 
+use super::OPUS_FRAME_SAMPLES;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, debug, error, warn};
 use nnnoiseless::DenoiseState;
@@ -366,7 +368,7 @@ fn pw_null_sink_loop(
 ///
 /// On macOS/Windows: iterates CPAL devices and matches by exact name.
 #[cfg(target_os = "linux")]
-fn select_device(node: Option<&str>, input: bool) -> cpal::Device {
+fn select_device(node: Option<&str>, input: bool) -> Option<cpal::Device> {
     unsafe {
         match node {
             Some(n) => std::env::set_var("PIPEWIRE_NODE", n),
@@ -382,7 +384,6 @@ fn select_device(node: Option<&str>, input: bool) -> cpal::Device {
                 warn!("[Audio] 'pipewire' input device not found, falling back to system default");
                 host.default_input_device()
             })
-            .expect("No PipeWire input device")
     } else {
         host.output_devices().ok()
             .and_then(|mut d| d.find(is_pw))
@@ -390,25 +391,20 @@ fn select_device(node: Option<&str>, input: bool) -> cpal::Device {
                 warn!("[Audio] 'pipewire' output device not found, falling back to system default");
                 host.default_output_device()
             })
-            .expect("No PipeWire output device")
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn select_device(node: Option<&str>, input: bool) -> cpal::Device {
+fn select_device(node: Option<&str>, input: bool) -> Option<cpal::Device> {
     let host = cpal::default_host();
     if let Some(name) = node {
         let devices = if input { host.input_devices() } else { host.output_devices() };
         if let Some(d) = devices.ok().and_then(|mut it| it.find(|d| d.name().unwrap_or_default() == name)) {
-            return d;
+            return Some(d);
         }
         warn!("[Audio] device '{name}' not found, falling back to system default");
     }
-    if input {
-        host.default_input_device().expect("no default input device")
-    } else {
-        host.default_output_device().expect("no default output device")
-    }
+    if input { host.default_input_device() } else { host.default_output_device() }
 }
 
 /// Generates a 500 Hz sine tone via ffmpeg and feeds it into the mic pipeline.
@@ -448,7 +444,7 @@ fn run_ffmpeg_capture(
     mic_gain: Arc<AtomicU32>,
 ) {
     std::thread::spawn(move || {
-        const SAMPLES: usize = 960;
+        const SAMPLES: usize = OPUS_FRAME_SAMPLES;
         const FRAME_DUR: std::time::Duration = std::time::Duration::from_millis(20);
         let mut next = std::time::Instant::now();
         loop {
@@ -508,8 +504,8 @@ pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
         let mut accum: Vec<f32> = Vec::new();
         for chunk in raw_rx {
             accum.extend_from_slice(&chunk);
-            while accum.len() >= 960 {
-                let frame: Vec<f32> = accum.drain(..960).collect();
+            while accum.len() >= OPUS_FRAME_SAMPLES {
+                let frame: Vec<f32> = accum.drain(..OPUS_FRAME_SAMPLES).collect();
                 let _ = tx.try_send(frame);
             }
         }
@@ -518,7 +514,10 @@ pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
     #[cfg(not(target_os = "linux"))]
     std::thread::spawn(move || {
         let _guard = device_open_lock().lock().unwrap();
-        let device = select_device(Some(&source_name), true);
+        let device = match select_device(Some(&source_name), true) {
+            Some(d) => d,
+            None => { error!("[Audio:Loopback] no input device available for '{source_name}'"); return; }
+        };
         let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
         let config = match device.supported_input_configs() {
             Ok(mut cfgs) => cfgs.find(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000),
@@ -560,7 +559,8 @@ pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
             return;
         }
         // Park the thread — the stream keeps running as long as this thread lives.
-        loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
+        // Loop guards against spurious unparks.
+        loop { std::thread::park(); }
     });
 }
 
@@ -718,7 +718,10 @@ pub fn start_capture(
         // serialise concurrent opens (on Linux also guards the PIPEWIRE_NODE write).
         let _stream = {
             let _guard = device_open_lock().lock().unwrap();
-            let device = select_device(device_name_filter.as_deref(), true);
+            let device = match select_device(device_name_filter.as_deref(), true) {
+                Some(d) => d,
+                None => { error!("[Audio:Capture] no input device available"); return; }
+            };
             let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
             let config = match device.supported_input_configs() {
                 Ok(mut cfgs) => cfgs
@@ -782,8 +785,8 @@ pub fn start_capture(
                         output_buffer.append(&mut capture_buffer);
                     }
 
-                    while output_buffer.len() >= 960 {
-                        let frame: Vec<f32> = output_buffer.drain(..960).collect();
+                    while output_buffer.len() >= OPUS_FRAME_SAMPLES {
+                        let frame: Vec<f32> = output_buffer.drain(..OPUS_FRAME_SAMPLES).collect();
                         let _ = tx.try_send(frame);
                     }
                 },
@@ -818,7 +821,10 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
 
         let (stream, device_channels) = {
             let _guard = device_open_lock().lock().unwrap();
-            let device = select_device(preferred_device.as_deref(), false);
+            let device = match select_device(preferred_device.as_deref(), false) {
+                Some(d) => d,
+                None => { error!("[Audio:Out] no output device available"); return; }
+            };
             let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
 
             let config = match device.supported_output_configs() {

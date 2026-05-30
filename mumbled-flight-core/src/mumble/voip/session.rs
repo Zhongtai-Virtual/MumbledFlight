@@ -38,7 +38,7 @@ use tokio_util::codec::Framed;
 
 use super::client::{ClientRole, MumbleVoipClient};
 use super::spatial::{decode_opus_packet, parse_position};
-use crate::state::{AcpMicSelection, CockpitState, SharedCockpitRole, SharedCockpitZone};
+use crate::state::{CockpitState, SharedCockpitRole, SharedCockpitZone};
 
 pub type Control = Framed<TlsStream<TcpStream>, ClientControlCodec>;
 
@@ -86,15 +86,15 @@ impl Session {
         }
         let key: [u8; 16] = match key_raw.try_into() {
             Ok(k) => k,
-            _ => return,
+            _ => { log::warn!("[VoIP] CryptSetup: unexpected key size (expected 16 bytes)"); return; }
         };
         let c_nonce: [u8; 16] = match setup.get_client_nonce().try_into() {
             Ok(n) => n,
-            _ => return,
+            _ => { log::warn!("[VoIP] CryptSetup: unexpected client nonce size (expected 16 bytes)"); return; }
         };
         let s_nonce: [u8; 16] = match setup.get_server_nonce().try_into() {
             Ok(n) => n,
-            _ => return,
+            _ => { log::warn!("[VoIP] CryptSetup: unexpected server nonce size (expected 16 bytes)"); return; }
         };
         self.crypt = Some(CryptState::new_from(key, c_nonce, s_nonce));
     }
@@ -412,29 +412,9 @@ impl Session {
         let (is_active, tx_vol) = {
             let s = state.lock().unwrap();
             match client.role {
-                ClientRole::Radio { has_source } => {
-                    let active = has_source
-                        && !s.is_guest
-                        && (s.com1_rx || s.com2_rx)
-                        && s.spkr_tog;
-                    (active, s.spkr_vol)
-                }
-                ClientRole::Ic => {
-                    // TX when: seated as Pilot AND (ACP/*/ic keyed OR contwheel/*/ic pressed)
-                    //         AND neither RT source is active (RT takes priority over IC)
-                    let active = s.role == SharedCockpitRole::Pilot
-                        && (s.acp_ic || s.contwheel_ic)
-                        && !s.acp_rt
-                        && !s.contwheel_rt;
-                    (active, 1.0)
-                }
-                ClientRole::Pa => {
-                    // TX when: seated as Pilot AND mic selector is PA AND RT active on contwheel or ACP
-                    let active = s.role == SharedCockpitRole::Pilot
-                        && s.mic == AcpMicSelection::Pa
-                        && (s.acp_rt || s.contwheel_rt);
-                    (active, 2.0)
-                }
+                ClientRole::Radio { has_source } => (s.should_transmit_radio(has_source), s.spkr_vol),
+                ClientRole::Ic    => (s.should_transmit_ic(), 1.0),
+                ClientRole::Pa    => (s.should_transmit_pa(), 2.0),
                 ClientRole::Voice => (true, 1.0),
             }
         };
@@ -498,6 +478,6 @@ impl Session {
 fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }

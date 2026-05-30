@@ -28,6 +28,10 @@ use mumbled_flight_core::{mumble, mumble::{InputType, MumbleStackConfig, TestCli
 
 use crate::PluginState;
 
+fn f32_atomic(v: f32) -> Arc<AtomicU32> {
+    Arc::new(AtomicU32::new(v.to_bits()))
+}
+
 pub struct MumbleConnection {
     pub cockpit_state: Arc<Mutex<CockpitState>>,
     pub _mic_gain: Arc<AtomicU32>,
@@ -74,18 +78,22 @@ pub fn start(ps: &mut PluginState) {
     let user_name = ps.gui.user_name.clone();
     let server_password = ps.gui.server_password.clone();
     let flight_id = ps.gui.flight_id.clone();
-    let mic_gain = Arc::new(AtomicU32::new(ps.gui.gain.to_bits()));
-    let mic_gain_for_thread = Arc::clone(&mic_gain);
-    let ambient_vol = Arc::new(AtomicU32::new(ps.gui.ambient_vol.to_bits()));
-    let ambient_vol_for_thread = Arc::clone(&ambient_vol);
-    let ic_vol = Arc::new(AtomicU32::new(ps.gui.ic_vol.to_bits()));
-    let ic_vol_for_thread = Arc::clone(&ic_vol);
+    // Each Arc is split into two handles: one given to the async stack (moved into the
+    // spawned future) and one retained on ps.gui.*_live so the draw loop can adjust
+    // the value live without reconnecting.
+    let mic_gain     = f32_atomic(ps.gui.gain);
+    let ambient_vol  = f32_atomic(ps.gui.ambient_vol);
+    let ic_vol       = f32_atomic(ps.gui.ic_vol);
+    let spatial_width = f32_atomic(ps.gui.spatial_width);
+    let mic_gain_for_thread      = Arc::clone(&mic_gain);
+    let ambient_vol_for_thread   = Arc::clone(&ambient_vol);
+    let ic_vol_for_thread        = Arc::clone(&ic_vol);
+    let spatial_width_for_thread = Arc::clone(&spatial_width);
     let denoise = ps.gui.denoise;
     let ambient_output = ps.gui.ambient_output();
     let ic_output      = ps.gui.ic_output();
     let mic_input      = ps.gui.mic_input();
     let (radio_source, auto_sink) = ps.gui.radio_params();
-    let spatial_width = Arc::new(AtomicU32::new(ps.gui.spatial_width.to_bits()));
 
     // Optional client-certificate auth. A bad path/passphrase aborts the connect with a
     // status message instead of failing silently inside the four spawned clients.
@@ -124,7 +132,6 @@ pub fn start(ps: &mut PluginState) {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_for_stack = Arc::clone(&shutdown);
 
-    let spatial_width_for_thread = Arc::clone(&spatial_width);
     runtime.spawn(async move {
         mumble::run_mumble_stack(MumbleStackConfig {
             state: state_clone,
