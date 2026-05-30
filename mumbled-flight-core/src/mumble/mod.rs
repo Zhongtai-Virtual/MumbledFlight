@@ -19,9 +19,11 @@
 
 pub mod audio;
 mod stack;
+pub mod transport;
 pub mod voip;
 
 pub use stack::run_mumble_stack;
+pub use transport::{TransportKind, VoipTransport};
 pub use self::voip::client::{ClientCert, ServerTrust, VoipClientStatus};
 pub use self::voip::client::VoipClientStatus as ClientStatus;
 
