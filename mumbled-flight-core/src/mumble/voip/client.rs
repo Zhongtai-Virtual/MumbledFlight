@@ -36,7 +36,6 @@ use openssl::stack::Stack;
 use openssl::x509::store::X509StoreBuilder;
 use openssl::x509::{X509, X509Name, X509StoreContext};
 use std::marker::PhantomData;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpStream, UdpSocket};
@@ -180,16 +179,17 @@ impl ServerTrust {
 impl MumbleVoipClient {
     pub async fn run(
         &self,
-        server_addr: SocketAddr,
+        host: &str,
+        port: u16,
         state: Arc<Mutex<CockpitState>>,
         mut audio_rx: broadcast::Receiver<Vec<f32>>,
         playback_tx: mpsc::Sender<Vec<f32>>,
     ) -> Result<()> {
-        info!("[VoIP:{}] Connecting to {}...", self.username, server_addr);
-        let mut control = self.connect(server_addr).await?;
+        info!("[VoIP:{}] Connecting to {}:{}...", self.username, host, port);
+        let mut control = self.connect(host, port).await?;
         *self.voip_status.lock().unwrap() = VoipClientStatus::Connected;
         let udp = UdpSocket::bind("0.0.0.0:0").await?;
-        udp.connect(&server_addr).await?;
+        udp.connect((host, port)).await?;
 
         let mut session    = Session::new()?;
         let mut udp_buf    = vec![0u8; 2048];
@@ -224,8 +224,8 @@ impl MumbleVoipClient {
         Ok(())
     }
 
-    pub(super) async fn connect(&self, addr: SocketAddr) -> Result<Control> {
-        let tcp = TcpStream::connect(&addr).await?;
+    pub(super) async fn connect(&self, host: &str, port: u16) -> Result<Control> {
+        let tcp = TcpStream::connect((host, port)).await?;
         let identity = match &self.client_cert {
             Some(cert) => cert.identity()?,
             None => self.generate_temp_identity()?,
@@ -240,7 +240,7 @@ impl MumbleVoipClient {
             .danger_accept_invalid_hostnames(true)
             .build()?;
         let tls = TlsConnector::from(connector)
-            .connect(&addr.ip().to_string(), tcp)
+            .connect(host, tcp)
             .await?;
         if let Some(trust) = &self.server_trust {
             let peer = tls

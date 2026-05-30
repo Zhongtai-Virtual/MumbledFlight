@@ -26,7 +26,6 @@ pub use self::voip::client::{ClientCert, ServerTrust, VoipClientStatus};
 pub use self::voip::client::VoipClientStatus as ClientStatus;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
@@ -81,7 +80,8 @@ pub struct MumbleStackConfig {
     /// PipeWire/CPAL node name to use for microphone capture. `None` = system default.
     pub mic_device: Option<String>,
     pub test_pos: Option<[f32; 3]>,
-    pub server_addr: SocketAddr,
+    pub server_host: String,
+    pub server_port: u16,
     pub ambient_output: Option<String>,
     pub ic_output: Option<String>,
     pub ambient_vol: Arc<AtomicU32>,

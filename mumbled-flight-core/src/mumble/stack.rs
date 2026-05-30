@@ -17,7 +17,6 @@
 
 //! Stack startup: wires mic capture, radio loopback, playback mixers, and the four VoIP clients.
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::{broadcast, mpsc};
@@ -30,13 +29,14 @@ use crate::state::{CockpitState, SharedCockpitZone};
 /// Spawns a single Mumble client's run loop, logging a disconnect at error level.
 fn spawn_client(
     client: MumbleVoipClient,
-    server_addr: SocketAddr,
+    server_host: String,
+    server_port: u16,
     state: Arc<Mutex<CockpitState>>,
     audio_rx: broadcast::Receiver<Vec<f32>>,
     playback_tx: mpsc::Sender<Vec<f32>>,
 ) {
     tokio::spawn(async move {
-        if let Err(e) = client.run(server_addr, state, audio_rx, playback_tx).await {
+        if let Err(e) = client.run(&server_host, server_port, state, audio_rx, playback_tx).await {
             log::error!("[VoIP:{}] disconnected: {e}", client.username);
         }
     });
@@ -78,7 +78,8 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         input_type,
         mic_device,
         test_pos,
-        server_addr,
+        server_host,
+        server_port,
         ambient_output,
         ic_output,
         ambient_vol,
@@ -154,7 +155,8 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 server_trust:   server_trust.clone(),
                 spatial_width:  Arc::clone(&spatial_width),
             },
-            server_addr,
+            server_host.clone(),
+            server_port,
             Arc::clone(&state),
             mic_tx.subscribe(),
             ambient_pb_tx.clone(),
@@ -181,7 +183,8 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 server_trust:   server_trust.clone(),
                 spatial_width:  Arc::clone(&spatial_width),
             },
-            server_addr,
+            server_host.clone(),
+            server_port,
             Arc::clone(&state),
             mic_tx.subscribe(),
             ic_pb_tx,
@@ -204,7 +207,8 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 server_trust:   server_trust.clone(),
                 spatial_width:  Arc::clone(&spatial_width),
             },
-            server_addr,
+            server_host.clone(),
+            server_port,
             Arc::clone(&state),
             mic_tx.subscribe(),
             ambient_pb_tx.clone(),
@@ -229,7 +233,8 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
                 server_trust:   server_trust.clone(),
                 spatial_width:  Arc::clone(&spatial_width),
             },
-            server_addr,
+            server_host.clone(),
+            server_port,
             Arc::clone(&state),
             rtx.subscribe(),
             ambient_pb_tx.clone(),

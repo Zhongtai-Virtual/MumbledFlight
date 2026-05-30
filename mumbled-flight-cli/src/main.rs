@@ -26,7 +26,6 @@ use log::{error, info};
 use mumbled_flight_core::config::Config;
 use mumbled_flight_core::mumble::{self, voip::xplane_to_mumble, InputType, MumbleStackConfig, TestClient};
 use mumbled_flight_core::state::CockpitState;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -94,9 +93,13 @@ struct Args {
     #[arg(long, default_value_t = false)]
     auto_sink: bool,
 
-    /// Mumble server address (host:port).
-    #[arg(short, long, default_value = "127.0.0.1:64738", value_name = "HOST:PORT")]
+    /// Mumble server address (domain or IP).
+    #[arg(short, long, default_value = "127.0.0.1", value_name = "HOST")]
     server: String,
+
+    /// Mumble server port.
+    #[arg(long, default_value_t = 64738, value_name = "PORT")]
+    port: u16,
 
     /// Mumble server password, if the server requires one.
     #[arg(short = 'P', long, value_name = "PASSWORD")]
@@ -167,7 +170,6 @@ async fn main() -> Result<()> {
 
     // 2. Initialize shared state
     let state = Arc::new(Mutex::new(CockpitState::default()));
-    let server_addr: SocketAddr = args.server.parse()?;
 
     // 3. Resolve Identity
     let user_prefix = if let Some(u) = args.user {
@@ -266,7 +268,8 @@ async fn main() -> Result<()> {
             input_type,
             mic_device: args.mic_device,
             test_pos, // None = use real X-Plane position; Some = fixed pos
-            server_addr,
+            server_host: args.server,
+            server_port: args.port,
             ambient_output: None,
             ic_output: None,
             ambient_vol: Arc::new(AtomicU32::new(1.0_f32.to_bits())),

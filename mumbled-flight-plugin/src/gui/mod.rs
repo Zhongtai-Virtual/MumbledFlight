@@ -66,9 +66,10 @@ pub struct GuiState {
     screen_h: i32,
     logged_coords: bool,
     mouse_pos: [f32; 2],
-    mouse_down: [bool; 5],
+    pub mouse_down: [bool; 5],
 
     pub server: String,
+    pub port: u16,
     pub server_password: String,
     pub cert_path: String,
     pub cert_pass: String,
@@ -228,6 +229,7 @@ impl GuiState {
             mouse_pos: [0.0; 2],
             mouse_down: [false; 5],
             server: cfg.server,
+            port: cfg.port,
             server_password,
             cert_path: cfg.cert_path,
             cert_pass,
@@ -278,6 +280,7 @@ impl GuiState {
         secrets::store(secrets::CERT_PASSPHRASE, &self.cert_pass);
         let cfg = config::PluginConfig {
             server: self.server.clone(),
+            port: self.port,
             cert_path: self.cert_path.clone(),
             server_ca: self.server_ca.clone(),
             flight_id: self.flight_id.clone(),

@@ -20,7 +20,6 @@
 
 use log::{info, warn};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -49,19 +48,9 @@ impl Drop for MumbleConnection {
 
 pub fn start(ps: &mut PluginState) {
     info!(
-        "start_connection — server='{}' user='{}' flight='{}'",
-        ps.gui.server, ps.gui.user_name, ps.gui.flight_id
+        "start_connection — server='{}' port={} user='{}' flight='{}'",
+        ps.gui.server, ps.gui.port, ps.gui.user_name, ps.gui.flight_id
     );
-
-    let server_addr: SocketAddr = match ps.gui.server.parse() {
-        Ok(a) => a,
-        Err(e) => {
-            let msg = format!("Invalid server address '{}': {e}", ps.gui.server);
-            warn!("{msg}");
-            ps.gui.status = msg;
-            return;
-        }
-    };
 
     let cockpit_state = Arc::new(Mutex::new(CockpitState::default()));
     let runtime = match tokio::runtime::Runtime::new() {
@@ -76,6 +65,8 @@ pub fn start(ps: &mut PluginState) {
 
     let state_clone = Arc::clone(&cockpit_state);
     let user_name = ps.gui.user_name.clone();
+    let server_host = ps.gui.server.clone();
+    let server_port = ps.gui.port;
     let server_password = ps.gui.server_password.clone();
     let flight_id = ps.gui.flight_id.clone();
     // Each Arc is split into two handles: one given to the async stack (moved into the
@@ -148,7 +139,8 @@ pub fn start(ps: &mut PluginState) {
             input_type: InputType::Real,
             mic_device: mic_input,
             test_pos: None,
-            server_addr,
+            server_host,
+            server_port,
             ambient_output,
             ic_output,
             ambient_vol: ambient_vol_for_thread,

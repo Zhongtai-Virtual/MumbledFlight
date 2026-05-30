@@ -76,6 +76,7 @@ impl GuiState {
 
         // Snapshot mutable fields — avoids borrow conflict between imgui::Ui and self.
         let mut server = self.server.clone();
+        let mut port = self.port;
         let mut server_password = self.server_password.clone();
         let mut cert_path = self.cert_path.clone();
         let mut cert_pass = self.cert_pass.clone();
@@ -136,6 +137,7 @@ impl GuiState {
                 .build(|| {
                     p.connection_fields(
                         &mut server,
+                        &mut port,
                         &mut server_password,
                         &mut cert_path,
                         &mut cert_pass,
@@ -174,6 +176,7 @@ impl GuiState {
 
         // Write back modified config locals.
         self.server = server;
+        self.port = port;
         self.server_password = server_password;
         self.cert_path = cert_path;
         self.cert_pass = cert_pass;
@@ -412,6 +415,7 @@ impl<'ui> Ctx<'ui> {
     fn connection_fields(
         &self,
         server: &mut String,
+        port: &mut u16,
         server_password: &mut String,
         cert_path: &mut String,
         cert_pass: &mut String,
@@ -420,6 +424,16 @@ impl<'ui> Ctx<'ui> {
         user_name: &mut String,
     ) {
         self.row("Server", "##srv", server);
+        {
+            self.ui.text("Port");
+            self.ui.same_line();
+            self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+            self.ui.set_next_item_width(self.fw);
+            let mut p = *port as i32;
+            if self.ui.input_int("##port", &mut p).build() {
+                *port = p.clamp(1, 65535) as u16;
+            }
+        }
         self.row("Flight ID", "##fid", flight_id);
         self.row("Username", "##usr", user_name);
 

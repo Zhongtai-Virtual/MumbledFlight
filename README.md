@@ -46,8 +46,8 @@ The CLI polls X-Plane's Web REST API instead of reading DataRefs in-process:
 # Connect to a local Mumble server using live X-Plane state
 cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice
 
-# Override the Mumble server (default: 127.0.0.1:64738)
-cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice --server my.server:64738
+# Override the Mumble server (default: 127.0.0.1) and port (default: 64738)
+cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice --server my.server --port 64738
 
 # Verbose logging
 RUST_LOG=debug cargo run -p mumbled-flight-cli -- <FLIGHT_ID> --user Alice

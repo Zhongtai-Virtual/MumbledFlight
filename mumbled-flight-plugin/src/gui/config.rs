@@ -26,6 +26,7 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct PluginConfig {
     pub server: String,
+    pub port: u16,
     // Secrets (server password, client-cert passphrase) are intentionally absent — they live in
     // the OS secret store (`gui/secrets.rs`), never in this file. Any such keys in an existing
     // config.toml are ignored on load and dropped on the next save.
@@ -53,7 +54,8 @@ pub struct PluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
-            server: "127.0.0.1:64738".to_string(),
+            server: "127.0.0.1".to_string(),
+            port: 64738,
             cert_path: String::new(),
             server_ca: String::new(),
             flight_id: String::new(),

@@ -76,8 +76,8 @@ cargo run -p mumbled-flight-cli -- testflight --user Bob --test ic --file clip.w
 cargo run -p mumbled-flight-cli -- --list-devices
 ```
 
-`--sine` / `--file` shell out to **ffmpeg** as the mic source. Default server is `127.0.0.1:64738`
-(override with `--server host:port`). Set `RUST_LOG=debug` (env_logger) for verbose tracing.
+`--sine` / `--file` shell out to **ffmpeg** as the mic source. Default server is `127.0.0.1` port `64738`
+(override with `--server host` and `--port port`). Set `RUST_LOG=debug` (env_logger) for verbose tracing.
 
 ## Architecture — the big picture
 
@@ -115,7 +115,7 @@ shared across every async client.
 ### 3. `run_mumble_stack` fans out into multiple Mumble clients (`core/src/mumble/stack.rs`)
 This is the heart of the system. Types and the `MumbleStackConfig` struct are declared in
 `core/src/mumble/mod.rs`; the implementation lives in `stack.rs`. Both frontends call
-`run_mumble_stack` with a single `MumbleStackConfig` (state, identity, server, devices, radio
+`run_mumble_stack` with a single `MumbleStackConfig` (state, identity, host, port, devices, radio
 source, test mode, `statuses` map — see the struct for fields). One real microphone capture is
 broadcast (tokio `broadcast` channel) to **four logical Mumble clients**, each a separate TLS+UDP
 connection with its own username suffix and Mumble channel, spawned through the `spawn_client`
@@ -149,6 +149,7 @@ helper in `stack.rs`:
   CA) — verifies the server's presented cert against *only* those anchors with openssl
   (`X509StoreContext`). Done this way because native-tls can't drop the system trust store. With no
   anchor, the server cert is **not** verified. Audio is Opus, 48 kHz mono, position info attached to each voice packet.
+  Connection: uses the idiomatic `(host, port)` pattern for `TcpStream::connect` and `UdpSocket::connect`, which robustly handles hostname resolution and IPv6 formatting.
   `spatialize()` applies a stereo-width blend after all gain/attenuation math:
   `mid + (L/R − mid) × width`, where `width` is read from `spatial_width` at each packet.
   Values in [0, 1] blend toward mono; values in (1, 2] exaggerate the stereo spread beyond
