@@ -177,6 +177,8 @@ pub struct GuiState {
 
     pub should_connect: bool,
     pub should_disconnect: bool,
+    /// True while the "connect without server verification" confirmation modal is showing.
+    confirm_unverified: bool,
     pub is_connected: bool,
     pub status: String,
     /// Per-client connection statuses — None when disconnected.
@@ -331,6 +333,7 @@ impl GuiState {
             file_picker: None,
             should_connect: false,
             should_disconnect: false,
+            confirm_unverified: false,
             is_connected: false,
             status: String::new(),
             voip_statuses: None,

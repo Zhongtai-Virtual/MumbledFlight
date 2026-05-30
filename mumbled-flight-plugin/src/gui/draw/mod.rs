@@ -45,7 +45,7 @@ use xplane_sys::{
 
 use super::{FilePickTarget, FilePicker, GuiState};
 use file_picker::{start_dir, FilePick};
-use panels::BrowseClicks;
+use panels::{BrowseClicks, ConfirmConnect, CONFIRM_POPUP_ID};
 use widgets::{Ctx, LABEL_COL_X};
 
 impl GuiState {
@@ -118,6 +118,7 @@ impl GuiState {
         let mut log_level = self.log_level;
         let mut should_connect = false;
         let mut should_disconnect = false;
+        let mut confirm_unverified = self.confirm_unverified;
         let is_connected = self.is_connected;
         let status = self.status.clone();
         let voip_statuses = self.voip_statuses.clone();
@@ -199,8 +200,17 @@ impl GuiState {
                     );
                     p.log_level_picker(&mut log_level);
                     let (conn, disc) = p.connect_button(is_connected, &flight_id, &user_name);
-                    should_connect = conn;
                     should_disconnect = disc;
+                    if conn {
+                        // With no Server CA the server's certificate is not verified — pop a
+                        // confirmation modal before connecting instead of proceeding silently.
+                        if server_ca.trim().is_empty() {
+                            confirm_unverified = true;
+                            ui.open_popup(CONFIRM_POPUP_ID);
+                        } else {
+                            should_connect = true;
+                        }
+                    }
                     p.status_display(voip_statuses.as_ref(), &status);
 
                     // ── File picker (dim + modal rendered last, on top of all widgets) ─
@@ -232,7 +242,7 @@ impl GuiState {
                             }
                         }
                     }
-                    if file_picker.is_some() {
+                    if file_picker.is_some() || confirm_unverified {
                         p.draw_modal_dim();
                     }
                     let pick = file_picker.as_mut().map(|fp| p.file_picker_modal(fp));
@@ -248,6 +258,18 @@ impl GuiState {
                                     FilePickTarget::ServerCa => server_ca = path,
                                 }
                                 file_picker = None;
+                            }
+                        }
+                    }
+
+                    // Unverified-server confirmation: only `Confirm` proceeds to connect.
+                    if confirm_unverified {
+                        match p.confirm_unverified_modal() {
+                            ConfirmConnect::Pending => {}
+                            ConfirmConnect::Cancel => confirm_unverified = false,
+                            ConfirmConnect::Confirm => {
+                                confirm_unverified = false;
+                                should_connect = true;
                             }
                         }
                     }
@@ -295,6 +317,7 @@ impl GuiState {
             log::set_max_level(log_level);
             self.save_config();
         }
+        self.confirm_unverified = confirm_unverified;
         if should_connect {
             self.should_connect = true;
         }

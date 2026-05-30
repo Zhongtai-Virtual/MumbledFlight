@@ -29,6 +29,21 @@ pub(super) struct BrowseClicks {
     pub(super) ca: bool,
 }
 
+/// Shared popup id for the unverified-server confirmation modal. The same string must be used
+/// for `open_popup` (in the draw loop) and `modal_popup_config` (in `confirm_unverified_modal`),
+/// so it lives here as a single constant. Text before `##` is the visible title.
+pub(super) const CONFIRM_POPUP_ID: &str = "Unverified server##confirm_unverified";
+
+/// Result of the "connect without server verification" confirmation modal.
+pub(super) enum ConfirmConnect {
+    /// Still showing, or not yet opened — take no action.
+    Pending,
+    /// User dismissed the dialog; do not connect.
+    Cancel,
+    /// User accepted the risk; proceed to connect.
+    Confirm,
+}
+
 impl<'ui> Ctx<'ui> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn connection_fields(
@@ -230,6 +245,58 @@ impl<'ui> Ctx<'ui> {
             }
             (false, false)
         }
+    }
+
+    /// Confirmation modal shown when Connect is clicked with no Server CA configured — i.e. the
+    /// server's certificate will not be verified. Centred over the XPLM window like the file
+    /// picker. Returns the user's choice (or `Pending` while still open).
+    pub(super) fn confirm_unverified_modal(&self) -> ConfirmConnect {
+        let win_cx = self.win_x + self.win_w * 0.5;
+        let win_cy = self.win_y + self.win_h * 0.5;
+        unsafe {
+            imgui_sys::igSetNextWindowPos(
+                imgui_sys::ImVec2 { x: win_cx, y: win_cy },
+                imgui::Condition::Always as i32,
+                imgui_sys::ImVec2 { x: 0.5, y: 0.5 },
+            );
+            // Fixed width (auto height) so `text_wrapped` has a wrap boundary; never wider than
+            // the XPLM window, whose bounds are the limit for mouse-event delivery.
+            let w = 360.0_f32.min(self.win_w);
+            imgui_sys::igSetNextWindowSize(
+                imgui_sys::ImVec2 { x: w, y: 0.0 },
+                imgui::Condition::Always as i32,
+            );
+        }
+        let Some(_token) = self
+            .ui
+            .modal_popup_config(CONFIRM_POPUP_ID)
+            .resizable(false)
+            .movable(false)
+            .begin_popup()
+        else {
+            return ConfirmConnect::Pending;
+        };
+
+        self.ui.text_wrapped(
+            "No Server CA is configured, so the Mumble server's certificate will not be verified. \
+             An on-path attacker could intercept this connection — including the server password. \
+             Connect anyway?",
+        );
+        self.ui.spacing();
+
+        let cancel = self.ui.button("Cancel##cu");
+        self.ui.same_line();
+        let confirm = self.ui.button("Connect anyway##cu");
+
+        if cancel {
+            self.ui.close_current_popup();
+            return ConfirmConnect::Cancel;
+        }
+        if confirm {
+            self.ui.close_current_popup();
+            return ConfirmConnect::Confirm;
+        }
+        ConfirmConnect::Pending
     }
 
     pub(super) fn status_display(&self, voip_statuses: Option<&VoipStatuses>, status: &str) {
