@@ -33,6 +33,73 @@ use std::sync::atomic::AtomicU32;
 use std::time::{Duration, Instant};
 use log::{debug, info, warn, LevelFilter};
 
+// ── ImGui file picker state ───────────────────────────────────────────────────
+
+pub struct FileEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FilePickTarget {
+    UserCert,
+    ServerCa,
+}
+
+pub struct FilePicker {
+    pub current_dir: PathBuf,
+    pub entries: Vec<FileEntry>,
+    pub selected: Option<usize>,
+    pub target: FilePickTarget,
+    pub filter_exts: &'static [&'static str],
+}
+
+impl FilePicker {
+    pub fn new(start: PathBuf, target: FilePickTarget, filter_exts: &'static [&'static str]) -> Self {
+        let mut s = Self { current_dir: start, entries: Vec::new(), selected: None, target, filter_exts };
+        s.refresh();
+        s
+    }
+
+    pub fn refresh(&mut self) {
+        self.entries.clear();
+        self.selected = None;
+        let Ok(rd) = std::fs::read_dir(&self.current_dir) else { return };
+        let mut dirs: Vec<FileEntry> = Vec::new();
+        let mut files: Vec<FileEntry> = Vec::new();
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') { continue; }
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            if is_dir {
+                dirs.push(FileEntry { name, is_dir: true });
+            } else {
+                let matches = self.filter_exts.is_empty()
+                    || self.filter_exts.iter().any(|ext| name.ends_with(&format!(".{ext}")));
+                if matches {
+                    files.push(FileEntry { name, is_dir: false });
+                }
+            }
+        }
+        dirs.sort_by(|a, b| a.name.cmp(&b.name));
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        self.entries = files.into_iter().chain(dirs).collect();
+    }
+
+    pub fn up(&mut self) {
+        if let Some(parent) = self.current_dir.parent().map(|p| p.to_path_buf()) {
+            self.current_dir = parent;
+            self.refresh();
+        }
+    }
+
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        let i = self.selected?;
+        let e = self.entries.get(i)?;
+        (!e.is_dir).then(|| self.current_dir.join(&e.name))
+    }
+}
+
 struct DeviceSnapshot {
     output_names:  Vec<String>,
     output_labels: Vec<String>,
@@ -102,6 +169,8 @@ pub struct GuiState {
     initial_ic_device: String,
     initial_mic_device: String,
     initial_radio_source: String,
+
+    pub file_picker: Option<FilePicker>,
 
     pub should_connect: bool,
     pub should_disconnect: bool,
@@ -256,6 +325,7 @@ impl GuiState {
             initial_ic_device: cfg.ic_device,
             initial_mic_device: cfg.mic_device,
             initial_radio_source: cfg.radio_source,
+            file_picker: None,
             should_connect: false,
             should_disconnect: false,
             is_connected: false,

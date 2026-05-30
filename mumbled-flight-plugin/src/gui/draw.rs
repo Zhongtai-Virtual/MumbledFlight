@@ -21,8 +21,18 @@ use log::{debug, warn, LevelFilter};
 use std::borrow::Cow;
 use std::ffi::CString;
 use std::os::raw::c_void;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+
+use super::{FilePickTarget, FilePicker};
+use imgui::MouseButton;
+
+enum FilePick {
+    Open,
+    Closed,
+    Selected(FilePickTarget, String),
+}
 
 use mumbled_flight_core::mumble::{ClientStatus, VoipStatuses};
 use xplane_sys::{
@@ -74,7 +84,16 @@ impl GuiState {
             d
         };
 
+        // Plugin folder derived from the already-resolved config path (XPLMGetSystemPath-based).
+        let plugin_dir = self
+            .config_path
+            .parent()
+            .filter(|p| p.is_dir())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }));
+
         // Snapshot mutable fields — avoids borrow conflict between imgui::Ui and self.
+        let mut file_picker = self.file_picker.take();
         let mut server = self.server.clone();
         let mut port = self.port;
         let mut server_password = self.server_password.clone();
@@ -125,7 +144,14 @@ impl GuiState {
             // reset icons from being jammed against the window's outer edge.
             let pad_r = ui.clone_style().window_padding[0];
             let fw = (width as f32 - 115.0 - pad_r).max(80.0);
-            let p = Ctx { ui: &*ui, fw };
+            let p = Ctx {
+                ui: &*ui,
+                fw,
+                win_x: win_imgui_x,
+                win_y: win_imgui_y,
+                win_w: width as f32,
+                win_h: height as f32,
+            };
 
             ui.window("##main")
                 .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
@@ -135,7 +161,11 @@ impl GuiState {
                 .movable(false)
                 .scroll_bar(false)
                 .build(|| {
-                    p.connection_fields(
+                    // ── Regular UI (rendered first, sits behind the dim) ────────────
+                    let BrowseClicks {
+                        cert: cert_browse,
+                        ca: ca_browse,
+                    } = p.connection_fields(
                         &mut server,
                         &mut port,
                         &mut server_password,
@@ -166,6 +196,55 @@ impl GuiState {
                     should_connect = conn;
                     should_disconnect = disc;
                     p.status_display(voip_statuses.as_ref(), &status);
+
+                    // ── File picker (dim + modal rendered last, on top of all widgets) ─
+                    {
+                        let requests: [(bool, FilePickTarget, &str, &'static [&'static str]); 2] = [
+                            (
+                                cert_browse,
+                                FilePickTarget::UserCert,
+                                &cert_path,
+                                &["p12", "pfx"],
+                            ),
+                            (
+                                ca_browse,
+                                FilePickTarget::ServerCa,
+                                &server_ca,
+                                &["pem", "der", "crt"],
+                            ),
+                        ];
+                        if file_picker.is_none() {
+                            if let Some((_, target, current, exts)) =
+                                requests.iter().find(|(b, ..)| *b)
+                            {
+                                file_picker = Some(FilePicker::new(
+                                    start_dir(current, &plugin_dir),
+                                    *target,
+                                    exts,
+                                ));
+                                ui.open_popup("##fp");
+                            }
+                        }
+                    }
+                    if file_picker.is_some() {
+                        p.draw_modal_dim();
+                    }
+                    let pick = file_picker.as_mut().map(|fp| p.file_picker_modal(fp));
+                    if let Some(pick) = pick {
+                        match pick {
+                            FilePick::Open => {}
+                            FilePick::Closed => {
+                                file_picker = None;
+                            }
+                            FilePick::Selected(target, path) => {
+                                match target {
+                                    FilePickTarget::UserCert => cert_path = path,
+                                    FilePickTarget::ServerCa => server_ca = path,
+                                }
+                                file_picker = None;
+                            }
+                        }
+                    }
                 });
         } // ui borrow ends here
         let draw_data = ctx.render();
@@ -175,6 +254,7 @@ impl GuiState {
         renderer.render(draw_data).ok();
 
         // Write back modified config locals.
+        self.file_picker = file_picker;
         self.server = server;
         self.port = port;
         self.server_password = server_password;
@@ -221,6 +301,8 @@ impl GuiState {
         let mut ctx = imgui::Context::create();
         ctx.set_ini_filename(None);
         ctx.style_mut().use_dark_colors();
+        // Disable full-screen modal dim; draw_modal_dim() draws our own clipped to the plugin window.
+        ctx.style_mut().colors[imgui::StyleColor::ModalWindowDimBg as usize] = [0.0; 4];
         ctx.fonts().add_font(&[imgui::FontSource::DefaultFontData {
             config: Some(imgui::FontConfig {
                 size_pixels: 15.0,
@@ -272,9 +354,19 @@ impl GuiState {
 // Groups shared draw-time state (`ui`, `fw`) so panel methods don't repeat
 // those two parameters on every call.
 
+struct BrowseClicks {
+    cert: bool,
+    ca: bool,
+}
+
 struct Ctx<'ui> {
     ui: &'ui imgui::Ui,
     fw: f32,
+    /// XPLM window top-left in ImGui virtual coordinates.
+    win_x: f32,
+    win_y: f32,
+    win_w: f32,
+    win_h: f32,
 }
 
 impl<'ui> Ctx<'ui> {
@@ -295,6 +387,184 @@ impl<'ui> Ctx<'ui> {
         self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw);
         self.ui.input_text(id, buf).password(true).build();
+    }
+
+    /// Draws a semi-transparent overlay over the full XPLM window, sitting on top of all
+    /// regular widgets but below the modal popup (which is a separate ImGui window).
+    fn draw_modal_dim(&self) {
+        let dim = imgui::ImColor32::from_rgba_f32s(0.2, 0.2, 0.2, 0.35);
+        unsafe {
+            // Override the window's content-area scissor so the dim covers the full XPLM
+            // window including its padding, not just the inner content region.
+            imgui_sys::igPushClipRect(
+                imgui_sys::ImVec2 {
+                    x: self.win_x,
+                    y: self.win_y,
+                },
+                imgui_sys::ImVec2 {
+                    x: self.win_x + self.win_w,
+                    y: self.win_y + self.win_h,
+                },
+                false,
+            );
+        }
+        self.ui
+            .get_window_draw_list()
+            .add_rect(
+                [self.win_x, self.win_y],
+                [self.win_x + self.win_w, self.win_y + self.win_h],
+                dim,
+            )
+            .filled(true)
+            .build();
+        unsafe { imgui_sys::igPopClipRect() }
+    }
+
+    /// Same layout as `row` but with a `…` browse button; returns `true` when clicked.
+    fn file_row(&self, label: &str, id: &str, buf: &mut String) -> bool {
+        let style = self.ui.clone_style();
+        let btn_w = self.ui.calc_text_size("...")[0] + style.frame_padding[0] * 2.0;
+        let spacing = style.item_spacing[0];
+        self.ui.text(label);
+        self.ui.same_line();
+        self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
+        self.ui.set_next_item_width(self.fw - btn_w - spacing);
+        self.ui.input_text(id, buf).build();
+        self.ui.same_line();
+        self.ui.button(format!("...{id}_b"))
+    }
+
+    /// Renders the `##fp` modal popup driven by `picker`.
+    ///
+    /// Returns `FilePick::Closed` when the popup is not visible (already dismissed),
+    /// `FilePick::Open` while the user is browsing, and `FilePick::Selected` when a
+    /// file is confirmed.
+    fn file_picker_modal(&self, picker: &mut FilePicker) -> FilePick {
+        unsafe {
+            // Centre on first appearance; user can then resize freely.
+            imgui_sys::igSetNextWindowPos(
+                imgui_sys::ImVec2 {
+                    x: self.win_x + self.win_w * 0.5,
+                    y: self.win_y + self.win_h * 0.5,
+                },
+                imgui::Condition::Appearing as i32,
+                imgui_sys::ImVec2 { x: 0.5, y: 0.5 },
+            );
+            imgui_sys::igSetNextWindowSize(
+                imgui_sys::ImVec2 { x: 430.0, y: 330.0 },
+                imgui::Condition::Appearing as i32,
+            );
+            // Min: enough vertical room for path bar + ~6 list rows + button row.
+            // Max: never exceed the XPLM window, which is the boundary for mouse-event delivery.
+            let row_h = self.ui.frame_height_with_spacing();
+            let min_w = self.ui.calc_text_size("Cancel  Select  ^ Up")[0]
+                + self.ui.clone_style().frame_padding[0] * 6.0;
+            imgui_sys::igSetNextWindowSizeConstraints(
+                imgui_sys::ImVec2 { x: min_w, y: row_h * 8.0 },
+                imgui_sys::ImVec2 { x: self.win_w, y: self.win_h },
+                None,
+                std::ptr::null_mut(),
+            );
+        }
+        let Some(_token) = self
+            .ui
+            .modal_popup_config("##fp")
+            .movable(false)
+            .begin_popup()
+        else {
+            return FilePick::Closed;
+        };
+
+        // ── Path bar ────────────────────────────────────────────────────────
+        let path_str = picker.current_dir.display().to_string();
+        let display_path = if path_str.len() > 48 {
+            &path_str[path_str.len() - 48..]
+        } else {
+            &path_str
+        };
+        self.ui.text(display_path);
+
+        // ── Entry list ───────────────────────────────────────────────────────
+        let mut navigate_to: Option<PathBuf> = None;
+        let mut new_selected = picker.selected;
+        let mut double_click_path: Option<String> = None;
+
+        self.ui
+            .child_window("##fplist")
+            .size([0.0, -self.ui.frame_height_with_spacing()])
+            .border(true)
+            .build(|| {
+                for (i, entry) in picker.entries.iter().enumerate() {
+                    let display = if entry.is_dir {
+                        format!("[D] {}", entry.name)
+                    } else {
+                        format!("    {}", entry.name)
+                    };
+                    let is_sel = new_selected == Some(i);
+                    if self
+                        .ui
+                        .selectable_config(&format!("{display}##fpe{i}"))
+                        .selected(is_sel)
+                        .build()
+                    {
+                        if entry.is_dir {
+                            navigate_to = Some(picker.current_dir.join(&entry.name));
+                        } else {
+                            new_selected = Some(i);
+                        }
+                    }
+                    if self.ui.is_item_hovered()
+                        && self.ui.is_mouse_double_clicked(MouseButton::Left)
+                    {
+                        if entry.is_dir {
+                            navigate_to = Some(picker.current_dir.join(&entry.name));
+                        } else {
+                            double_click_path =
+                                Some(picker.current_dir.join(&entry.name).display().to_string());
+                        }
+                    }
+                }
+            });
+
+        // ── Buttons ──────────────────────────────────────────────────────────
+        let cancel = self.ui.button("Cancel##fpcancel");
+        self.ui.same_line();
+        let can_select = picker.selected_path().is_some() || double_click_path.is_some();
+        let _dis = self.ui.begin_disabled(!can_select);
+        let select = self.ui.button("Select##fpselect");
+        drop(_dis);
+        let up_w = self.ui.calc_text_size("^ Up")[0] + self.ui.clone_style().frame_padding[0] * 2.0;
+        let right_x = self.ui.window_content_region_max()[0] - up_w;
+        self.ui.same_line_with_pos(right_x);
+        let go_up = self.ui.button("^ Up##fpup");
+
+        // Apply navigation or selection from the list.
+        if go_up {
+            picker.up();
+        } else if let Some(dir) = navigate_to {
+            picker.current_dir = dir;
+            picker.refresh();
+        } else {
+            picker.selected = new_selected;
+        }
+
+        if cancel {
+            self.ui.close_current_popup();
+            return FilePick::Open; // Closed is returned next frame once ImGui tears it down.
+        }
+
+        let path = double_click_path.or_else(|| {
+            select
+                .then(|| picker.selected_path().map(|p| p.display().to_string()))
+                .flatten()
+        });
+
+        if let Some(path) = path {
+            self.ui.close_current_popup();
+            return FilePick::Selected(picker.target, path);
+        }
+
+        FilePick::Open
     }
 
     // A labelled slider plus a reset icon; the parameters map 1:1 to imgui's slider config.
@@ -422,7 +692,7 @@ impl<'ui> Ctx<'ui> {
         server_ca: &mut String,
         flight_id: &mut String,
         user_name: &mut String,
-    ) {
+    ) -> BrowseClicks {
         self.row("Server", "##srv", server);
         {
             self.ui.text("Port");
@@ -430,7 +700,13 @@ impl<'ui> Ctx<'ui> {
             self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
             self.ui.set_next_item_width(self.fw);
             let mut p = *port as i32;
-            if self.ui.input_int("##port", &mut p).step(0).step_fast(0).build() {
+            if self
+                .ui
+                .input_int("##port", &mut p)
+                .step(0)
+                .step_fast(0)
+                .build()
+            {
                 *port = p.clamp(1, 65535) as u16;
             }
         }
@@ -452,11 +728,17 @@ impl<'ui> Ctx<'ui> {
             .collapsing_header("Optional auth & security##opt", flags)
         {
             self.password_row("Password", "##pwd", server_password);
+            let cert = self.file_row("Client Cert", "##cert", cert_path);
             self.password_row("Cert Pass", "##certpw", cert_pass);
-            self.row("Client Cert", "##cert", cert_path);
-            self.row("Server CA", "##sca", server_ca);
+            let ca = self.file_row("Server CA", "##sca", server_ca);
+            self.ui.spacing();
+            return BrowseClicks { cert, ca };
         }
         self.ui.spacing();
+        BrowseClicks {
+            cert: false,
+            ca: false,
+        }
     }
 
     fn audio_controls(
@@ -624,7 +906,12 @@ impl<'ui> Ctx<'ui> {
         }
         if !status.is_empty() {
             self.ui.spacing();
-            self.ui.text_disabled(status);
+            let disabled_col =
+                self.ui.clone_style().colors[imgui::StyleColor::TextDisabled as usize];
+            let _col = self
+                .ui
+                .push_style_color(imgui::StyleColor::Text, disabled_col);
+            self.ui.text_wrapped(status);
         }
     }
 }
@@ -647,4 +934,14 @@ fn fit_label<'a>(ui: &imgui::Ui, text: &'a str, max_px: f32) -> Cow<'a, str> {
         end -= 1;
     }
     Cow::Owned(format!("{}...", &text[..end]))
+}
+
+/// Returns the starting directory for the file picker: the parent of the current
+/// field value when it exists on disk, otherwise the plugin folder.
+fn start_dir(current: &str, plugin_dir: &std::path::Path) -> PathBuf {
+    if let Some(dir) = PathBuf::from(current).parent().filter(|d| d.is_dir()) {
+        dir.to_path_buf()
+    } else {
+        plugin_dir.to_path_buf()
+    }
 }
