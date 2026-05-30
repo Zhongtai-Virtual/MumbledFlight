@@ -11,7 +11,7 @@ doors, and xPilot radio state are read from X-Plane DataRefs and used to drive s
 multi-channel Mumble audio so that voice, intercom (IC), public address (PA), and relayed radio
 each behave like the real aircraft's audio system.
 
-There is **no README**. This file is the primary architecture reference.
+See `README.md` for user-facing build and install instructions. This file is the primary architecture reference.
 
 ## Workspace layout
 
@@ -92,10 +92,12 @@ shared across every async client.
   `all()` to discover/poll DataRefs, so omitting it there silently drops the field.
 - `CockpitState::update_from_float(id, val)` is the **single update path** — a raw f32 DataRef
   value mutates state here. The plugin reads f32/i32 XPLM handles and calls it directly; the CLI
-  bridge converts its JSON values to f32 first (`bridge.rs::value_to_f32`). Seat-dependent gating
+  bridge converts its JSON values to f32 first (`xplane.rs::value_to_f32`). Seat-dependent gating
   uses `CockpitState::owns(id)`: ACP1/contwheel0 belong to the **left (Captain) seat**,
   ACP2/contwheel1 to the **right (First Officer) seat**. `owns()` is the one place that resolves
   "which physical control belongs to me" — paired ACP1/ACP2 arms share a single match arm gated on it.
+- **Transmit-gating predicates** (`should_transmit_ic`, `should_transmit_pa`, `should_transmit_radio`) live on `CockpitState` — not in the protocol layer. If a client is keying up when it shouldn't, check here first.
+- `CockpitState::f32_to_bool(v)` is `pub` — use it whenever a DataRef float needs to be interpreted as a boolean (threshold > 0.1).
 - Aircraft-specific identifiers (`CL650/...`, `xpilot/...`) are CL650-coupled. Generalizing to
   other aircraft means abstracting these names.
 
@@ -105,17 +107,19 @@ shared across every async client.
   retried (~every 40 ticks) because aircraft DataRefs only exist once the CL650 is loaded. Each
   tick `poll_datarefs` reads handles and calls `cs.update_from_float`. All XPLM/GL access happens
   on the X-Plane main thread; the global `PluginState` lives in a `OnceLock<Mutex<Option<_>>>`.
-- **CLI** (`cli/src/xplane/bridge.rs`): polls X-Plane's **Web REST API** at
+- **CLI** (`cli/src/xplane.rs`): polls X-Plane's **Web REST API** at
   `http://localhost:8086/api/v3` — first GETs `/datarefs` to map names→numeric IDs (filtered
   through `DataRefId::from_name`), then polls each `/datarefs/{id}/value` on a ticker. Auto-retries
   on error.
 
-### 3. `run_mumble_stack` fans out into multiple Mumble clients (`core/src/mumble/mod.rs`)
-This is the heart of the system. Both frontends call it with a single `MumbleStackConfig` struct
-(state, identity, server, devices, radio source, test mode, `statuses` map — see the struct for
-fields). One real microphone capture is broadcast (tokio `broadcast` channel) to **four logical
-Mumble clients**, each a separate TLS+UDP connection with its own username suffix and Mumble
-channel, spawned through the shared `spawn_client` helper:
+### 3. `run_mumble_stack` fans out into multiple Mumble clients (`core/src/mumble/stack.rs`)
+This is the heart of the system. Types and the `MumbleStackConfig` struct are declared in
+`core/src/mumble/mod.rs`; the implementation lives in `stack.rs`. Both frontends call
+`run_mumble_stack` with a single `MumbleStackConfig` (state, identity, server, devices, radio
+source, test mode, `statuses` map — see the struct for fields). One real microphone capture is
+broadcast (tokio `broadcast` channel) to **four logical Mumble clients**, each a separate TLS+UDP
+connection with its own username suffix and Mumble channel, spawned through the `spawn_client`
+helper in `stack.rs`:
 
 | `ClientRole` | Username | Channel | Purpose |
 |--------------|----------|---------|---------|
@@ -151,10 +155,9 @@ channel, spawned through the shared `spawn_client` helper:
   the natural geometry. Output gains are clamped to ≥ 0 to prevent phase inversion.
 - `session.rs` — `Session` is the *mutable* per-connection state (crypt, channel map, decoders,
   encoder, sequence counters). Key methods:
-  - `on_mic_pcm` — **the transmit-gating logic.** Decides whether *this* client should transmit
-    based on cockpit state. RT (radio transmit) takes priority over IC; PA needs the mic selector
-    on PA + RT keyed; Radio needs `com1_rx||com2_rx` + speaker on + not a shared-cockpit guest.
-    Sends a final "end" frame on PTT release (`was_transmitting`).
+  - `on_mic_pcm` — **the transmit-gating logic.** Delegates to `CockpitState::should_transmit_*`
+    predicates (defined in `state.rs`) to decide whether *this* client should transmit. Sends a
+    final "end" frame on PTT release (`was_transmitting`).
   - `on_udp_recv` — decode + route inbound audio. PA/Radio clients are TX-only and ignore RX
     (the Voice client already covers RX for those channels). IC applies `ic_vol`/`ic_tog` gating
     and plays flat; everything else is spatialized.
@@ -179,11 +182,9 @@ channel, spawned through the shared `spawn_client` helper:
 > it is used in `position_bytes`, `spatialize`, the CLI `--pos` parser, and `RADIO_SPEAKER_POSITION`.
 
 ### 5. Audio I/O (`core/src/mumble/audio.rs`)
-CPAL-based capture/playback. Device selection goes through `select_device(name, input)`, which is
-`#[cfg]`-split: on Linux it steers PipeWire via `PIPEWIRE_NODE` and finds the `"pipewire"` CPAL
-device; on macOS/Windows it iterates CPAL devices by exact name, falling back to the system
-default. All device-open calls are serialised under `device_open_lock` (on Linux this also
-guards the `set_var` race; elsewhere it just serialises concurrent opens).
+CPAL-based capture/playback. Device selection goes through `select_device(name, input) -> Option<cpal::Device>`, which is `#[cfg]`-split: on Linux it steers PipeWire via `PIPEWIRE_NODE` and finds the `"pipewire"` CPAL device; on macOS/Windows it iterates CPAL devices by exact name, falling back to the system default. `None` means no device was found; callers log an error and return rather than panicking. All device-open calls are serialised under `device_open_lock` (on Linux this also guards the `set_var` race; elsewhere it just serialises concurrent opens).
+
+`OPUS_FRAME_SAMPLES` (960) is a `pub const` in `mumble::mod` — use it everywhere a frame size is needed; do not hard-code 960.
 
 Linux additionally provides `enumerate_pw_devices` (single PipeWire round-trip for sinks +
 sources) and `create_linux_sink` / `start_loopback_capture` for the `MumblingRadio` virtual sink
@@ -232,9 +233,11 @@ carries the two shared draw-time constants. Primitives (`row`, `slider`, `combo`
 ## Conventions & gotchas
 
 - **DataRef changes touch three places** in `state.rs` (variant, `name()`, `all()`) — see §1.
-- **Transmit/receive routing rules live entirely in `session.rs`** (`on_mic_pcm`, `on_udp_recv`).
-  If audio is going to the wrong place or not gating correctly, start there, not in the audio
-  engine.
+- **Transmit-gating predicates live in `state.rs`** (`should_transmit_ic/pa/radio`). **Routing and
+  decode live in `session.rs`** (`on_mic_pcm`, `on_udp_recv`). If a client keys when it shouldn't,
+  check `state.rs`; if audio routes to the wrong output, check `session.rs`.
+- **`f32_atomic(v)` in `connection.rs`** — use this helper whenever you need `Arc<AtomicU32>` from
+  an `f32`; do not repeat `Arc::new(AtomicU32::new(v.to_bits()))` inline.
 - The plugin must export `XPlugin*` symbols (`#[no_mangle] extern "C"`); callbacks invoked by
   X-Plane use `extern "C-unwind"`. XPLM handle types are raw pointers, hand-marked `Send`, and
   must only be touched on the main thread.
