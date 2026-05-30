@@ -34,7 +34,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev libpulse-dev libssl-dev libopus-dev \
-            libpipewire-0.3-dev clang pkg-config
+            libpipewire-0.3-dev libdbus-1-dev clang pkg-config
 
       # Fail the build on any clippy warning — keeps `cargo clippy --workspace` clean.
       - name: Clippy (deny warnings)
@@ -87,7 +87,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev libpulse-dev libssl-dev libopus-dev \
-            libpipewire-0.3-dev clang pkg-config
+            libpipewire-0.3-dev libdbus-1-dev clang pkg-config
 
       # ── macOS ──────────────────────────────────────────────────────────────
       - name: Install macOS system dependencies

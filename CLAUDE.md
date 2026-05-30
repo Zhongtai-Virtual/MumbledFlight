@@ -56,7 +56,8 @@ keep it that way.
 > deps below must be installed or `cargo test` fails at the `alsa-sys` build script.
 
 ### Linux build/runtime system deps
-`libasound2-dev libpulse-dev libssl-dev libopus-dev libpipewire-0.3-dev clang pkg-config`
+`libasound2-dev libpulse-dev libssl-dev libopus-dev libpipewire-0.3-dev libdbus-1-dev clang pkg-config`
+(`libdbus-1-dev` is for the plugin's keyring/Secret Service backend)
 (PipeWire is a hard dependency on Linux — radio loopback and device enumeration use the native
 PW API.)
 
