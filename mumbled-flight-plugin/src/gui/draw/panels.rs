@@ -29,19 +29,37 @@ pub(super) struct BrowseClicks {
     pub(super) ca: bool,
 }
 
-/// Shared popup id for the unverified-server confirmation modal. The same string must be used
-/// for `open_popup` (in the draw loop) and `modal_popup_config` (in `confirm_unverified_modal`),
-/// so it lives here as a single constant. Text before `##` is the visible title.
-pub(super) const CONFIRM_POPUP_ID: &str = "Unverified server##confirm_unverified";
+/// Shared popup id for the TOFU trust modal. The same string must be used for `open_popup` (in
+/// the draw loop) and `modal_popup_config` (in `trust_modal`); it has no `##`-prefixed title since
+/// the heading varies by case and is drawn inside the modal.
+pub(super) const TRUST_POPUP_ID: &str = "##trust";
 
-/// Result of the "connect without server verification" confirmation modal.
-pub(super) enum ConfirmConnect {
-    /// Still showing, or not yet opened — take no action.
+/// What the trust modal should display this frame. (Shown only once the background probe has
+/// resolved into a decision — while probing, no modal is drawn.)
+pub(super) enum TrustView<'a> {
+    /// Server not trusted before — show its fingerprint.
+    Unknown {
+        server: &'a str,
+        fingerprint: &'a str,
+    },
+    /// Pinned cert differs from the one presented — possible MITM.
+    Changed {
+        server: &'a str,
+        old: &'a str,
+        new: &'a str,
+    },
+    /// The probe failed.
+    Failed { server: &'a str, error: &'a str },
+}
+
+/// The user's response to the trust modal.
+pub(super) enum TrustChoice {
+    /// Still showing — take no action.
     Pending,
-    /// User dismissed the dialog; do not connect.
+    /// Dismissed; do not connect.
     Cancel,
-    /// User accepted the risk; proceed to connect.
-    Confirm,
+    /// Trust the certificate and connect.
+    Trust,
 }
 
 impl<'ui> Ctx<'ui> {
@@ -247,10 +265,11 @@ impl<'ui> Ctx<'ui> {
         }
     }
 
-    /// Confirmation modal shown when Connect is clicked with no Server CA configured — i.e. the
-    /// server's certificate will not be verified. Centred over the XPLM window like the file
-    /// picker. Returns the user's choice (or `Pending` while still open).
-    pub(super) fn confirm_unverified_modal(&self) -> ConfirmConnect {
+    /// TOFU trust modal, shown when Connect is clicked with no Server CA. Centred over the XPLM
+    /// window like the file picker; the heading and buttons vary by `view`. Returns the user's
+    /// choice (or `Pending` while still open). `Trust` is only ever returned for the `Unknown` /
+    /// `Changed` cases — `Probing` and `Failed` offer only a dismiss button.
+    pub(super) fn trust_modal(&self, view: TrustView) -> TrustChoice {
         let win_cx = self.win_x + self.win_w * 0.5;
         let win_cy = self.win_y + self.win_h * 0.5;
         unsafe {
@@ -259,9 +278,9 @@ impl<'ui> Ctx<'ui> {
                 imgui::Condition::Always as i32,
                 imgui_sys::ImVec2 { x: 0.5, y: 0.5 },
             );
-            // Fixed width (auto height) so `text_wrapped` has a wrap boundary; never wider than
-            // the XPLM window, whose bounds are the limit for mouse-event delivery.
-            let w = 360.0_f32.min(self.win_w);
+            // Fixed width (auto height) so `text_wrapped` and the long fingerprints have a wrap
+            // boundary; never wider than the XPLM window, the limit for mouse-event delivery.
+            let w = 430.0_f32.min(self.win_w);
             imgui_sys::igSetNextWindowSize(
                 imgui_sys::ImVec2 { x: w, y: 0.0 },
                 imgui::Condition::Always as i32,
@@ -269,34 +288,84 @@ impl<'ui> Ctx<'ui> {
         }
         let Some(_token) = self
             .ui
-            .modal_popup_config(CONFIRM_POPUP_ID)
+            .modal_popup_config(TRUST_POPUP_ID)
+            .title_bar(false)
             .resizable(false)
             .movable(false)
             .begin_popup()
         else {
-            return ConfirmConnect::Pending;
+            return TrustChoice::Pending;
         };
 
-        self.ui.text_wrapped(
-            "No Server CA is configured, so the Mumble server's certificate will not be verified. \
-             An on-path attacker could intercept this connection — including the server password. \
-             Connect anyway?",
-        );
-        self.ui.spacing();
+        const AMBER: [f32; 4] = [1.0, 0.8, 0.2, 1.0];
+        const RED: [f32; 4] = [1.0, 0.4, 0.4, 1.0];
 
-        let cancel = self.ui.button("Cancel##cu");
+        match view {
+            TrustView::Unknown {
+                server,
+                fingerprint,
+            } => {
+                self.ui.text_colored(AMBER, "Unrecognized server");
+                self.ui.spacing();
+                self.ui.text_wrapped(
+                    "This server's certificate has not been trusted before. Confirm the SHA-256 \
+                     fingerprint matches the one the server operator gave you, then choose Trust \
+                     to remember it for future connections.",
+                );
+                self.ui.spacing();
+                self.ui.text_wrapped(format!("Server: {server}"));
+                self.ui.text_disabled("SHA-256 fingerprint:");
+                self.ui.text_wrapped(fingerprint);
+                self.ui.spacing();
+                self.trust_buttons()
+            }
+            TrustView::Changed { server, old, new } => {
+                self.ui.text_colored(RED, "Server certificate CHANGED");
+                self.ui.spacing();
+                self.ui.text_wrapped(
+                    "WARNING: this server is presenting a different certificate from the one you \
+                     previously trusted. This can be a legitimate change — or someone intercepting \
+                     the connection (MITM). Only Trust if you expected the certificate to change.",
+                );
+                self.ui.spacing();
+                self.ui.text_wrapped(format!("Server: {server}"));
+                self.ui.text_disabled("Previously trusted:");
+                self.ui.text_wrapped(old);
+                self.ui.text_disabled("Now presented:");
+                self.ui.text_wrapped(new);
+                self.ui.spacing();
+                self.trust_buttons()
+            }
+            TrustView::Failed { server, error } => {
+                self.ui.text_colored(RED, "Could not reach server");
+                self.ui.spacing();
+                self.ui
+                    .text_wrapped(format!("Failed to retrieve the certificate from {server}:"));
+                self.ui.text_wrapped(error);
+                self.ui.spacing();
+                if self.ui.button("Close##trust") {
+                    self.ui.close_current_popup();
+                    return TrustChoice::Cancel;
+                }
+                TrustChoice::Pending
+            }
+        }
+    }
+
+    /// Shared `Cancel` / `Trust` button row for the decision cases of [`Self::trust_modal`].
+    fn trust_buttons(&self) -> TrustChoice {
+        let cancel = self.ui.button("Cancel##trust");
         self.ui.same_line();
-        let confirm = self.ui.button("Connect anyway##cu");
-
+        let trust = self.ui.button("Trust##trust");
         if cancel {
             self.ui.close_current_popup();
-            return ConfirmConnect::Cancel;
+            return TrustChoice::Cancel;
         }
-        if confirm {
+        if trust {
             self.ui.close_current_popup();
-            return ConfirmConnect::Confirm;
+            return TrustChoice::Trust;
         }
-        ConfirmConnect::Pending
+        TrustChoice::Pending
     }
 
     pub(super) fn status_display(&self, voip_statuses: Option<&VoipStatuses>, status: &str) {

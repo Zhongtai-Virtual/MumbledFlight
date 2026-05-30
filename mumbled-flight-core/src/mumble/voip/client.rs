@@ -135,6 +135,15 @@ impl ServerTrust {
         Ok(Self { anchors })
     }
 
+    /// Builds a trust anchor from in-memory PEM bytes — e.g. a TOFU-pinned server certificate
+    /// remembered from a previous connection. Validates that at least one cert parses.
+    pub fn from_pem(pem: Vec<u8>) -> Result<Self> {
+        if Self::parse(&pem)?.is_empty() {
+            return Err(anyhow!("no certificates found in pinned certificate"));
+        }
+        Ok(Self { anchors: pem })
+    }
+
     /// Parse the anchor bytes as a PEM bundle (root + intermediates) or a single DER cert.
     fn parse(bytes: &[u8]) -> Result<Vec<X509>> {
         if let Ok(stack) = X509::stack_from_pem(bytes) {
@@ -175,6 +184,68 @@ impl ServerTrust {
             ))
         }
     }
+}
+
+/// A server certificate fetched by a Trust-On-First-Use probe ([`probe_server_cert`]).
+pub struct ProbedCert {
+    /// The server's leaf certificate in PEM form — ready to persist and later feed to
+    /// [`ServerTrust::from_pem`] for pinning.
+    pub pem: Vec<u8>,
+    /// SHA-256 fingerprint of the certificate, uppercase hex, colon-separated (SSH-style).
+    pub sha256: String,
+}
+
+/// Performs a **blocking** TLS handshake to `host:port`, accepting any certificate, and returns
+/// the server's leaf certificate (PEM) plus its SHA-256 fingerprint.
+///
+/// This is the TOFU primitive: a frontend probes the server, shows the fingerprint to the user,
+/// and on approval persists the PEM as a pinned [`ServerTrust`]. Read/write timeouts bound a
+/// stalled handshake; run it off any latency-sensitive thread.
+pub fn probe_server_cert(host: &str, port: u16) -> Result<ProbedCert> {
+    let connector = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()?;
+    let tcp = std::net::TcpStream::connect((host, port))
+        .map_err(|e| anyhow!("connecting to {host}:{port}: {e}"))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let stream = connector
+        .connect(host, tcp)
+        .map_err(|e| anyhow!("TLS handshake with {host}:{port}: {e}"))?;
+    let der = stream
+        .peer_certificate()
+        .map_err(|e| anyhow!("reading server certificate: {e}"))?
+        .ok_or_else(|| anyhow!("server presented no certificate"))?
+        .to_der()
+        .map_err(|e| anyhow!("encoding server certificate: {e}"))?;
+    let x509 = X509::from_der(&der).map_err(|e| anyhow!("parsing server certificate: {e}"))?;
+    let pem = x509
+        .to_pem()
+        .map_err(|e| anyhow!("encoding server certificate as PEM: {e}"))?;
+    Ok(ProbedCert {
+        sha256: fingerprint_hex(&x509)?,
+        pem,
+    })
+}
+
+/// SHA-256 fingerprint (uppercase hex, colon-separated) of a PEM or DER certificate. Used to
+/// compare a freshly-probed cert against a previously-trusted one (TOFU change detection).
+pub fn cert_fingerprint(cert: &[u8]) -> Result<String> {
+    let x509 = ServerTrust::parse(cert)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no certificate to fingerprint"))?;
+    fingerprint_hex(&x509)
+}
+
+fn fingerprint_hex(x509: &X509) -> Result<String> {
+    let digest = x509.digest(MessageDigest::sha256())?;
+    Ok(digest
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":"))
 }
 
 impl MumbleVoipClient {
@@ -465,5 +536,38 @@ mod tests {
         // A different (untrusted) cert is rejected.
         let (other, _) = gen_cert();
         assert!(trust.verify(&other.to_der().unwrap()).is_err(), "unknown cert must be rejected");
+    }
+
+    #[test]
+    fn from_pem_round_trips_and_pins() {
+        // A TOFU-remembered PEM rebuilds a ServerTrust that pins exactly that cert.
+        let (cert, _) = gen_cert();
+        let pem = cert.to_pem().unwrap();
+        let trust = ServerTrust::from_pem(pem).expect("valid PEM must load");
+        assert!(trust.verify(&cert.to_der().unwrap()).is_ok(), "round-tripped cert must verify");
+
+        let (other, _) = gen_cert();
+        assert!(trust.verify(&other.to_der().unwrap()).is_err(), "other cert must be rejected");
+
+        // Junk PEM is rejected rather than silently trusting nothing.
+        assert!(ServerTrust::from_pem(b"not a certificate".to_vec()).is_err());
+    }
+
+    #[test]
+    fn cert_fingerprint_is_stable_and_distinguishes_certs() {
+        // Fingerprint is deterministic across PEM/DER encodings of the same cert (used for TOFU
+        // change detection) and differs for a different cert.
+        let (cert, _) = gen_cert();
+        let from_pem = cert_fingerprint(&cert.to_pem().unwrap()).unwrap();
+        let from_der = cert_fingerprint(&cert.to_der().unwrap()).unwrap();
+        assert_eq!(from_pem, from_der, "PEM and DER of one cert share a fingerprint");
+        assert!(from_pem.contains(':'), "fingerprint is colon-separated hex");
+
+        let (other, _) = gen_cert();
+        assert_ne!(
+            from_pem,
+            cert_fingerprint(&other.to_pem().unwrap()).unwrap(),
+            "different certs must have different fingerprints"
+        );
     }
 }

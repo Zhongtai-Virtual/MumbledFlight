@@ -22,7 +22,9 @@ mod stack;
 pub mod voip;
 
 pub use stack::run_mumble_stack;
-pub use self::voip::client::{ClientCert, ServerTrust, VoipClientStatus};
+pub use self::voip::client::{
+    cert_fingerprint, probe_server_cert, ClientCert, ProbedCert, ServerTrust, VoipClientStatus,
+};
 pub use self::voip::client::VoipClientStatus as ClientStatus;
 
 use std::collections::HashMap;

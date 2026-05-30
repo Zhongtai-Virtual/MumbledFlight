@@ -32,10 +32,12 @@ mod panels;
 mod widgets;
 
 use log::{debug, warn};
+use mumbled_flight_core::mumble;
 use std::ffi::CString;
 use std::os::raw::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use xplane_sys::{
@@ -43,10 +45,14 @@ use xplane_sys::{
     XPLMWindowID,
 };
 
-use super::{FilePickTarget, FilePicker, GuiState};
+use super::known_hosts::KnownHosts;
+use super::{FilePickTarget, FilePicker, GuiState, TrustDecide, TrustKind, TrustState};
 use file_picker::{start_dir, FilePick};
-use panels::{BrowseClicks, ConfirmConnect, CONFIRM_POPUP_ID};
+use panels::{BrowseClicks, TrustChoice, TrustView, TRUST_POPUP_ID};
 use widgets::{Ctx, LABEL_COL_X};
+
+/// Monotonic probe generation, so a stale result from a cancelled/superseded probe is ignored.
+static PROBE_GEN: AtomicU64 = AtomicU64::new(0);
 
 impl GuiState {
     pub fn draw(&mut self, win: XPLMWindowID) {
@@ -118,7 +124,13 @@ impl GuiState {
         let mut log_level = self.log_level;
         let mut should_connect = false;
         let mut should_disconnect = false;
-        let mut confirm_unverified = self.confirm_unverified;
+        // TOFU trust flow: take the state out (written back at the end), and snapshot the pinned
+        // cert for the current server so the connect handler can run without borrowing `self`.
+        let mut trust_state = std::mem::replace(&mut self.trust_state, TrustState::Idle);
+        let probe_slot = Arc::clone(&self.probe_slot);
+        let known_key = KnownHosts::key(&self.server, self.port);
+        let known_stored = self.known_hosts.get(&known_key).cloned();
+        let mut trust_to_store: Option<(String, String)> = None;
         let is_connected = self.is_connected;
         let status = self.status.clone();
         let voip_statuses = self.voip_statuses.clone();
@@ -202,13 +214,25 @@ impl GuiState {
                     let (conn, disc) = p.connect_button(is_connected, &flight_id, &user_name);
                     should_disconnect = disc;
                     if conn {
-                        // With no Server CA the server's certificate is not verified — pop a
-                        // confirmation modal before connecting instead of proceeding silently.
-                        if server_ca.trim().is_empty() {
-                            confirm_unverified = true;
-                            ui.open_popup(CONFIRM_POPUP_ID);
-                        } else {
+                        if !server_ca.trim().is_empty() {
+                            // An explicit Server CA/cert verifies the server — connect directly.
                             should_connect = true;
+                        } else {
+                            // TOFU: probe the server's certificate in the background, then decide.
+                            let gen = PROBE_GEN.fetch_add(1, Ordering::Relaxed);
+                            trust_state = TrustState::Probing {
+                                gen,
+                                key: known_key.clone(),
+                                stored: known_stored.clone(),
+                            };
+                            let slot = Arc::clone(&probe_slot);
+                            let host = server.trim().to_string();
+                            let probe_port = port;
+                            std::thread::spawn(move || {
+                                let r = mumble::probe_server_cert(&host, probe_port)
+                                    .map_err(|e| e.to_string());
+                                *slot.lock().unwrap() = Some((gen, r));
+                            });
                         }
                     }
                     p.status_display(voip_statuses.as_ref(), &status);
@@ -242,7 +266,7 @@ impl GuiState {
                             }
                         }
                     }
-                    if file_picker.is_some() || confirm_unverified {
+                    if file_picker.is_some() || matches!(trust_state, TrustState::Decide(_)) {
                         p.draw_modal_dim();
                     }
                     let pick = file_picker.as_mut().map(|fp| p.file_picker_modal(fp));
@@ -262,15 +286,100 @@ impl GuiState {
                         }
                     }
 
-                    // Unverified-server confirmation: only `Confirm` proceeds to connect.
-                    if confirm_unverified {
-                        match p.confirm_unverified_modal() {
-                            ConfirmConnect::Pending => {}
-                            ConfirmConnect::Cancel => confirm_unverified = false,
-                            ConfirmConnect::Confirm => {
-                                confirm_unverified = false;
-                                should_connect = true;
+                    // ── TOFU trust flow ────────────────────────────────────────────
+                    // While probing, consume the matching background result and decide whether to
+                    // connect silently (cert unchanged), prompt to trust (new), or warn (changed).
+                    let current = std::mem::replace(&mut trust_state, TrustState::Idle);
+                    trust_state = match current {
+                        TrustState::Probing { gen, key, stored } => {
+                            let result = {
+                                let mut guard = probe_slot.lock().unwrap();
+                                match guard.as_ref() {
+                                    Some((g, _)) if *g == gen => guard.take().map(|(_, r)| r),
+                                    _ => None,
+                                }
+                            };
+                            match result {
+                                None => TrustState::Probing { gen, key, stored },
+                                Some(Err(error)) => {
+                                    ui.open_popup(TRUST_POPUP_ID);
+                                    TrustState::Decide(TrustDecide {
+                                        key,
+                                        pem: None,
+                                        kind: TrustKind::Failed { error },
+                                    })
+                                }
+                                Some(Ok(probed)) => {
+                                    let new_fp = probed.sha256;
+                                    let pem = String::from_utf8_lossy(&probed.pem).into_owned();
+                                    let old_fp = stored
+                                        .as_deref()
+                                        .and_then(|p| mumble::cert_fingerprint(p.as_bytes()).ok());
+                                    match old_fp {
+                                        Some(old) if old == new_fp => {
+                                            // Cert unchanged — already trusted, connect silently.
+                                            should_connect = true;
+                                            TrustState::Idle
+                                        }
+                                        Some(old) => {
+                                            ui.open_popup(TRUST_POPUP_ID);
+                                            TrustState::Decide(TrustDecide {
+                                                key,
+                                                pem: Some(pem),
+                                                kind: TrustKind::Changed { old, new: new_fp },
+                                            })
+                                        }
+                                        None => {
+                                            ui.open_popup(TRUST_POPUP_ID);
+                                            TrustState::Decide(TrustDecide {
+                                                key,
+                                                pem: Some(pem),
+                                                kind: TrustKind::Unknown { fingerprint: new_fp },
+                                            })
+                                        }
+                                    }
+                                }
                             }
+                        }
+                        other => other,
+                    };
+
+                    // Render the modal for the current state and capture the choice without
+                    // holding a borrow of `trust_state` across the follow-up mutation.
+                    let choice = match &trust_state {
+                        // While probing (brief background handshake) no modal is shown; the dialog
+                        // appears once the probe resolves into a decision.
+                        TrustState::Idle | TrustState::Probing { .. } => None,
+                        TrustState::Decide(d) => {
+                            let view = match &d.kind {
+                                TrustKind::Unknown { fingerprint } => TrustView::Unknown {
+                                    server: &server,
+                                    fingerprint,
+                                },
+                                TrustKind::Changed { old, new } => TrustView::Changed {
+                                    server: &server,
+                                    old,
+                                    new,
+                                },
+                                TrustKind::Failed { error } => TrustView::Failed {
+                                    server: &server,
+                                    error,
+                                },
+                            };
+                            Some(p.trust_modal(view))
+                        }
+                    };
+                    match choice {
+                        None | Some(TrustChoice::Pending) => {}
+                        Some(TrustChoice::Cancel) => trust_state = TrustState::Idle,
+                        Some(TrustChoice::Trust) => {
+                            if let TrustState::Decide(d) = &trust_state {
+                                if let Some(pem) = &d.pem {
+                                    trust_to_store = Some((d.key.clone(), pem.clone()));
+                                    should_connect = true;
+                                }
+                            }
+                            trust_state = TrustState::Idle;
                         }
                     }
                 });
@@ -317,7 +426,10 @@ impl GuiState {
             log::set_max_level(log_level);
             self.save_config();
         }
-        self.confirm_unverified = confirm_unverified;
+        self.trust_state = trust_state;
+        if let Some((key, pem)) = trust_to_store {
+            self.known_hosts.insert_and_save(key, pem);
+        }
         if should_connect {
             self.should_connect = true;
         }

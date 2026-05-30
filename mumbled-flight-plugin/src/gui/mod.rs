@@ -21,8 +21,12 @@
 pub mod config;
 pub mod devices;
 mod draw;
+pub mod known_hosts;
 mod secrets;
 mod window;
+
+use known_hosts::KnownHosts;
+use mumbled_flight_core::mumble::ProbedCert;
 
 use mumbled_flight_core::mumble::audio::enumerate_pw_devices;
 use mumbled_flight_core::mumble::VoipStatuses;
@@ -123,6 +127,42 @@ const RADIO_DEVICE_OFFSET: usize = 2;
 #[cfg(not(target_os = "linux"))]
 const RADIO_DEVICE_OFFSET: usize = 1;
 
+/// Slot a background probe thread writes its result into, tagged with the probe's generation so a
+/// stale result from a superseded/cancelled probe is ignored. `Ok` carries the fetched cert.
+type ProbeSlot = Arc<Mutex<Option<(u64, Result<ProbedCert, String>)>>>;
+
+/// TOFU connect-flow state machine. When Connect is clicked with no Server CA, the server's
+/// certificate is probed in the background; depending on the result the user is prompted to trust
+/// it (new server) or warned that it changed, or the connection proceeds silently (cert unchanged).
+enum TrustState {
+    /// No trust decision in progress.
+    Idle,
+    /// Probe running. `stored` is the previously-pinned PEM for this server, if any.
+    Probing {
+        gen: u64,
+        key: String,
+        stored: Option<String>,
+    },
+    /// Probe done; a modal is asking the user to decide.
+    Decide(TrustDecide),
+}
+
+struct TrustDecide {
+    key: String,
+    /// PEM to persist on Trust; `None` for the failure case (nothing to store).
+    pem: Option<String>,
+    kind: TrustKind,
+}
+
+enum TrustKind {
+    /// Server never trusted before — show its fingerprint.
+    Unknown { fingerprint: String },
+    /// Pinned cert differs from the one now presented — possible MITM.
+    Changed { old: String, new: String },
+    /// The probe itself failed (unreachable, handshake error, …).
+    Failed { error: String },
+}
+
 pub struct GuiState {
     pub window_id: XPLMWindowID,
     config_path: PathBuf,
@@ -177,8 +217,12 @@ pub struct GuiState {
 
     pub should_connect: bool,
     pub should_disconnect: bool,
-    /// True while the "connect without server verification" confirmation modal is showing.
-    confirm_unverified: bool,
+    /// TOFU server-certificate store (`host:port` → pinned PEM).
+    pub known_hosts: KnownHosts,
+    /// State of the connect-time trust prompt / certificate probe.
+    trust_state: TrustState,
+    /// Background probe result, polled by the draw loop.
+    probe_slot: ProbeSlot,
     pub is_connected: bool,
     pub status: String,
     /// Per-client connection statuses — None when disconnected.
@@ -231,6 +275,8 @@ impl GuiState {
         // Secrets come from the OS secret store, never from config.toml.
         let server_password = secrets::load(secrets::SERVER_PASSWORD);
         let cert_pass = secrets::load(secrets::CERT_PASSPHRASE);
+
+        let known_hosts = KnownHosts::load(&config_path);
 
         info!("GuiState::new: creating XPLM window...");
         let window_id = unsafe { window::create_xplm_window() };
@@ -333,7 +379,9 @@ impl GuiState {
             file_picker: None,
             should_connect: false,
             should_disconnect: false,
-            confirm_unverified: false,
+            known_hosts,
+            trust_state: TrustState::Idle,
+            probe_slot: Arc::new(Mutex::new(None)),
             is_connected: false,
             status: String::new(),
             voip_statuses: None,

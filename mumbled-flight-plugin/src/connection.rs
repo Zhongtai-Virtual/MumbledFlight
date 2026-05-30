@@ -102,10 +102,10 @@ pub fn start(ps: &mut PluginState) {
         }
     };
 
-    // Optional server-certificate verification (server cert or its CA).
-    let server_trust = if ps.gui.server_ca.trim().is_empty() {
-        None
-    } else {
+    // Server-certificate verification. An explicit Server CA/cert wins; otherwise fall back to
+    // the TOFU-pinned cert remembered for this server (the draw loop only sets `should_connect`
+    // once the user has trusted it, so a missing pin here means the user opted to stay unverified).
+    let server_trust = if !ps.gui.server_ca.trim().is_empty() {
         match mumble::ServerTrust::load(std::path::Path::new(ps.gui.server_ca.trim())) {
             Ok(t) => Some(Arc::new(t)),
             Err(e) => {
@@ -114,6 +114,18 @@ pub fn start(ps: &mut PluginState) {
                 ps.gui.status = msg;
                 return;
             }
+        }
+    } else {
+        let key = crate::gui::known_hosts::KnownHosts::key(&ps.gui.server, ps.gui.port);
+        match ps.gui.known_hosts.get(&key) {
+            Some(pem) => match mumble::ServerTrust::from_pem(pem.clone().into_bytes()) {
+                Ok(t) => Some(Arc::new(t)),
+                Err(e) => {
+                    warn!("ignoring invalid pinned cert for {key}: {e}");
+                    None
+                }
+            },
+            None => None,
         }
     };
 
