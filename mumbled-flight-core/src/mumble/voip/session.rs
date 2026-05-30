@@ -409,14 +409,10 @@ impl Session {
         udp: &UdpSocket,
         state: &Arc<Mutex<CockpitState>>,
     ) -> Result<()> {
+        // TX gating is shared across all transports — see mumble::transport::tx_decision.
         let (is_active, tx_vol) = {
             let s = state.lock().unwrap();
-            match client.role {
-                ClientRole::Radio { has_source } => (s.should_transmit_radio(has_source), s.spkr_vol),
-                ClientRole::Ic    => (s.should_transmit_ic(), 1.0),
-                ClientRole::Pa    => (s.should_transmit_pa(), 2.0),
-                ClientRole::Voice => (true, 1.0),
-            }
+            crate::mumble::transport::tx_decision(client.role, &s)
         };
         let Some(cs) = self.crypt.as_mut() else {
             return Ok(());
