@@ -1,3 +1,21 @@
+// Copyright (C) 2026 Zhongtai Virtual
+//
+// This file is part of MumbledFlight.
+//
+// MumbledFlight is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// MumbledFlight is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with MumbledFlight.  If not, see <https://www.gnu.org/licenses/>.
+
+
 //! MumbledFlight: A high-fidelity bridge between X-Plane 12 and Mumble.
 
 mod xplane;
@@ -118,6 +136,10 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
+    eprintln!("MumbledFlight  Copyright (C) 2026 Zhongtai Virtual");
+    eprintln!("This program comes with ABSOLUTELY NO WARRANTY.");
+    eprintln!("This is free software, and you are welcome to redistribute it");
+    eprintln!("under certain conditions; see the LICENSE file for details.");
     let args = Args::parse();
 
     // 1. Device Discovery Mode

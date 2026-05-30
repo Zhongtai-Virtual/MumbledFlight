@@ -245,6 +245,14 @@ carries the two shared draw-time constants. Primitives (`row`, `slider`, `combo`
   capture stream; it threads from both frontends → `run_mumble_stack` → `start_capture` only
   (it is *not* a per-client concern).
 
+## License
+
+Licensed under **GPL-3.0-or-later**. Copyright (C) 2026 Zhongtai Virtual.
+
+- Every `.rs` source file must begin with the standard GPL copyright + copying-permission block. A git pre-commit hook (`.githooks/pre-commit`) enforces this automatically — run `git config core.hooksPath .githooks` once after cloning to activate it.
+- The `license = "GPL-3.0-or-later"` field must be present in every crate's `[package]` section.
+- The full license text lives in `LICENSE`.
+
 ## CI / release (`.github/workflows/build.yml`)
 Matrix build of the plugin on Linux/macOS/Windows on push to `main`, PRs, and manual dispatch.
 Each platform produces `MumbledFlight.xpl` under the X-Plane plugin dir layout

@@ -116,6 +116,18 @@ X-Plane 12/Resources/plugins/MumbledFlight/
 
 GitHub Actions builds the plugin for all three platforms on every push to `main`. Download the `MumbledFlight` zip from the latest release and extract it directly into `Resources/plugins/`.
 
+## License
+
+MumbledFlight is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License](LICENSE) as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+Copyright (C) 2026 Zhongtai Virtual.
+
+After cloning, activate the pre-commit hook that enforces per-file license headers:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Acknowledgements
 
 **PilotEdge / Keith Smith** — The concept of simulating full aircraft audio for shared-cockpit flying — positional voice, crew intercom, PA to passengers, cockpit speaker monitoring of COM radio, and proximity-based conversations in the FBO and cabin — originates from **Keith Smith** at [PilotEdge](https://www.pilotedge.net), who built this system in collaboration with the Hotstart CL650 shared cockpit feature. MumbledFlight reimplements these ideas on top of Mumble so they are accessible outside the PilotEdge network.
