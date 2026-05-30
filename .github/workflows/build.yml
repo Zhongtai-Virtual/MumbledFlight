@@ -151,17 +151,16 @@ jobs:
 
       - name: Assemble X-Plane Plugin Directory
         run: |
-          mkdir -p staging/MumbledFlight/64
-          
-          # Combine macOS binaries into a Fat Binary (Universal 2)
+          mkdir -p staging/MumbledFlight/{mac_x64,lin_x64,win_x64}
+
+          # Combine Intel + ARM macOS builds into a Universal 2 fat binary.
           lipo -create \
             artifacts/mac_x86_64/MumbledFlight.xpl \
             artifacts/mac_arm64/MumbledFlight.xpl \
-            -output staging/MumbledFlight/64/mac.xpl
-            
-          # Copy other platforms with standard names
-          cp artifacts/lin_x64/MumbledFlight.xpl staging/MumbledFlight/64/lin.xpl
-          cp artifacts/win_x64/MumbledFlight.xpl staging/MumbledFlight/64/win.xpl
+            -output staging/MumbledFlight/mac_x64/MumbledFlight.xpl
+
+          cp artifacts/lin_x64/MumbledFlight.xpl staging/MumbledFlight/lin_x64/MumbledFlight.xpl
+          cp artifacts/win_x64/MumbledFlight.xpl staging/MumbledFlight/win_x64/MumbledFlight.xpl
 
       - name: Upload MumbledFlight Bundle
         uses: actions/upload-artifact@v4
