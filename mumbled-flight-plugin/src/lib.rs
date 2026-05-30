@@ -109,6 +109,10 @@ pub unsafe extern "C" fn XPluginStart(
     write_cstr(out_sig, "app.mzt.mumbled-flight");
     write_cstr(out_desc, "Spatial audio with Mumble");
     logger::init();
+    logger::xp_log("MumbledFlight  Copyright (C) 2026 Zhongtai Virtual\n");
+    logger::xp_log("This program comes with ABSOLUTELY NO WARRANTY.\n");
+    logger::xp_log("This is free software, and you are welcome to redistribute it\n");
+    logger::xp_log("under certain conditions; see the LICENSE file for details.\n");
     info!(
         "XPluginStart v{} (built {})",
         env!("CARGO_PKG_VERSION"),

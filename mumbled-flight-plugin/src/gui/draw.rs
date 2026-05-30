@@ -430,7 +430,7 @@ impl<'ui> Ctx<'ui> {
             self.ui.set_cursor_pos([115.0, self.ui.cursor_pos()[1]]);
             self.ui.set_next_item_width(self.fw);
             let mut p = *port as i32;
-            if self.ui.input_int("##port", &mut p).build() {
+            if self.ui.input_int("##port", &mut p).step(0).step_fast(0).build() {
                 *port = p.clamp(1, 65535) as u16;
             }
         }
