@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with MumbledFlight.  If not, see <https://www.gnu.org/licenses/>.
 
-
 //! X-Plane 12 plugin — GUI configuration panel + manual connect/disconnect.
 
 // The `XPlugin*` exports and XPLM callbacks are `unsafe extern` because X-Plane invokes them
@@ -109,10 +108,10 @@ pub unsafe extern "C" fn XPluginStart(
     write_cstr(out_sig, "app.mzt.mumbled-flight");
     write_cstr(out_desc, "Spatial audio with Mumble");
     logger::init();
-    logger::xp_log("MumbledFlight  Copyright (C) 2026 Zhongtai Virtual\n");
-    logger::xp_log("This program comes with ABSOLUTELY NO WARRANTY.\n");
-    logger::xp_log("This is free software, and you are welcome to redistribute it\n");
-    logger::xp_log("under certain conditions; see the LICENSE file for details.\n");
+    info!("MumbledFlight  Copyright (C) 2026 Zhongtai Virtual");
+    info!("This program comes with ABSOLUTELY NO WARRANTY.");
+    info!("This is free software, and you are welcome to redistribute it");
+    info!("under certain conditions; see the LICENSE file for details.");
     info!(
         "XPluginStart v{} (built {})",
         env!("CARGO_PKG_VERSION"),
@@ -182,12 +181,7 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
     if menu_id.is_null() {
         log::error!("XPLMCreateMenu returned null — plugin menu will not appear");
     }
-    XPLMAppendMenuItem(
-        menu_id,
-        c"Show Window".as_ptr(),
-        std::ptr::null_mut(),
-        0,
-    );
+    XPLMAppendMenuItem(menu_id, c"Show Window".as_ptr(), std::ptr::null_mut(), 0);
     XPLMCheckMenuItem(menu_id, 0, XPLMMenuCheck::Unchecked);
     info!("menu created (id={menu_id:?})");
 
