@@ -212,8 +212,8 @@ impl GuiState {
                         &mut selected_radio,
                     );
                     p.log_level_picker(&mut log_level);
-                    let is_probing = matches!(trust_state, TrustState::Probing { .. });
-                    let (conn, disc) = p.connect_button(is_connected || is_probing, &flight_id, &user_name);
+                    let tofu_active = matches!(trust_state, TrustState::Probing { .. } | TrustState::Decide(_));
+                    let (conn, disc) = p.connect_button(is_connected || tofu_active, &flight_id, &user_name);
                     should_disconnect = disc;
                     if conn {
                         if !server_ca.trim().is_empty() {

@@ -164,6 +164,11 @@ impl ServerTrust {
         for anchor in Self::parse(&self.anchors)? {
             builder.add_cert(anchor)?;
         }
+        // PARTIAL_CHAIN allows a non-self-signed leaf to act as a trust anchor, which is
+        // the normal TOFU case: the user pinned the server's leaf cert directly rather than
+        // a CA. Without this flag OpenSSL rejects any chain it can't build to a self-signed
+        // root, making TOFU unusable for CA-issued server certificates.
+        builder.set_flags(openssl::x509::verify::X509VerifyFlags::PARTIAL_CHAIN)?;
         let store = builder.build();
         let chain = Stack::new()?;
         let mut ctx = X509StoreContext::new()?;
