@@ -206,24 +206,45 @@ pub struct ProbedCert {
 /// This is the TOFU primitive: a frontend probes the server, shows the fingerprint to the user,
 /// and on approval persists the PEM as a pinned [`ServerTrust`]. A 10-second timeout covers both
 /// the TCP connect and the subsequent TLS handshake; run it off any latency-sensitive thread.
+///
+/// All addresses returned by DNS resolution are tried in order so that dual-stack hosts where
+/// the first address is unreachable (e.g. IPv4-first on an IPv6-only path) do not cause a
+/// spurious failure.
 pub fn probe_server_cert(host: &str, port: u16) -> Result<ProbedCert> {
     use std::net::ToSocketAddrs;
     let connector = native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true)
         .build()?;
-    let addr = (host, port)
+    let addrs: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|e| anyhow!("resolving {host}:{port}: {e}"))?
-        .next()
-        .ok_or_else(|| anyhow!("no address resolved for {host}:{port}"))?;
+        .collect();
+    if addrs.is_empty() {
+        return Err(anyhow!("no address resolved for {host}:{port}"));
+    }
+    let mut last_err = anyhow!("no address for {host}:{port}");
+    for addr in addrs {
+        match probe_addr(&connector, host, addr) {
+            Ok(cert) => return Ok(cert),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+fn probe_addr(
+    connector: &native_tls::TlsConnector,
+    host: &str,
+    addr: std::net::SocketAddr,
+) -> Result<ProbedCert> {
     let tcp = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-        .map_err(|e| anyhow!("connecting to {host}:{port}: {e}"))?;
+        .map_err(|e| anyhow!("connecting to {addr}: {e}"))?;
     tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(10)))?;
     let stream = connector
         .connect(host, tcp)
-        .map_err(|e| anyhow!("TLS handshake with {host}:{port}: {e}"))?;
+        .map_err(|e| anyhow!("TLS handshake with {addr}: {e}"))?;
     let der = stream
         .peer_certificate()
         .map_err(|e| anyhow!("reading server certificate: {e}"))?
@@ -234,10 +255,7 @@ pub fn probe_server_cert(host: &str, port: u16) -> Result<ProbedCert> {
     let pem = x509
         .to_pem()
         .map_err(|e| anyhow!("encoding server certificate as PEM: {e}"))?;
-    Ok(ProbedCert {
-        sha256: fingerprint_hex(&x509)?,
-        pem,
-    })
+    Ok(ProbedCert { sha256: fingerprint_hex(&x509)?, pem })
 }
 
 /// SHA-256 fingerprint (uppercase hex, colon-separated) of a PEM or DER certificate. Used to

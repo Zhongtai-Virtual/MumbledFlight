@@ -27,6 +27,67 @@ use std::path::{Path, PathBuf};
 
 use log::warn;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_ipv4_and_hostname() {
+        assert_eq!(KnownHosts::key("192.168.1.1", 64738), "192.168.1.1:64738");
+        assert_eq!(KnownHosts::key("mumble.example.com", 64738), "mumble.example.com:64738");
+        assert_eq!(KnownHosts::key("  mumble.example.com  ", 64738), "mumble.example.com:64738");
+    }
+
+    #[test]
+    fn key_ipv6_brackets_normalised() {
+        // Raw IPv6 gets bracketed.
+        assert_eq!(KnownHosts::key("::1", 64738), "[::1]:64738");
+        assert_eq!(KnownHosts::key("2001:db8::1", 64738), "[2001:db8::1]:64738");
+        // Pre-bracketed input is idempotent.
+        assert_eq!(KnownHosts::key("[::1]", 64738), "[::1]:64738");
+        assert_eq!(KnownHosts::key("  [::1]  ", 64738), "[::1]:64738");
+    }
+
+    #[test]
+    fn round_trip_load_insert_save_get() {
+        let dir = std::env::temp_dir();
+        let config_path = dir.join(format!("mf_test_{}.toml", std::process::id()));
+        // Clean up from any prior run.
+        let _ = std::fs::remove_file(config_path.with_file_name("known_hosts.toml"));
+
+        let mut kh = KnownHosts::load(&config_path);
+        assert!(kh.get("mumble.example.com:64738").is_none());
+
+        kh.insert_and_save("mumble.example.com:64738".to_string(), "FAKEPEM".to_string());
+
+        // Reload from disk.
+        let kh2 = KnownHosts::load(&config_path);
+        assert_eq!(kh2.get("mumble.example.com:64738").map(|s| s.as_str()), Some("FAKEPEM"));
+
+        let _ = std::fs::remove_file(config_path.with_file_name("known_hosts.toml"));
+    }
+
+    #[test]
+    fn missing_or_corrupt_file_yields_empty_store() {
+        let dir = std::env::temp_dir();
+        let config_path = dir.join(format!("mf_nofile_{}.toml", std::process::id()));
+        let kh = KnownHosts::load(&config_path);
+        assert!(kh.get("anything").is_none());
+
+        // Corrupt TOML content also yields empty store.
+        let hosts_path = config_path.with_file_name(
+            format!("mf_corrupt_{}_known_hosts.toml", std::process::id())
+        );
+        std::fs::write(&hosts_path, b"not valid toml [[[").unwrap();
+        let corrupt_config = hosts_path.with_file_name(
+            format!("mf_corrupt_{}.toml", std::process::id())
+        );
+        let kh2 = KnownHosts::load(&corrupt_config);
+        assert!(kh2.get("anything").is_none());
+        let _ = std::fs::remove_file(&hosts_path);
+    }
+}
+
 pub struct KnownHosts {
     path: PathBuf,
     /// `host:port` → server certificate in PEM form.
@@ -35,8 +96,16 @@ pub struct KnownHosts {
 
 impl KnownHosts {
     /// Canonical store key for a server.
+    ///
+    /// IPv6 addresses are normalised to `[addr]:port` regardless of whether the caller
+    /// already included brackets, so lookups are consistent with how addresses are typed.
     pub fn key(host: &str, port: u16) -> String {
-        format!("{}:{}", host.trim(), port)
+        let h = host.trim().trim_matches(|c| c == '[' || c == ']');
+        if h.contains(':') {
+            format!("[{h}]:{port}")
+        } else {
+            format!("{h}:{port}")
+        }
     }
 
     /// Loads the store sitting next to `config_path`. A missing or malformed file yields an

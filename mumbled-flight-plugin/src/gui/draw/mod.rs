@@ -215,6 +215,9 @@ impl GuiState {
                     let tofu_active = matches!(trust_state, TrustState::Probing { .. } | TrustState::Decide(_));
                     let (conn, disc) = p.connect_button(is_connected || tofu_active, &flight_id, &user_name);
                     should_disconnect = disc;
+                    if disc {
+                        trust_state = TrustState::Idle;
+                    }
                     if conn {
                         if !server_ca.trim().is_empty() {
                             should_connect = true;

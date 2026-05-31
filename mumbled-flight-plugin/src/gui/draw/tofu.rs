@@ -242,7 +242,14 @@ fn resolve_probe(
     };
 
     let new_fp = probed.sha256;
-    let pem = String::from_utf8_lossy(&probed.pem).into_owned();
+    let pem = match String::from_utf8(probed.pem) {
+        Ok(s) => s,
+        Err(e) => {
+            let error = format!("server certificate encoding error: {e}");
+            ui.open_popup(TRUST_POPUP_ID);
+            return (TrustState::Decide(TrustDecide { key, pem: None, kind: TrustKind::Failed { error } }), false);
+        }
+    };
     let old_fp = stored.as_deref().and_then(|p| {
         mumble::cert_fingerprint(p.as_bytes())
             .map_err(|e| warn!("stored cert for {key} could not be fingerprinted (corrupt?): {e}"))
