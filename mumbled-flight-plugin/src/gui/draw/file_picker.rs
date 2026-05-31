@@ -15,14 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with MumbledFlight.  If not, see <https://www.gnu.org/licenses/>.
 
-//! File-browser content rendered inside the dedicated file-picker XPLM window.
+//! File-browser content and XPLM window draw lifecycle for the file-picker popup.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use imgui::MouseButton;
+use xplane_sys::{XPLMSetGraphicsState, XPLMSetWindowIsVisible, XPLMWindowID};
 
-use super::super::{FilePickTarget, FilePicker};
-use super::widgets::Ctx;
+use super::{init_imgui, window_metrics};
+use super::super::{FilePickTarget, FilePicker, GuiState};
+use super::widgets::{Ctx, LABEL_COL_X};
 
 pub(super) enum FilePick {
     Open,
@@ -135,5 +138,98 @@ pub(super) fn start_dir(current: &str, plugin_dir: &std::path::Path) -> PathBuf 
         dir.to_path_buf()
     } else {
         plugin_dir.to_path_buf()
+    }
+}
+
+// ── XPLM window draw lifecycle ────────────────────────────────────────────────
+
+impl GuiState {
+    pub fn draw_file_picker(&mut self, win: XPLMWindowID) {
+        if self.file_picker.is_none() {
+            unsafe { XPLMSetWindowIsVisible(win, 0) };
+            return;
+        }
+        if self.fp_imgui.ctx.is_none() {
+            init_imgui(&mut self.fp_imgui);
+        }
+
+        let (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y) =
+            window_metrics(win);
+        self.screen_h = virt_h;
+
+        let dt = {
+            let now = Instant::now();
+            let d = (now - self.fp_imgui.last_time).as_secs_f32().max(1e-6);
+            self.fp_imgui.last_time = now;
+            d
+        };
+
+        let mut file_picker = self.file_picker.take();
+        let mut cert_path = self.cert_path.clone();
+        let mut server_ca = self.server_ca.clone();
+        let file_picker_win = self.file_picker_win;
+        let mouse_pos = self.fp_imgui.mouse_pos;
+        let mouse_down = self.fp_imgui.mouse_down;
+
+        let (Some(ctx), Some(renderer)) =
+            (self.fp_imgui.ctx.as_mut(), self.fp_imgui.renderer.as_mut())
+        else {
+            self.file_picker = file_picker;
+            return;
+        };
+
+        {
+            let io = ctx.io_mut();
+            io.display_size = [virt_w as f32, virt_h as f32];
+            io.display_framebuffer_scale = [scale_x, scale_y];
+            io.delta_time = dt;
+            io.mouse_pos = mouse_pos;
+            io.mouse_down = mouse_down;
+        }
+
+        let mut close = false;
+        {
+            let ui = ctx.frame();
+            let pad_r = ui.clone_style().window_padding[0];
+            let fw = (width as f32 - LABEL_COL_X - pad_r).max(80.0);
+            let p = Ctx { ui: &*ui, fw };
+            ui.window("##fp")
+                .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
+                .size([width as f32, height as f32], imgui::Condition::Always)
+                .title_bar(false)
+                .resizable(false)
+                .movable(false)
+                .build(|| {
+                    if let Some(fp) = file_picker.as_mut() {
+                        match p.file_picker_content(fp) {
+                            FilePick::Open => {}
+                            FilePick::Closed => {
+                                file_picker = None;
+                                close = true;
+                            }
+                            FilePick::Selected(target, path) => {
+                                match target {
+                                    FilePickTarget::UserCert => cert_path = path,
+                                    FilePickTarget::ServerCa => server_ca = path,
+                                }
+                                file_picker = None;
+                                close = true;
+                            }
+                        }
+                    } else {
+                        close = true;
+                    }
+                });
+        }
+        let draw_data = ctx.render();
+        unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
+        renderer.render(draw_data).ok();
+
+        self.file_picker = file_picker;
+        self.cert_path = cert_path;
+        self.server_ca = server_ca;
+        if close {
+            unsafe { XPLMSetWindowIsVisible(file_picker_win, 0) };
+        }
     }
 }

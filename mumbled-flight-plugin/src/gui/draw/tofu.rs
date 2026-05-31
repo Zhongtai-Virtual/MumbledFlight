@@ -15,23 +15,30 @@
 // You should have received a copy of the GNU General Public License
 // along with MumbledFlight.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Per-frame TOFU probe-and-decide flow, extracted from the draw loop.
+//! TOFU probe-and-decide flow and XPLM window draw lifecycle for the trust popup.
 //!
-//! Three entry points:
+//! Entry points for the main draw loop:
 //! - [`start_probe`] — called when Connect is clicked with no Server CA; spawns the background
 //!   cert-fetch thread.
 //! - [`poll_step`] — called every frame from the main draw; polls the probe result and returns
 //!   whether to show the TOFU window.
 //! - [`render_decision`] — called every frame from the TOFU window's draw callback; renders the
 //!   decision UI and returns the user's action.
+//!
+//! `GuiState::draw_tofu` (also here) owns the XPLM window frame setup for the popup.
 
 use log::warn;
 use mumbled_flight_core::mumble;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
+use xplane_sys::{XPLMSetGraphicsState, XPLMSetWindowIsVisible, XPLMWindowID};
+
+use super::{init_imgui, window_metrics};
+use super::super::{GuiState};
 use super::super::trust::{ProbeSlot, TrustDecide, TrustKind, TrustState};
-use super::widgets::Ctx;
+use super::widgets::{Ctx, LABEL_COL_X};
 
 // ── Trust content rendering ───────────────────────────────────────────────────
 
@@ -196,6 +203,84 @@ pub(super) fn render_decision(
             let connect = to_store.is_some();
             *trust_state = TrustState::Idle;
             TofuWindowAction { should_connect: connect, to_store, close: true }
+        }
+    }
+}
+
+// ── XPLM window draw lifecycle ────────────────────────────────────────────────
+
+impl GuiState {
+    pub fn draw_tofu(&mut self, win: XPLMWindowID) {
+        if !matches!(self.trust_state, TrustState::Decide(_)) {
+            unsafe { XPLMSetWindowIsVisible(win, 0) };
+            return;
+        }
+        if self.tofu_imgui.ctx.is_none() {
+            init_imgui(&mut self.tofu_imgui);
+        }
+
+        let (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y) =
+            window_metrics(win);
+        self.screen_h = virt_h;
+
+        let dt = {
+            let now = Instant::now();
+            let d = (now - self.tofu_imgui.last_time).as_secs_f32().max(1e-6);
+            self.tofu_imgui.last_time = now;
+            d
+        };
+
+        let mut trust_state = std::mem::replace(&mut self.trust_state, TrustState::Idle);
+        let server = self.server.clone();
+        let tofu_win = self.tofu_win;
+        let mouse_pos = self.tofu_imgui.mouse_pos;
+        let mouse_down = self.tofu_imgui.mouse_down;
+
+        let (Some(ctx), Some(renderer)) =
+            (self.tofu_imgui.ctx.as_mut(), self.tofu_imgui.renderer.as_mut())
+        else {
+            self.trust_state = trust_state;
+            return;
+        };
+
+        {
+            let io = ctx.io_mut();
+            io.display_size = [virt_w as f32, virt_h as f32];
+            io.display_framebuffer_scale = [scale_x, scale_y];
+            io.delta_time = dt;
+            io.mouse_pos = mouse_pos;
+            io.mouse_down = mouse_down;
+        }
+
+        let mut action = TofuWindowAction::default();
+        {
+            let ui = ctx.frame();
+            let pad_r = ui.clone_style().window_padding[0];
+            let fw = (width as f32 - LABEL_COL_X - pad_r).max(80.0);
+            let p = Ctx { ui: &*ui, fw };
+            ui.window("##tofu")
+                .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
+                .size([width as f32, height as f32], imgui::Condition::Always)
+                .title_bar(false)
+                .resizable(false)
+                .movable(false)
+                .build(|| {
+                    action = render_decision(&mut trust_state, &p, &server);
+                });
+        }
+        let draw_data = ctx.render();
+        unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
+        renderer.render(draw_data).ok();
+
+        self.trust_state = trust_state;
+        if action.should_connect {
+            self.should_connect = true;
+        }
+        if let Some((key, pem)) = action.to_store {
+            self.known_hosts.insert_and_save(key, pem);
+        }
+        if action.close {
+            unsafe { XPLMSetWindowIsVisible(tofu_win, 0) };
         }
     }
 }
