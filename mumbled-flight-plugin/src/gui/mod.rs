@@ -23,10 +23,11 @@ pub mod devices;
 mod draw;
 pub mod known_hosts;
 mod secrets;
+pub(super) mod trust;
 mod window;
 
 use known_hosts::KnownHosts;
-use mumbled_flight_core::mumble::ProbedCert;
+use trust::{ProbeSlot, TrustState};
 
 use mumbled_flight_core::mumble::audio::enumerate_pw_devices;
 use mumbled_flight_core::mumble::VoipStatuses;
@@ -127,41 +128,6 @@ const RADIO_DEVICE_OFFSET: usize = 2;
 #[cfg(not(target_os = "linux"))]
 const RADIO_DEVICE_OFFSET: usize = 1;
 
-/// Slot a background probe thread writes its result into, tagged with the probe's generation so a
-/// stale result from a superseded/cancelled probe is ignored. `Ok` carries the fetched cert.
-type ProbeSlot = Arc<Mutex<Option<(u64, Result<ProbedCert, String>)>>>;
-
-/// TOFU connect-flow state machine. When Connect is clicked with no Server CA, the server's
-/// certificate is probed in the background; depending on the result the user is prompted to trust
-/// it (new server) or warned that it changed, or the connection proceeds silently (cert unchanged).
-enum TrustState {
-    /// No trust decision in progress.
-    Idle,
-    /// Probe running. `stored` is the previously-pinned PEM for this server, if any.
-    Probing {
-        gen: u64,
-        key: String,
-        stored: Option<String>,
-    },
-    /// Probe done; a modal is asking the user to decide.
-    Decide(TrustDecide),
-}
-
-struct TrustDecide {
-    key: String,
-    /// PEM to persist on Trust; `None` for the failure case (nothing to store).
-    pem: Option<String>,
-    kind: TrustKind,
-}
-
-enum TrustKind {
-    /// Server never trusted before — show its fingerprint.
-    Unknown { fingerprint: String },
-    /// Pinned cert differs from the one now presented — possible MITM.
-    Changed { old: String, new: String },
-    /// The probe itself failed (unreachable, handshake error, …).
-    Failed { error: String },
-}
 
 pub struct GuiState {
     pub window_id: XPLMWindowID,

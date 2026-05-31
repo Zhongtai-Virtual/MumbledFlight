@@ -47,7 +47,8 @@ use xplane_sys::{
 };
 
 use super::known_hosts::KnownHosts;
-use super::{FilePickTarget, FilePicker, GuiState, TrustState};
+use super::trust::TrustState;
+use super::{FilePickTarget, FilePicker, GuiState};
 use file_picker::{start_dir, FilePick};
 use panels::BrowseClicks;
 use widgets::{Ctx, LABEL_COL_X};

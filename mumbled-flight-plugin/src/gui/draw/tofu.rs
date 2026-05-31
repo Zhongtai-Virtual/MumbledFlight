@@ -26,15 +26,127 @@
 use log::warn;
 use mumbled_flight_core::mumble;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use super::super::{TrustDecide, TrustKind, TrustState};
-use super::panels::{TrustChoice, TrustView, TRUST_POPUP_ID};
+use super::super::trust::{TrustDecide, TrustKind, TrustState, ProbeSlot};
 use super::widgets::Ctx;
 
-static PROBE_GEN: AtomicU64 = AtomicU64::new(0);
+// ── Trust modal types and rendering ──────────────────────────────────────────
 
-type ProbeSlot = Arc<Mutex<Option<(u64, Result<mumble::ProbedCert, String>)>>>;
+/// Popup id shared between `ui.open_popup` (probe resolution) and `modal_popup_config` (render).
+const TRUST_POPUP_ID: &str = "##trust";
+
+/// What the trust modal should display once the background probe has resolved.
+pub(super) enum TrustView<'a> {
+    Unknown { server: &'a str, fingerprint: &'a str },
+    Changed { server: &'a str, old: &'a str, new: &'a str },
+    Failed  { server: &'a str, error: &'a str },
+}
+
+/// The user's response to the trust modal.
+pub(super) enum TrustChoice {
+    Pending,
+    Cancel,
+    Trust,
+}
+
+impl<'ui> Ctx<'ui> {
+    /// TOFU trust modal — centred over the XPLM window, heading and buttons vary by `view`.
+    /// Returns `Pending` while open, `Cancel` on dismiss, `Trust` on approval.
+    pub(super) fn trust_modal(&self, view: TrustView) -> TrustChoice {
+        let win_cx = self.win_x + self.win_w * 0.5;
+        let win_cy = self.win_y + self.win_h * 0.5;
+        unsafe {
+            imgui_sys::igSetNextWindowPos(
+                imgui_sys::ImVec2 { x: win_cx, y: win_cy },
+                imgui::Condition::Always as i32,
+                imgui_sys::ImVec2 { x: 0.5, y: 0.5 },
+            );
+            let w = 430.0_f32.min(self.win_w);
+            imgui_sys::igSetNextWindowSize(
+                imgui_sys::ImVec2 { x: w, y: 0.0 },
+                imgui::Condition::Always as i32,
+            );
+        }
+        let Some(_token) = self
+            .ui
+            .modal_popup_config(TRUST_POPUP_ID)
+            .title_bar(false)
+            .resizable(false)
+            .movable(false)
+            .begin_popup()
+        else {
+            return TrustChoice::Pending;
+        };
+
+        const AMBER: [f32; 4] = [1.0, 0.8, 0.2, 1.0];
+        const RED:   [f32; 4] = [1.0, 0.4, 0.4, 1.0];
+
+        match view {
+            TrustView::Unknown { server, fingerprint } => {
+                self.ui.text_colored(AMBER, "Unrecognized server");
+                self.ui.spacing();
+                self.ui.text_wrapped(
+                    "This server's certificate has not been trusted before. Confirm the SHA-256 \
+                     fingerprint matches the one the server operator gave you, then choose Trust \
+                     to remember it for future connections.",
+                );
+                self.ui.spacing();
+                self.ui.text_wrapped(format!("Server: {server}"));
+                self.ui.text_disabled("SHA-256 fingerprint:");
+                self.ui.text_wrapped(fingerprint);
+                self.ui.spacing();
+                self.trust_buttons()
+            }
+            TrustView::Changed { server, old, new } => {
+                self.ui.text_colored(RED, "Server certificate CHANGED");
+                self.ui.spacing();
+                self.ui.text_wrapped(
+                    "WARNING: this server is presenting a different certificate from the one you \
+                     previously trusted. This can be a legitimate change — or someone intercepting \
+                     the connection (MITM). Only Trust if you expected the certificate to change.",
+                );
+                self.ui.spacing();
+                self.ui.text_wrapped(format!("Server: {server}"));
+                self.ui.text_disabled("Previously trusted:");
+                self.ui.text_wrapped(old);
+                self.ui.text_disabled("Now presented:");
+                self.ui.text_wrapped(new);
+                self.ui.spacing();
+                self.trust_buttons()
+            }
+            TrustView::Failed { server, error } => {
+                self.ui.text_colored(RED, "Could not reach server");
+                self.ui.spacing();
+                self.ui.text_wrapped(format!("Failed to retrieve the certificate from {server}:"));
+                self.ui.text_wrapped(error);
+                self.ui.spacing();
+                if self.ui.button("Close##trust") {
+                    self.ui.close_current_popup();
+                    return TrustChoice::Cancel;
+                }
+                TrustChoice::Pending
+            }
+        }
+    }
+
+    fn trust_buttons(&self) -> TrustChoice {
+        let cancel = self.ui.button("Cancel##trust");
+        self.ui.same_line();
+        let trust = self.ui.button("Trust##trust");
+        if cancel {
+            self.ui.close_current_popup();
+            return TrustChoice::Cancel;
+        }
+        if trust {
+            self.ui.close_current_popup();
+            return TrustChoice::Trust;
+        }
+        TrustChoice::Pending
+    }
+}
+
+static PROBE_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// What the draw loop needs back from a single [`advance`] tick.
 pub(super) struct TofuResult {
