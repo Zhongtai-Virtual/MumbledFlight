@@ -20,14 +20,16 @@
 //! The per-frame drawing is split across submodules:
 //! - [`widgets`] — the `Ctx` panel-renderer and its reusable primitive widgets.
 //! - [`panels`] — the individual config panels rendered onto a `Ctx`.
-//! - [`file_picker`] — the file-browser window (separate XPLM window); owns `draw_file_picker`.
-//! - [`tofu`] — the TOFU probe/decide flow; owns `draw_tofu` and the probe/decide logic.
+//! - [`file_picker`] — file-browser content (`file_picker_content`, `FilePick`, `start_dir`,
+//!   `render_fp_overlay`).
+//! - [`tofu`] — TOFU probe/decide logic (`start_probe`, `poll_step`, `render_tofu_overlay`).
 //!
-//! Each floating window has its own [`ImguiWindowState`] (ctx + renderer + input
-//! state) and its own draw method. `GuiState::draw` (here) renders the main config window;
-//! `draw_file_picker` and `draw_tofu` live in their respective submodules.
-//!
-//! `init_imgui` and `make_gl` are `pub(super)` helpers shared by all three draw methods.
+//! **Single-frame input rule**: all interactive imgui content — including the TOFU trust dialog
+//! and file-picker — is rendered inside `GuiState::draw` (the main window's frame).  There are
+//! no separate XPLM windows for popups; the overlays appear as imgui windows with their own
+//! title bars, centered within the main 630×600 window.  This means the complete
+//! mouse-down → mouse-up cycle for every button is visible in one imgui frame, which is the
+//! only reliable way to handle clicks with a shared imgui context.
 
 mod file_picker;
 mod panels;
@@ -44,14 +46,15 @@ use std::time::Instant;
 
 use xplane_sys::{
     XPLMGetScreenBoundsGlobal, XPLMGetScreenSize, XPLMGetWindowGeometry, XPLMSetGraphicsState,
-    XPLMSetWindowGeometry, XPLMSetWindowIsVisible, XPLMWindowID,
+    XPLMWindowID,
 };
 
 use super::known_hosts::KnownHosts;
 use super::trust::TrustState;
 use super::{FilePickTarget, FilePicker, GuiState, ImguiWindowState};
-use file_picker::start_dir;
+use file_picker::{render_fp_overlay, start_dir};
 use panels::BrowseClicks;
+use tofu::{render_tofu_overlay, TofuDrawResult};
 use widgets::{Ctx, LABEL_COL_X};
 
 // ── Shared renderer helpers ───────────────────────────────────────────────────
@@ -135,30 +138,11 @@ pub(super) fn window_metrics(win: XPLMWindowID) -> (i32, i32, i32, i32, f32, f32
     )
 }
 
-/// Positions `popup` centred over `main` then makes it visible.
-unsafe fn show_centred(popup: XPLMWindowID, main: XPLMWindowID, w: i32, h: i32) {
-    let (mut ml, mut mt, mut mr, mut mb) = (0i32, 0, 0, 0);
-    XPLMGetWindowGeometry(main, &mut ml, &mut mt, &mut mr, &mut mb);
-    let cx = (ml + mr) / 2;
-    let cy = (mb + mt) / 2;
-    XPLMSetWindowGeometry(popup, cx - w / 2, cy + h / 2, cx + w / 2, cy - h / 2);
-    XPLMSetWindowIsVisible(popup, 1);
-}
-
 // ── Draw implementations ──────────────────────────────────────────────────────
 
 impl GuiState {
-    /// Dispatch entry point called by the shared draw callback for all three windows.
     pub fn draw_any(&mut self, win: XPLMWindowID) {
-        let fp = self.file_picker_win;
-        let tofu = self.tofu_win;
-        if win == fp {
-            self.draw_file_picker(win);
-        } else if win == tofu {
-            self.draw_tofu(win);
-        } else {
-            self.draw(win);
-        }
+        self.draw(win);
     }
 
     pub fn draw(&mut self, win: XPLMWindowID) {
@@ -230,8 +214,6 @@ impl GuiState {
         let mut selected_radio = self.selected_radio;
         let mouse_pos = self.main_imgui.mouse_pos;
         let mouse_down = self.main_imgui.mouse_down;
-        let file_picker_win = self.file_picker_win;
-        let tofu_win = self.tofu_win;
         let window_id = self.window_id;
 
         let (Some(ctx), Some(renderer)) = (
@@ -249,6 +231,11 @@ impl GuiState {
             io.mouse_pos = mouse_pos;
             io.mouse_down = mouse_down;
         }
+
+        // Results from overlay renders — processed after the frame to avoid borrow conflicts.
+        let mut tofu_result = TofuDrawResult::default();
+        let mut fp_cert_path: Option<(FilePickTarget, String)> = None;
+        let mut fp_open = false;
 
         {
             let ui = ctx.frame();
@@ -326,45 +313,65 @@ impl GuiState {
                     }
                     p.status_display(voip_statuses.as_ref(), &status);
 
-                    // Open the file picker window when a Browse button is clicked.
-                    {
+                    // Open the file picker when a Browse button is clicked.
+                    if file_picker.is_none() {
                         let requests: [(bool, FilePickTarget, &str, &'static [&'static str]); 2] = [
-                            (
-                                cert_browse,
-                                FilePickTarget::UserCert,
-                                &cert_path,
-                                &["p12", "pfx"],
-                            ),
-                            (
-                                ca_browse,
-                                FilePickTarget::ServerCa,
-                                &server_ca,
-                                &["pem", "der", "crt"],
-                            ),
+                            (cert_browse, FilePickTarget::UserCert, &cert_path, &["p12", "pfx"]),
+                            (ca_browse,   FilePickTarget::ServerCa, &server_ca, &["pem", "der", "crt"]),
                         ];
-                        if file_picker.is_none() {
-                            if let Some((_, target, current, exts)) =
-                                requests.iter().find(|(b, ..)| *b)
-                            {
-                                file_picker = Some(FilePicker::new(
-                                    start_dir(current, &plugin_dir),
-                                    *target,
-                                    exts,
-                                ));
-                                unsafe { show_centred(file_picker_win, window_id, 430, 330) };
-                            }
+                        if let Some((_, target, current, exts)) =
+                            requests.iter().find(|(b, ..)| *b)
+                        {
+                            file_picker = Some(FilePicker::new(
+                                start_dir(current, &plugin_dir),
+                                *target,
+                                exts,
+                            ));
+                            fp_open = true;
                         }
                     }
 
-                    // Poll the TOFU probe; show the TOFU window if a decision is needed.
+                    // Poll the TOFU probe.
                     let outcome = tofu::poll_step(&mut trust_state, &probe_slot);
                     if outcome.silent_connect {
                         should_connect = true;
                     }
-                    if outcome.show_tofu {
-                        unsafe { show_centred(tofu_win, window_id, 430, 280) };
-                    }
                 });
+
+            // ── File-picker overlay ───────────────────────────────────────────────────
+            if file_picker.is_some() {
+                // Centre a 430×330 popup within the main window.
+                let popup_w = 430.0_f32;
+                let popup_h = 330.0_f32;
+                let popup_x = win_imgui_x + (width as f32 - popup_w) / 2.0;
+                let popup_y = win_imgui_y + (height as f32 - popup_h) / 2.0;
+                let r = render_fp_overlay(
+                    &*ui,
+                    pad_r,
+                    file_picker.take().unwrap(),
+                    [popup_x, popup_y],
+                    [popup_w, popup_h],
+                );
+                file_picker = r.picker;
+                fp_cert_path = r.path;
+            }
+
+            // ── TOFU overlay ──────────────────────────────────────────────────────────
+            if matches!(trust_state, TrustState::Decide(_)) {
+                // Centre a 430×280 popup within the main window.
+                let popup_w = 430.0_f32;
+                let popup_h = 280.0_f32;
+                let popup_x = win_imgui_x + (width as f32 - popup_w) / 2.0;
+                let popup_y = win_imgui_y + (height as f32 - popup_h) / 2.0;
+                tofu_result = render_tofu_overlay(
+                    &*ui,
+                    pad_r,
+                    &mut trust_state,
+                    [popup_x, popup_y],
+                    [popup_w, popup_h],
+                    &server,
+                );
+            }
         }
         let draw_data = ctx.render();
         unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
@@ -412,6 +419,23 @@ impl GuiState {
         }
         if should_disconnect {
             self.should_disconnect = true;
+        }
+
+        // fp_open: picker was just created this frame; nothing else to do.
+        let _ = (fp_open, window_id);
+
+        // Process overlay results after write-back (needs &mut self free of borrow).
+        if tofu_result.should_connect {
+            self.should_connect = true;
+        }
+        if let Some((key, pem)) = tofu_result.to_store {
+            self.known_hosts.insert_and_save(key, pem);
+        }
+        if let Some((target, path)) = fp_cert_path {
+            match target {
+                FilePickTarget::UserCert => self.cert_path = path,
+                FilePickTarget::ServerCa => self.server_ca = path,
+            }
         }
     }
 }

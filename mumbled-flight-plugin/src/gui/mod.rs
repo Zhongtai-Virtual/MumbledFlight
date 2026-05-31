@@ -187,14 +187,10 @@ const RADIO_DEVICE_OFFSET: usize = 1;
 
 pub struct GuiState {
     pub window_id: XPLMWindowID,
-    pub file_picker_win: XPLMWindowID,
-    pub tofu_win: XPLMWindowID,
     config_path: PathBuf,
 
-    // Per-window ImGui state — lazily initialised on first draw.
+    // Single ImGui context — imgui-rs only allows one per thread.
     main_imgui: ImguiWindowState,
-    fp_imgui: ImguiWindowState,
-    tofu_imgui: ImguiWindowState,
 
     pending_devices: Arc<Mutex<Option<DeviceSnapshot>>>,
     // Virtual screen height — shared across all windows (same coordinate space).
@@ -300,11 +296,9 @@ impl GuiState {
 
         let known_hosts = KnownHosts::load(&config_path);
 
-        info!("GuiState::new: creating XPLM windows...");
+        info!("GuiState::new: creating XPLM window...");
         let window_id = unsafe { window::create_xplm_window() };
-        let file_picker_win = unsafe { window::create_file_picker_window() };
-        let tofu_win = unsafe { window::create_tofu_window() };
-        info!("GuiState::new: XPLM windows created ({window_id:?})");
+        info!("GuiState::new: XPLM window created ({window_id:?})");
 
         let pending_devices: Arc<Mutex<Option<DeviceSnapshot>>> = Arc::new(Mutex::new(None));
         {
@@ -363,12 +357,8 @@ impl GuiState {
 
         Self {
             window_id,
-            file_picker_win,
-            tofu_win,
             config_path,
             main_imgui: ImguiWindowState::new(),
-            fp_imgui: ImguiWindowState::new(),
-            tofu_imgui: ImguiWindowState::new(),
             pending_devices,
             screen_h: 0,
             server: cfg.server,
@@ -554,12 +544,8 @@ impl GuiState {
 
     // ── Input handlers ────────────────────────────────────────────────────────
 
-    fn imgui_for_win(&mut self, win: XPLMWindowID) -> &mut ImguiWindowState {
-        let fp   = self.file_picker_win;
-        let tofu = self.tofu_win;
-        if      win == fp   { &mut self.fp_imgui }
-        else if win == tofu { &mut self.tofu_imgui }
-        else                { &mut self.main_imgui }
+    fn imgui_for_win(&mut self, _win: XPLMWindowID) -> &mut ImguiWindowState {
+        &mut self.main_imgui
     }
 
     pub fn on_any_mouse(&mut self, win: XPLMWindowID, x: c_int, y: c_int, status: XPLMMouseStatus) {

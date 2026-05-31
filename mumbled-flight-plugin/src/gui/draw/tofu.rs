@@ -15,32 +15,25 @@
 // You should have received a copy of the GNU General Public License
 // along with MumbledFlight.  If not, see <https://www.gnu.org/licenses/>.
 
-//! TOFU probe-and-decide flow and XPLM window draw lifecycle for the trust popup.
+//! TOFU probe-and-decide flow and overlay rendering for the trust popup.
 //!
 //! Entry points for the main draw loop:
 //! - [`start_probe`] — called when Connect is clicked with no Server CA; spawns the background
 //!   cert-fetch thread.
 //! - [`poll_step`] — called every frame from the main draw; polls the probe result and returns
 //!   whether to show the TOFU window.
-//! - [`render_decision`] — called every frame from the TOFU window's draw callback; renders the
-//!   decision UI and returns the user's action.
-//!
-//! `GuiState::draw_tofu` (also here) owns the XPLM window frame setup for the popup.
+//! - [`render_tofu_overlay`] — renders the decision UI as an imgui overlay window inside the
+//!   current frame and returns the user's action.
 
 use log::warn;
 use mumbled_flight_core::mumble;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
-
-use xplane_sys::{XPLMSetGraphicsState, XPLMSetWindowIsVisible, XPLMWindowID};
 
 use crate::gui::trust::PROBE_GEN;
 
-use super::super::trust::{ProbeSlot, PendingTrust, TrustKind, TrustState};
-use super::super::GuiState;
+use super::super::trust::{PendingTrust, ProbeSlot, TrustKind, TrustState};
 use super::widgets::{Ctx, LABEL_COL_X};
-use super::{init_imgui, window_metrics};
 
 // ── Trust content rendering ───────────────────────────────────────────────────
 
@@ -73,16 +66,13 @@ pub(super) enum TrustChoice {
 pub(super) struct ProbeOutcome {
     /// Cert is unchanged from the pinned one — connect immediately without showing the modal.
     pub silent_connect: bool,
-    /// Probe resolved and the user must decide — show the TOFU window.
-    pub show_tofu: bool,
 }
 
-/// What the TOFU window's draw callback reports back to the caller.
+/// What the TOFU overlay reports back to the caller.
 #[derive(Default)]
 pub(super) struct TofuDrawResult {
     pub should_connect: bool,
     pub to_store: Option<(String, String)>,
-    pub close: bool,
 }
 
 impl<'ui> Ctx<'ui> {
@@ -147,11 +137,47 @@ impl<'ui> Ctx<'ui> {
             return TrustChoice::Cancel;
         }
         self.ui.same_line();
+        const RED_BTN:     [f32; 4] = [0.75, 0.15, 0.15, 1.0];
+        const RED_BTN_HOV: [f32; 4] = [0.90, 0.25, 0.25, 1.0];
+        const RED_BTN_ACT: [f32; 4] = [0.60, 0.10, 0.10, 1.0];
+        let _c0 = self.ui.push_style_color(imgui::StyleColor::Button,        RED_BTN);
+        let _c1 = self.ui.push_style_color(imgui::StyleColor::ButtonHovered, RED_BTN_HOV);
+        let _c2 = self.ui.push_style_color(imgui::StyleColor::ButtonActive,  RED_BTN_ACT);
         if self.ui.button("Trust##trust") {
             return TrustChoice::Trust;
         }
         TrustChoice::Pending
     }
+}
+
+// ── Overlay rendering ─────────────────────────────────────────────────────────
+
+/// Renders the TOFU decision UI as an imgui overlay window inside the current frame.
+///
+/// Called from `GuiState::draw` so the full mouse-down → mouse-up cycle for the
+/// Trust/Cancel buttons is visible in one imgui frame.
+/// `pos` and `size` are in imgui virtual-screen coordinates (already computed by the caller).
+pub(super) fn render_tofu_overlay(
+    ui: &imgui::Ui,
+    pad_r: f32,
+    trust_state: &mut TrustState,
+    pos: [f32; 2],
+    size: [f32; 2],
+    server: &str,
+) -> TofuDrawResult {
+    let fw = (size[0] - LABEL_COL_X - pad_r).max(80.0);
+    let p = Ctx { ui, fw };
+    let mut result = TofuDrawResult::default();
+    ui.window("Server Certificate")
+        .position(pos, imgui::Condition::Always)
+        .size(size, imgui::Condition::Always)
+        .title_bar(true)
+        .resizable(false)
+        .movable(false)
+        .build(|| {
+            result = render_decision(trust_state, &p, server);
+        });
+    result
 }
 
 // ── Trust modal types and rendering ──────────────────────────────────────────
@@ -204,21 +230,18 @@ pub(super) fn poll_step(trust_state: &mut TrustState, probe_slot: &ProbeSlot) ->
     };
     let (new_state, silent, show) = resolve_probe(result, key, stored);
     *trust_state = new_state;
-    ProbeOutcome { silent_connect: silent, show_tofu: show }
+    let _ = show;
+    ProbeOutcome { silent_connect: silent }
 }
 
-/// Renders the TOFU decision UI from inside the TOFU XPLM window's draw callback.
-/// Called every frame while the TOFU window is visible.
+/// Renders the TOFU decision UI from inside an imgui window.
 pub(super) fn render_decision(
     trust_state: &mut TrustState,
     p: &Ctx<'_>,
     server: &str,
 ) -> TofuDrawResult {
     let TrustState::Decide(d) = trust_state else {
-        return TofuDrawResult {
-            close: true,
-            ..Default::default()
-        };
+        return TofuDrawResult::default();
     };
     let view = match &d.kind {
         TrustKind::Unknown { fingerprint } => TrustPrompt::Unknown {
@@ -232,10 +255,7 @@ pub(super) fn render_decision(
         TrustChoice::Pending => TofuDrawResult::default(),
         TrustChoice::Cancel => {
             *trust_state = TrustState::Idle;
-            TofuDrawResult {
-                close: true,
-                ..Default::default()
-            }
+            TofuDrawResult::default()
         }
         TrustChoice::Trust => {
             // `Trust` is only reachable via `trust_buttons()`, which is only called for
@@ -249,90 +269,7 @@ pub(super) fn render_decision(
             let to_store = d.pem.as_ref().map(|pem| (d.key.clone(), pem.clone()));
             let connect = to_store.is_some();
             *trust_state = TrustState::Idle;
-            TofuDrawResult {
-                should_connect: connect,
-                to_store,
-                close: true,
-            }
-        }
-    }
-}
-
-// ── XPLM window draw lifecycle ────────────────────────────────────────────────
-
-impl GuiState {
-    pub fn draw_tofu(&mut self, win: XPLMWindowID) {
-        if !matches!(self.trust_state, TrustState::Decide(_)) {
-            unsafe { XPLMSetWindowIsVisible(win, 0) };
-            return;
-        }
-        if self.tofu_imgui.ctx.is_none() {
-            init_imgui(&mut self.tofu_imgui);
-        }
-
-        let (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y) =
-            window_metrics(win);
-        self.screen_h = virt_h;
-
-        let dt = {
-            let now = Instant::now();
-            let d = (now - self.tofu_imgui.last_time).as_secs_f32().max(1e-6);
-            self.tofu_imgui.last_time = now;
-            d
-        };
-
-        let mut trust_state = std::mem::replace(&mut self.trust_state, TrustState::Idle);
-        let server = self.server.clone();
-        let tofu_win = self.tofu_win;
-        let mouse_pos = self.tofu_imgui.mouse_pos;
-        let mouse_down = self.tofu_imgui.mouse_down;
-
-        let (Some(ctx), Some(renderer)) = (
-            self.tofu_imgui.ctx.as_mut(),
-            self.tofu_imgui.renderer.as_mut(),
-        ) else {
-            self.trust_state = trust_state;
-            return;
-        };
-
-        {
-            let io = ctx.io_mut();
-            io.display_size = [virt_w as f32, virt_h as f32];
-            io.display_framebuffer_scale = [scale_x, scale_y];
-            io.delta_time = dt;
-            io.mouse_pos = mouse_pos;
-            io.mouse_down = mouse_down;
-        }
-
-        let mut action = TofuDrawResult::default();
-        {
-            let ui = ctx.frame();
-            let pad_r = ui.clone_style().window_padding[0];
-            let fw = (width as f32 - LABEL_COL_X - pad_r).max(80.0);
-            let p = Ctx { ui: &*ui, fw };
-            ui.window("##tofu")
-                .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
-                .size([width as f32, height as f32], imgui::Condition::Always)
-                .title_bar(false)
-                .resizable(false)
-                .movable(false)
-                .build(|| {
-                    action = render_decision(&mut trust_state, &p, &server);
-                });
-        }
-        let draw_data = ctx.render();
-        unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
-        renderer.render(draw_data).ok();
-
-        self.trust_state = trust_state;
-        if action.should_connect {
-            self.should_connect = true;
-        }
-        if let Some((key, pem)) = action.to_store {
-            self.known_hosts.insert_and_save(key, pem);
-        }
-        if action.close {
-            unsafe { XPLMSetWindowIsVisible(tofu_win, 0) };
+            TofuDrawResult { should_connect: connect, to_store }
         }
     }
 }

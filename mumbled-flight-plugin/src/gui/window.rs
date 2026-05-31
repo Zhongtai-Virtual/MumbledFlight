@@ -138,11 +138,3 @@ unsafe fn make_window(
 pub unsafe fn create_xplm_window() -> XPLMWindowID {
     make_window(60, 660, 690, 60, c"MumbledFlight")
 }
-
-pub unsafe fn create_file_picker_window() -> XPLMWindowID {
-    make_window(0, 330, 430, 0, c"Browse")
-}
-
-pub unsafe fn create_tofu_window() -> XPLMWindowID {
-    make_window(0, 280, 430, 0, c"Server Certificate")
-}
