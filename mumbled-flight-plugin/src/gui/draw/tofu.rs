@@ -207,7 +207,7 @@ fn poll_probe(trust_state: &mut TrustState, probe_slot: &ProbeSlot, ui: &imgui::
     };
     let result = {
         let mut guard = probe_slot.lock().unwrap();
-        if guard.as_ref().map_or(false, |(g, _)| *g == gen) {
+        if guard.as_ref().is_some_and(|(g, _)| *g == gen) {
             guard.take().map(|(_, r)| r)
         } else {
             None

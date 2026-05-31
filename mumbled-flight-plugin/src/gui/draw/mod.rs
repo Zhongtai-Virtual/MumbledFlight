@@ -283,7 +283,7 @@ impl GuiState {
                         }
                     }
 
-                    let tofu_r = tofu::advance(&mut trust_state, &probe_slot, &ui, &p, &server);
+                    let tofu_r = tofu::advance(&mut trust_state, &probe_slot, ui, &p, &server);
                     if tofu_r.should_connect {
                         should_connect = true;
                     }
