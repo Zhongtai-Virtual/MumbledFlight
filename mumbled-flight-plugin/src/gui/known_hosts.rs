@@ -33,6 +33,10 @@ pub struct KnownHosts {
     entries: HashMap<String, String>,
 }
 
+/// Lightweight snapshot used to look up entries inside an imgui build closure where `self` is
+/// mutably borrowed by the renderer.
+pub(super) type KnownHostsSnapshot = HashMap<String, String>;
+
 impl KnownHosts {
     /// Canonical store key for a server.
     ///
@@ -61,6 +65,11 @@ impl KnownHosts {
     /// The pinned PEM for `key`, if this server has been trusted before.
     pub fn get(&self, key: &str) -> Option<&String> {
         self.entries.get(key)
+    }
+
+    /// Returns a shallow clone of the entries for use inside closures that cannot borrow `self`.
+    pub(super) fn snapshot(&self) -> KnownHostsSnapshot {
+        self.entries.clone()
     }
 
     /// Records `pem` as the trusted certificate for `key` and persists the store.

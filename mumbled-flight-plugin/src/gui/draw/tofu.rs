@@ -37,7 +37,7 @@ use xplane_sys::{XPLMSetGraphicsState, XPLMSetWindowIsVisible, XPLMWindowID};
 
 use crate::gui::trust::PROBE_GEN;
 
-use super::super::trust::{ProbeSlot, TrustDecide, TrustKind, TrustState};
+use super::super::trust::{ProbeSlot, PendingTrust, TrustKind, TrustState};
 use super::super::GuiState;
 use super::widgets::{Ctx, LABEL_COL_X};
 use super::{init_imgui, window_metrics};
@@ -45,7 +45,7 @@ use super::{init_imgui, window_metrics};
 // ── Trust content rendering ───────────────────────────────────────────────────
 
 /// What the trust window should display once the background probe has resolved.
-pub(super) enum TrustView<'a> {
+pub(super) enum TrustPrompt<'a> {
     Unknown {
         server: &'a str,
         fingerprint: &'a str,
@@ -68,9 +68,18 @@ pub(super) enum TrustChoice {
     Trust,
 }
 
+/// Result of [`poll_step`]: what the main draw loop should do after polling the probe.
+#[derive(Default)]
+pub(super) struct ProbeOutcome {
+    /// Cert is unchanged from the pinned one — connect immediately without showing the modal.
+    pub silent_connect: bool,
+    /// Probe resolved and the user must decide — show the TOFU window.
+    pub show_tofu: bool,
+}
+
 /// What the TOFU window's draw callback reports back to the caller.
 #[derive(Default)]
-pub(super) struct TofuWindowAction {
+pub(super) struct TofuDrawResult {
     pub should_connect: bool,
     pub to_store: Option<(String, String)>,
     pub close: bool,
@@ -78,12 +87,12 @@ pub(super) struct TofuWindowAction {
 
 impl<'ui> Ctx<'ui> {
     /// Renders the TOFU decision UI directly into the current ImGui window.
-    pub(super) fn trust_content(&self, view: TrustView) -> TrustChoice {
+    pub(super) fn trust_content(&self, view: TrustPrompt) -> TrustChoice {
         const AMBER: [f32; 4] = [1.0, 0.8, 0.2, 1.0];
         const RED: [f32; 4] = [1.0, 0.4, 0.4, 1.0];
 
         match view {
-            TrustView::Unknown {
+            TrustPrompt::Unknown {
                 server,
                 fingerprint,
             } => {
@@ -101,7 +110,7 @@ impl<'ui> Ctx<'ui> {
                 self.ui.spacing();
                 self.trust_buttons()
             }
-            TrustView::Changed { server, old, new } => {
+            TrustPrompt::Changed { server, old, new } => {
                 self.ui.text_colored(RED, "Server certificate CHANGED");
                 self.ui.spacing();
                 self.ui.text_wrapped(
@@ -118,7 +127,7 @@ impl<'ui> Ctx<'ui> {
                 self.ui.spacing();
                 self.trust_buttons()
             }
-            TrustView::Failed { server, error } => {
+            TrustPrompt::Failed { server, error } => {
                 self.ui.text_colored(RED, "Could not reach server");
                 self.ui.spacing();
                 self.ui
@@ -173,11 +182,13 @@ pub(super) fn start_probe(
 }
 
 /// Polls the probe slot every frame from the main draw.
-/// Returns `(silent_connect, want_show_tofu_window)`.
-pub(super) fn poll_step(trust_state: &mut TrustState, probe_slot: &ProbeSlot) -> (bool, bool) {
-    let TrustState::Probing { gen, key, stored } = std::mem::replace(trust_state, TrustState::Idle)
-    else {
-        return (false, false);
+pub(super) fn poll_step(trust_state: &mut TrustState, probe_slot: &ProbeSlot) -> ProbeOutcome {
+    let (gen, key, stored) = match std::mem::replace(trust_state, TrustState::Idle) {
+        TrustState::Probing { gen, key, stored } => (gen, key, stored),
+        other => {
+            *trust_state = other;
+            return ProbeOutcome::default();
+        }
     };
     let result = {
         let mut guard = probe_slot.lock().unwrap();
@@ -189,11 +200,11 @@ pub(super) fn poll_step(trust_state: &mut TrustState, probe_slot: &ProbeSlot) ->
     };
     let Some(result) = result else {
         *trust_state = TrustState::Probing { gen, key, stored }; // still running
-        return (false, false);
+        return ProbeOutcome::default();
     };
     let (new_state, silent, show) = resolve_probe(result, key, stored);
     *trust_state = new_state;
-    (silent, show)
+    ProbeOutcome { silent_connect: silent, show_tofu: show }
 }
 
 /// Renders the TOFU decision UI from inside the TOFU XPLM window's draw callback.
@@ -202,35 +213,43 @@ pub(super) fn render_decision(
     trust_state: &mut TrustState,
     p: &Ctx<'_>,
     server: &str,
-) -> TofuWindowAction {
+) -> TofuDrawResult {
     let TrustState::Decide(d) = trust_state else {
-        return TofuWindowAction {
+        return TofuDrawResult {
             close: true,
             ..Default::default()
         };
     };
     let view = match &d.kind {
-        TrustKind::Unknown { fingerprint } => TrustView::Unknown {
+        TrustKind::Unknown { fingerprint } => TrustPrompt::Unknown {
             server,
             fingerprint,
         },
-        TrustKind::Changed { old, new } => TrustView::Changed { server, old, new },
-        TrustKind::Failed { error } => TrustView::Failed { server, error },
+        TrustKind::Changed { old, new } => TrustPrompt::Changed { server, old, new },
+        TrustKind::Failed { error } => TrustPrompt::Failed { server, error },
     };
     match p.trust_content(view) {
-        TrustChoice::Pending => TofuWindowAction::default(),
+        TrustChoice::Pending => TofuDrawResult::default(),
         TrustChoice::Cancel => {
             *trust_state = TrustState::Idle;
-            TofuWindowAction {
+            TofuDrawResult {
                 close: true,
                 ..Default::default()
             }
         }
         TrustChoice::Trust => {
+            // `Trust` is only reachable via `trust_buttons()`, which is only called for
+            // `TrustPrompt::Unknown` and `TrustPrompt::Changed`. Both of those are constructed from
+            // `TrustKind` variants whose `pem` is always `Some` (the probe succeeded and returned
+            // a PEM). `TrustPrompt::Failed` — the only variant with `pem: None` — shows "Close"
+            // only, so `TrustChoice::Trust` is never returned from it. Therefore `to_store` is
+            // always `Some` here and `connect` is always `true`. If a future `TrustKind` variant
+            // with `pem: None` accidentally uses `trust_buttons()`, the dialog would close
+            // silently without connecting — add a "Close"-only button to that variant instead.
             let to_store = d.pem.as_ref().map(|pem| (d.key.clone(), pem.clone()));
             let connect = to_store.is_some();
             *trust_state = TrustState::Idle;
-            TofuWindowAction {
+            TofuDrawResult {
                 should_connect: connect,
                 to_store,
                 close: true,
@@ -285,7 +304,7 @@ impl GuiState {
             io.mouse_down = mouse_down;
         }
 
-        let mut action = TofuWindowAction::default();
+        let mut action = TofuDrawResult::default();
         {
             let ui = ctx.frame();
             let pad_r = ui.clone_style().window_padding[0];
@@ -330,7 +349,7 @@ fn resolve_probe(
     let probed = match result {
         Err(error) => {
             return (
-                TrustState::Decide(TrustDecide {
+                TrustState::Decide(PendingTrust {
                     key,
                     pem: None,
                     kind: TrustKind::Failed { error },
@@ -348,7 +367,7 @@ fn resolve_probe(
         Err(e) => {
             let error = format!("server certificate encoding error: {e}");
             return (
-                TrustState::Decide(TrustDecide {
+                TrustState::Decide(PendingTrust {
                     key,
                     pem: None,
                     kind: TrustKind::Failed { error },
@@ -367,7 +386,7 @@ fn resolve_probe(
     match old_fp {
         Some(old) if old == new_fp => (TrustState::Idle, true, false),
         Some(old) => (
-            TrustState::Decide(TrustDecide {
+            TrustState::Decide(PendingTrust {
                 key,
                 pem: Some(pem),
                 kind: TrustKind::Changed { old, new: new_fp },
@@ -376,7 +395,7 @@ fn resolve_probe(
             true,
         ),
         None => (
-            TrustState::Decide(TrustDecide {
+            TrustState::Decide(PendingTrust {
                 key,
                 pem: Some(pem),
                 kind: TrustKind::Unknown {

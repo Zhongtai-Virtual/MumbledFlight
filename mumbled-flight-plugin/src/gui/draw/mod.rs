@@ -216,10 +216,10 @@ impl GuiState {
         let mut should_disconnect = false;
         let mut trust_state = std::mem::replace(&mut self.trust_state, TrustState::Idle);
         let probe_slot = Arc::clone(&self.probe_slot);
-        let known_key = KnownHosts::key(&self.server, self.port);
-        let known_stored = matches!(trust_state, TrustState::Idle)
-            .then(|| self.known_hosts.get(&known_key).cloned())
-            .flatten();
+        // Snapshot known_hosts so the closure can look up the current server's stored cert using
+        // the post-edit server value (text widgets in the closure may update `server`/`port`
+        // before start_probe is called).
+        let known_hosts_snap = self.known_hosts.snapshot();
         let is_connected = self.is_connected;
         let status = self.status.clone();
         let voip_statuses = self.voip_statuses.clone();
@@ -298,8 +298,12 @@ impl GuiState {
                         trust_state,
                         TrustState::Probing { .. } | TrustState::Decide(_)
                     );
-                    let (conn, disc) =
-                        p.connect_button(is_connected || tofu_active, &flight_id, &user_name);
+                    let picker_active = file_picker.is_some();
+                    let (conn, disc) = p.connect_button(
+                        is_connected || tofu_active || picker_active,
+                        &flight_id,
+                        &user_name,
+                    );
                     should_disconnect = disc;
                     if disc {
                         trust_state = TrustState::Idle;
@@ -308,11 +312,13 @@ impl GuiState {
                         if !server_ca.trim().is_empty() {
                             should_connect = true;
                         } else {
+                            let probe_key = KnownHosts::key(&server, port);
+                            let probe_stored = known_hosts_snap.get(&probe_key).cloned();
                             tofu::start_probe(
                                 &mut trust_state,
                                 &probe_slot,
-                                known_key.clone(),
-                                known_stored.clone(),
+                                probe_key,
+                                probe_stored,
                                 &server,
                                 port,
                             );
@@ -351,11 +357,11 @@ impl GuiState {
                     }
 
                     // Poll the TOFU probe; show the TOFU window if a decision is needed.
-                    let (silent, want_tofu) = tofu::poll_step(&mut trust_state, &probe_slot);
-                    if silent {
+                    let outcome = tofu::poll_step(&mut trust_state, &probe_slot);
+                    if outcome.silent_connect {
                         should_connect = true;
                     }
-                    if want_tofu {
+                    if outcome.show_tofu {
                         unsafe { show_centred(tofu_win, window_id, 430, 280) };
                     }
                 });

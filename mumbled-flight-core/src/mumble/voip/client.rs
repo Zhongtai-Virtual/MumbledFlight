@@ -204,8 +204,10 @@ pub struct ProbedCert {
 /// the server's leaf certificate (PEM) plus its SHA-256 fingerprint.
 ///
 /// This is the TOFU primitive: a frontend probes the server, shows the fingerprint to the user,
-/// and on approval persists the PEM as a pinned [`ServerTrust`]. A 10-second timeout covers both
-/// the TCP connect and the subsequent TLS handshake; run it off any latency-sensitive thread.
+/// and on approval persists the PEM as a pinned [`ServerTrust`]. A 10-second timeout covers the
+/// TCP connect and the TLS handshake; DNS resolution (`to_socket_addrs`) is not bounded and can
+/// block for the OS resolver timeout on unreachable hosts. Run this off any latency-sensitive
+/// thread.
 ///
 /// All addresses returned by DNS resolution are tried in order so that dual-stack hosts where
 /// the first address is unreachable (e.g. IPv4-first on an IPv6-only path) do not cause a

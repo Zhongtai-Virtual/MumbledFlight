@@ -38,10 +38,10 @@ pub(super) enum TrustState {
         stored: Option<String>,
     },
     /// Probe done; a modal is asking the user to decide.
-    Decide(TrustDecide),
+    Decide(PendingTrust),
 }
 
-pub(super) struct TrustDecide {
+pub(super) struct PendingTrust {
     pub(super) key: String,
     /// PEM to persist on Trust; `None` for the failure case (nothing to store).
     pub(super) pem: Option<String>,
