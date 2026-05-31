@@ -18,11 +18,13 @@
 //! TOFU connect-flow state machine types, shared between `gui` and `gui::draw::tofu`.
 
 use mumbled_flight_core::mumble::ProbedCert;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::AtomicU64, Arc, Mutex};
 
 /// Slot a background probe thread writes its result into, tagged with the probe's generation so a
 /// stale result from a superseded/cancelled probe is ignored.
 pub(super) type ProbeSlot = Arc<Mutex<Option<(u64, Result<ProbedCert, String>)>>>;
+
+pub(super) static PROBE_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// TOFU connect-flow state machine.
 pub(super) enum TrustState {

@@ -123,7 +123,16 @@ pub(super) fn window_metrics(win: XPLMWindowID) -> (i32, i32, i32, i32, f32, f32
     let win_imgui_x = (left - virt_l) as f32;
     let win_imgui_y = (virt_h - (top - virt_b)) as f32;
 
-    (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y)
+    (
+        width,
+        height,
+        virt_w,
+        virt_h,
+        scale_x,
+        scale_y,
+        win_imgui_x,
+        win_imgui_y,
+    )
 }
 
 /// Positions `popup` centred over `main` then makes it visible.
@@ -141,11 +150,15 @@ unsafe fn show_centred(popup: XPLMWindowID, main: XPLMWindowID, w: i32, h: i32) 
 impl GuiState {
     /// Dispatch entry point called by the shared draw callback for all three windows.
     pub fn draw_any(&mut self, win: XPLMWindowID) {
-        let fp   = self.file_picker_win;
+        let fp = self.file_picker_win;
         let tofu = self.tofu_win;
-        if      win == fp   { self.draw_file_picker(win); }
-        else if win == tofu { self.draw_tofu(win); }
-        else                { self.draw(win); }
+        if win == fp {
+            self.draw_file_picker(win);
+        } else if win == tofu {
+            self.draw_tofu(win);
+        } else {
+            self.draw(win);
+        }
     }
 
     pub fn draw(&mut self, win: XPLMWindowID) {
@@ -221,9 +234,10 @@ impl GuiState {
         let tofu_win = self.tofu_win;
         let window_id = self.window_id;
 
-        let (Some(ctx), Some(renderer)) =
-            (self.main_imgui.ctx.as_mut(), self.main_imgui.renderer.as_mut())
-        else {
+        let (Some(ctx), Some(renderer)) = (
+            self.main_imgui.ctx.as_mut(),
+            self.main_imgui.renderer.as_mut(),
+        ) else {
             return;
         };
 
@@ -280,8 +294,10 @@ impl GuiState {
                         &mut selected_radio,
                     );
                     p.log_level_picker(&mut log_level);
-                    let tofu_active =
-                        matches!(trust_state, TrustState::Probing { .. } | TrustState::Decide(_));
+                    let tofu_active = matches!(
+                        trust_state,
+                        TrustState::Probing { .. } | TrustState::Decide(_)
+                    );
                     let (conn, disc) =
                         p.connect_button(is_connected || tofu_active, &flight_id, &user_name);
                     should_disconnect = disc;
@@ -307,8 +323,18 @@ impl GuiState {
                     // Open the file picker window when a Browse button is clicked.
                     {
                         let requests: [(bool, FilePickTarget, &str, &'static [&'static str]); 2] = [
-                            (cert_browse, FilePickTarget::UserCert, &cert_path, &["p12", "pfx"]),
-                            (ca_browse, FilePickTarget::ServerCa, &server_ca, &["pem", "der", "crt"]),
+                            (
+                                cert_browse,
+                                FilePickTarget::UserCert,
+                                &cert_path,
+                                &["p12", "pfx"],
+                            ),
+                            (
+                                ca_browse,
+                                FilePickTarget::ServerCa,
+                                &server_ca,
+                                &["pem", "der", "crt"],
+                            ),
                         ];
                         if file_picker.is_none() {
                             if let Some((_, target, current, exts)) =
@@ -325,8 +351,7 @@ impl GuiState {
                     }
 
                     // Poll the TOFU probe; show the TOFU window if a decision is needed.
-                    let (silent, want_tofu) =
-                        tofu::poll_step(&mut trust_state, &probe_slot);
+                    let (silent, want_tofu) = tofu::poll_step(&mut trust_state, &probe_slot);
                     if silent {
                         should_connect = true;
                     }
@@ -383,5 +408,4 @@ impl GuiState {
             self.should_disconnect = true;
         }
     }
-
 }

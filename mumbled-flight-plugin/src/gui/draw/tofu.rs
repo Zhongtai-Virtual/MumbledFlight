@@ -29,24 +29,36 @@
 
 use log::warn;
 use mumbled_flight_core::mumble;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
 use xplane_sys::{XPLMSetGraphicsState, XPLMSetWindowIsVisible, XPLMWindowID};
 
-use super::{init_imgui, window_metrics};
-use super::super::{GuiState};
+use crate::gui::trust::PROBE_GEN;
+
 use super::super::trust::{ProbeSlot, TrustDecide, TrustKind, TrustState};
+use super::super::GuiState;
 use super::widgets::{Ctx, LABEL_COL_X};
+use super::{init_imgui, window_metrics};
 
 // ── Trust content rendering ───────────────────────────────────────────────────
 
 /// What the trust window should display once the background probe has resolved.
 pub(super) enum TrustView<'a> {
-    Unknown { server: &'a str, fingerprint: &'a str },
-    Changed { server: &'a str, old: &'a str, new: &'a str },
-    Failed { server: &'a str, error: &'a str },
+    Unknown {
+        server: &'a str,
+        fingerprint: &'a str,
+    },
+    Changed {
+        server: &'a str,
+        old: &'a str,
+        new: &'a str,
+    },
+    Failed {
+        server: &'a str,
+        error: &'a str,
+    },
 }
 
 /// The user's response to the trust dialog.
@@ -71,7 +83,10 @@ impl<'ui> Ctx<'ui> {
         const RED: [f32; 4] = [1.0, 0.4, 0.4, 1.0];
 
         match view {
-            TrustView::Unknown { server, fingerprint } => {
+            TrustView::Unknown {
+                server,
+                fingerprint,
+            } => {
                 self.ui.text_colored(AMBER, "Unrecognized server");
                 self.ui.spacing();
                 self.ui.text_wrapped(
@@ -106,7 +121,8 @@ impl<'ui> Ctx<'ui> {
             TrustView::Failed { server, error } => {
                 self.ui.text_colored(RED, "Could not reach server");
                 self.ui.spacing();
-                self.ui.text_wrapped(format!("Failed to retrieve the certificate from {server}:"));
+                self.ui
+                    .text_wrapped(format!("Failed to retrieve the certificate from {server}:"));
                 self.ui.text_wrapped(error);
                 self.ui.spacing();
                 if self.ui.button("Close##trust") {
@@ -129,7 +145,7 @@ impl<'ui> Ctx<'ui> {
     }
 }
 
-static PROBE_GEN: AtomicU64 = AtomicU64::new(0);
+// ── Trust modal types and rendering ──────────────────────────────────────────
 
 /// Called when Connect is clicked and no explicit Server CA is configured.
 /// Transitions `trust_state` to `Probing` and spawns a background thread that
@@ -143,7 +159,11 @@ pub(super) fn start_probe(
     port: u16,
 ) {
     let gen = PROBE_GEN.fetch_add(1, Ordering::Relaxed);
-    *trust_state = TrustState::Probing { gen, key: known_key, stored: known_stored };
+    *trust_state = TrustState::Probing {
+        gen,
+        key: known_key,
+        stored: known_stored,
+    };
     let slot = Arc::clone(probe_slot);
     let host = host.trim().to_owned();
     std::thread::spawn(move || {
@@ -155,8 +175,7 @@ pub(super) fn start_probe(
 /// Polls the probe slot every frame from the main draw.
 /// Returns `(silent_connect, want_show_tofu_window)`.
 pub(super) fn poll_step(trust_state: &mut TrustState, probe_slot: &ProbeSlot) -> (bool, bool) {
-    let TrustState::Probing { gen, key, stored } =
-        std::mem::replace(trust_state, TrustState::Idle)
+    let TrustState::Probing { gen, key, stored } = std::mem::replace(trust_state, TrustState::Idle)
     else {
         return (false, false);
     };
@@ -185,10 +204,16 @@ pub(super) fn render_decision(
     server: &str,
 ) -> TofuWindowAction {
     let TrustState::Decide(d) = trust_state else {
-        return TofuWindowAction { close: true, ..Default::default() };
+        return TofuWindowAction {
+            close: true,
+            ..Default::default()
+        };
     };
     let view = match &d.kind {
-        TrustKind::Unknown { fingerprint } => TrustView::Unknown { server, fingerprint },
+        TrustKind::Unknown { fingerprint } => TrustView::Unknown {
+            server,
+            fingerprint,
+        },
         TrustKind::Changed { old, new } => TrustView::Changed { server, old, new },
         TrustKind::Failed { error } => TrustView::Failed { server, error },
     };
@@ -196,13 +221,20 @@ pub(super) fn render_decision(
         TrustChoice::Pending => TofuWindowAction::default(),
         TrustChoice::Cancel => {
             *trust_state = TrustState::Idle;
-            TofuWindowAction { close: true, ..Default::default() }
+            TofuWindowAction {
+                close: true,
+                ..Default::default()
+            }
         }
         TrustChoice::Trust => {
             let to_store = d.pem.as_ref().map(|pem| (d.key.clone(), pem.clone()));
             let connect = to_store.is_some();
             *trust_state = TrustState::Idle;
-            TofuWindowAction { should_connect: connect, to_store, close: true }
+            TofuWindowAction {
+                should_connect: connect,
+                to_store,
+                close: true,
+            }
         }
     }
 }
@@ -236,9 +268,10 @@ impl GuiState {
         let mouse_pos = self.tofu_imgui.mouse_pos;
         let mouse_down = self.tofu_imgui.mouse_down;
 
-        let (Some(ctx), Some(renderer)) =
-            (self.tofu_imgui.ctx.as_mut(), self.tofu_imgui.renderer.as_mut())
-        else {
+        let (Some(ctx), Some(renderer)) = (
+            self.tofu_imgui.ctx.as_mut(),
+            self.tofu_imgui.renderer.as_mut(),
+        ) else {
             self.trust_state = trust_state;
             return;
         };
@@ -297,7 +330,11 @@ fn resolve_probe(
     let probed = match result {
         Err(error) => {
             return (
-                TrustState::Decide(TrustDecide { key, pem: None, kind: TrustKind::Failed { error } }),
+                TrustState::Decide(TrustDecide {
+                    key,
+                    pem: None,
+                    kind: TrustKind::Failed { error },
+                }),
                 false,
                 true,
             );
@@ -311,7 +348,11 @@ fn resolve_probe(
         Err(e) => {
             let error = format!("server certificate encoding error: {e}");
             return (
-                TrustState::Decide(TrustDecide { key, pem: None, kind: TrustKind::Failed { error } }),
+                TrustState::Decide(TrustDecide {
+                    key,
+                    pem: None,
+                    kind: TrustKind::Failed { error },
+                }),
                 false,
                 true,
             );
@@ -338,7 +379,9 @@ fn resolve_probe(
             TrustState::Decide(TrustDecide {
                 key,
                 pem: Some(pem),
-                kind: TrustKind::Unknown { fingerprint: new_fp },
+                kind: TrustKind::Unknown {
+                    fingerprint: new_fp,
+                },
             }),
             false,
             true,
