@@ -20,13 +20,14 @@
 //! The per-frame drawing is split across submodules:
 //! - [`widgets`] — the `Ctx` panel-renderer and its reusable primitive widgets.
 //! - [`panels`] — the individual config panels rendered onto a `Ctx`.
-//! - [`file_picker`] — the modal file-browser popup.
-//! - [`tofu`] — the TOFU probe/decide flow (probe launch, result polling, trust modal).
+//! - [`file_picker`] — the file-browser window (separate XPLM window).
+//! - [`tofu`] — the TOFU probe/decide flow (probe launch, result polling, trust window).
 //!
-//! This module owns the orchestration: it computes the XPLM↔ImGui coordinate
-//! mapping, snapshots `GuiState` into locals (to dodge the borrow conflict
-//! between `imgui::Ui` and `self`), drives the panels via `Ctx`, and writes the
-//! edited locals back.
+//! Each floating window has its own [`ImguiWindowState`] (ctx + renderer + input
+//! state) and its own draw method. `draw` renders the main config window; `draw_file_picker`
+//! and `draw_tofu` render the popup windows.
+//!
+//! `init_imgui` and `make_gl` are module-level helpers shared by all three.
 
 mod file_picker;
 mod panels;
@@ -43,59 +44,136 @@ use std::time::Instant;
 
 use xplane_sys::{
     XPLMGetScreenBoundsGlobal, XPLMGetScreenSize, XPLMGetWindowGeometry, XPLMSetGraphicsState,
-    XPLMWindowID,
+    XPLMSetWindowGeometry, XPLMSetWindowIsVisible, XPLMWindowID,
 };
 
 use super::known_hosts::KnownHosts;
 use super::trust::TrustState;
-use super::{FilePickTarget, FilePicker, GuiState};
+use super::{FilePickTarget, FilePicker, GuiState, ImguiWindowState};
 use file_picker::{start_dir, FilePick};
 use panels::BrowseClicks;
 use widgets::{Ctx, LABEL_COL_X};
 
+// ── Shared renderer helpers ───────────────────────────────────────────────────
+
+fn init_imgui(state: &mut ImguiWindowState) {
+    let mut ctx = imgui::Context::create();
+    ctx.set_ini_filename(None);
+    ctx.style_mut().use_dark_colors();
+    ctx.fonts().add_font(&[imgui::FontSource::DefaultFontData {
+        config: Some(imgui::FontConfig {
+            size_pixels: 15.0,
+            ..Default::default()
+        }),
+    }]);
+    match imgui_glow_renderer::AutoRenderer::initialize(make_gl(), &mut ctx) {
+        Ok(renderer) => {
+            state.ctx = Some(ctx);
+            state.renderer = Some(renderer);
+        }
+        Err(e) => warn!("renderer init failed: {e}"),
+    }
+}
+
+fn make_gl() -> glow::Context {
+    unsafe {
+        glow::Context::from_loader_function(|s| {
+            let cstr = CString::new(s).expect("GL symbol names contain no interior nul bytes");
+            #[cfg(not(target_os = "windows"))]
+            {
+                libc::dlsym(std::ptr::null_mut(), cstr.as_ptr()) as *const c_void
+            }
+            #[cfg(target_os = "windows")]
+            {
+                extern "system" {
+                    fn wglGetProcAddress(name: *const i8) -> *const c_void;
+                    fn LoadLibraryA(name: *const i8) -> *mut c_void;
+                    fn GetProcAddress(module: *mut c_void, name: *const i8) -> *const c_void;
+                }
+                let p = wglGetProcAddress(cstr.as_ptr());
+                if !p.is_null() {
+                    p
+                } else {
+                    let lib = LoadLibraryA(b"opengl32.dll\0".as_ptr() as *const i8);
+                    GetProcAddress(lib, cstr.as_ptr())
+                }
+            }
+        })
+    }
+}
+
+/// Reads the XPLM window geometry and virtual/physical screen metrics, returning
+/// `(width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y)`.
+fn window_metrics(win: XPLMWindowID) -> (i32, i32, i32, i32, f32, f32, f32, f32) {
+    let (mut left, mut top, mut right, mut bottom) = (0i32, 0, 0, 0);
+    unsafe { XPLMGetWindowGeometry(win, &mut left, &mut top, &mut right, &mut bottom) };
+    let width = (right - left).max(1);
+    let height = (top - bottom).max(1);
+
+    let (mut virt_l, mut virt_t, mut virt_r, mut virt_b) = (0i32, 0, 0, 0);
+    unsafe { XPLMGetScreenBoundsGlobal(&mut virt_l, &mut virt_t, &mut virt_r, &mut virt_b) };
+    let virt_w = (virt_r - virt_l).max(1);
+    let virt_h = (virt_t - virt_b).max(1);
+
+    let (mut phys_w, mut phys_h) = (0i32, 0);
+    unsafe { XPLMGetScreenSize(&mut phys_w, &mut phys_h) };
+    let scale_x = phys_w as f32 / virt_w as f32;
+    let scale_y = phys_h as f32 / virt_h as f32;
+
+    let win_imgui_x = (left - virt_l) as f32;
+    let win_imgui_y = (virt_h - (top - virt_b)) as f32;
+
+    (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y)
+}
+
+/// Positions `popup` centred over `main` then makes it visible.
+unsafe fn show_centred(popup: XPLMWindowID, main: XPLMWindowID, w: i32, h: i32) {
+    let (mut ml, mut mt, mut mr, mut mb) = (0i32, 0, 0, 0);
+    XPLMGetWindowGeometry(main, &mut ml, &mut mt, &mut mr, &mut mb);
+    let cx = (ml + mr) / 2;
+    let cy = (mb + mt) / 2;
+    XPLMSetWindowGeometry(popup, cx - w / 2, cy + h / 2, cx + w / 2, cy - h / 2);
+    XPLMSetWindowIsVisible(popup, 1);
+}
+
+// ── Draw implementations ──────────────────────────────────────────────────────
+
 impl GuiState {
+    /// Dispatch entry point called by the shared draw callback for all three windows.
+    pub fn draw_any(&mut self, win: XPLMWindowID) {
+        let fp   = self.file_picker_win;
+        let tofu = self.tofu_win;
+        if      win == fp   { self.draw_file_picker(win); }
+        else if win == tofu { self.draw_tofu(win); }
+        else                { self.draw(win); }
+    }
+
     pub fn draw(&mut self, win: XPLMWindowID) {
-        if self.imgui_ctx.is_none() {
-            self.init_renderer();
+        if self.main_imgui.ctx.is_none() {
+            init_imgui(&mut self.main_imgui);
         }
 
-        let (mut left, mut top, mut right, mut bottom) = (0i32, 0i32, 0i32, 0i32);
-        unsafe { XPLMGetWindowGeometry(win, &mut left, &mut top, &mut right, &mut bottom) };
-        let width = (right - left).max(1);
-        let height = (top - bottom).max(1);
-
-        let (mut virt_l, mut virt_t, mut virt_r, mut virt_b) = (0i32, 0i32, 0i32, 0i32);
-        unsafe { XPLMGetScreenBoundsGlobal(&mut virt_l, &mut virt_t, &mut virt_r, &mut virt_b) };
-        let virt_w = (virt_r - virt_l).max(1);
-        let virt_h = (virt_t - virt_b).max(1); // Y-up: top > bottom
-
-        let (mut phys_w, mut phys_h) = (0i32, 0i32);
-        unsafe { XPLMGetScreenSize(&mut phys_w, &mut phys_h) };
-        let scale_x = phys_w as f32 / virt_w as f32;
-        let scale_y = phys_h as f32 / virt_h as f32;
-
+        let (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y) =
+            window_metrics(win);
         self.screen_h = virt_h;
 
-        let win_imgui_x = (left - virt_l) as f32;
-        let win_imgui_y = (virt_h - (top - virt_b)) as f32;
-
-        if !self.logged_coords {
-            self.logged_coords = true;
+        if !self.main_imgui.logged_coords {
+            self.main_imgui.logged_coords = true;
             debug!(
-                "virt={virt_w}x{virt_h} phys={phys_w}x{phys_h} \
-                 scale={scale_x:.2}x{scale_y:.2} win=({left},{bottom})-({right},{top}) \
-                 imgui_pos=({win_imgui_x},{win_imgui_y})"
+                "virt={virt_w}x{virt_h} phys={:.0}x{:.0} scale={scale_x:.2}x{scale_y:.2} \
+                 imgui_pos=({win_imgui_x},{win_imgui_y})",
+                virt_w as f32 * scale_x,
+                virt_h as f32 * scale_y,
             );
         }
 
         let dt = {
             let now = Instant::now();
-            let d = (now - self.last_time).as_secs_f32().max(1e-6);
-            self.last_time = now;
+            let d = (now - self.main_imgui.last_time).as_secs_f32().max(1e-6);
+            self.main_imgui.last_time = now;
             d
         };
 
-        // Plugin folder derived from the already-resolved config path (XPLMGetSystemPath-based).
         let plugin_dir = self
             .config_path
             .parent()
@@ -103,7 +181,7 @@ impl GuiState {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }));
 
-        // Snapshot mutable fields — avoids borrow conflict between imgui::Ui and self.
+        // Snapshot mutable fields to avoid borrow conflict with imgui::Ui.
         let mut file_picker = self.file_picker.take();
         let mut server = self.server.clone();
         let mut port = self.port;
@@ -126,12 +204,9 @@ impl GuiState {
         let mut trust_state = std::mem::replace(&mut self.trust_state, TrustState::Idle);
         let probe_slot = Arc::clone(&self.probe_slot);
         let known_key = KnownHosts::key(&self.server, self.port);
-        // Only clone the pinned PEM when idle — during Probing/Decide it is already held
-        // inside trust_state, so cloning here every frame would be wasted.
         let known_stored = matches!(trust_state, TrustState::Idle)
             .then(|| self.known_hosts.get(&known_key).cloned())
             .flatten();
-        let mut trust_to_store: Option<(String, String)> = None;
         let is_connected = self.is_connected;
         let status = self.status.clone();
         let voip_statuses = self.voip_statuses.clone();
@@ -140,10 +215,14 @@ impl GuiState {
         let mut selected_mic = self.selected_mic;
         let radio_input_device_labels = self.radio_input_device_labels.clone();
         let mut selected_radio = self.selected_radio;
-        let mouse_pos = self.mouse_pos;
-        let mouse_down = self.mouse_down;
+        let mouse_pos = self.main_imgui.mouse_pos;
+        let mouse_down = self.main_imgui.mouse_down;
+        let file_picker_win = self.file_picker_win;
+        let tofu_win = self.tofu_win;
+        let window_id = self.window_id;
 
-        let (Some(ctx), Some(renderer)) = (self.imgui_ctx.as_mut(), self.imgui_renderer.as_mut())
+        let (Some(ctx), Some(renderer)) =
+            (self.main_imgui.ctx.as_mut(), self.main_imgui.renderer.as_mut())
         else {
             return;
         };
@@ -159,19 +238,9 @@ impl GuiState {
 
         {
             let ui = ctx.frame();
-            // Right edge of the widget column = content-region edge. Subtracting the window
-            // padding keeps the right margin symmetric with the left and stops the trailing
-            // reset icons from being jammed against the window's outer edge.
             let pad_r = ui.clone_style().window_padding[0];
             let fw = (width as f32 - LABEL_COL_X - pad_r).max(80.0);
-            let p = Ctx {
-                ui: &*ui,
-                fw,
-                win_x: win_imgui_x,
-                win_y: win_imgui_y,
-                win_w: width as f32,
-                win_h: height as f32,
-            };
+            let p = Ctx { ui: &*ui, fw };
 
             ui.window("##main")
                 .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
@@ -181,7 +250,6 @@ impl GuiState {
                 .movable(false)
                 .scroll_bar(false)
                 .build(|| {
-                    // ── Regular UI (rendered first, sits behind the dim) ────────────
                     let BrowseClicks {
                         cert: cert_browse,
                         ca: ca_browse,
@@ -212,8 +280,10 @@ impl GuiState {
                         &mut selected_radio,
                     );
                     p.log_level_picker(&mut log_level);
-                    let tofu_active = matches!(trust_state, TrustState::Probing { .. } | TrustState::Decide(_));
-                    let (conn, disc) = p.connect_button(is_connected || tofu_active, &flight_id, &user_name);
+                    let tofu_active =
+                        matches!(trust_state, TrustState::Probing { .. } | TrustState::Decide(_));
+                    let (conn, disc) =
+                        p.connect_button(is_connected || tofu_active, &flight_id, &user_name);
                     should_disconnect = disc;
                     if disc {
                         trust_state = TrustState::Idle;
@@ -234,21 +304,11 @@ impl GuiState {
                     }
                     p.status_display(voip_statuses.as_ref(), &status);
 
-                    // ── File picker (dim + modal rendered last, on top of all widgets) ─
+                    // Open the file picker window when a Browse button is clicked.
                     {
                         let requests: [(bool, FilePickTarget, &str, &'static [&'static str]); 2] = [
-                            (
-                                cert_browse,
-                                FilePickTarget::UserCert,
-                                &cert_path,
-                                &["p12", "pfx"],
-                            ),
-                            (
-                                ca_browse,
-                                FilePickTarget::ServerCa,
-                                &server_ca,
-                                &["pem", "der", "crt"],
-                            ),
+                            (cert_browse, FilePickTarget::UserCert, &cert_path, &["p12", "pfx"]),
+                            (ca_browse, FilePickTarget::ServerCa, &server_ca, &["pem", "der", "crt"]),
                         ];
                         if file_picker.is_none() {
                             if let Some((_, target, current, exts)) =
@@ -259,44 +319,27 @@ impl GuiState {
                                     *target,
                                     exts,
                                 ));
-                                ui.open_popup("##fp");
-                            }
-                        }
-                    }
-                    if file_picker.is_some() || tofu::needs_dim(&trust_state) {
-                        p.draw_modal_dim();
-                    }
-                    let pick = file_picker.as_mut().map(|fp| p.file_picker_modal(fp));
-                    if let Some(pick) = pick {
-                        match pick {
-                            FilePick::Open => {}
-                            FilePick::Closed => {
-                                file_picker = None;
-                            }
-                            FilePick::Selected(target, path) => {
-                                match target {
-                                    FilePickTarget::UserCert => cert_path = path,
-                                    FilePickTarget::ServerCa => server_ca = path,
-                                }
-                                file_picker = None;
+                                unsafe { show_centred(file_picker_win, window_id, 430, 330) };
                             }
                         }
                     }
 
-                    let tofu_r = tofu::advance(&mut trust_state, &probe_slot, ui, &p, &server);
-                    if tofu_r.should_connect {
+                    // Poll the TOFU probe; show the TOFU window if a decision is needed.
+                    let (silent, want_tofu) =
+                        tofu::poll_step(&mut trust_state, &probe_slot);
+                    if silent {
                         should_connect = true;
                     }
-                    trust_to_store = tofu_r.to_store;
+                    if want_tofu {
+                        unsafe { show_centred(tofu_win, window_id, 430, 280) };
+                    }
                 });
-        } // ui borrow ends here
+        }
         let draw_data = ctx.render();
-
-        // Sync X-Plane's GL state cache before the renderer touches raw GL.
         unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
         renderer.render(draw_data).ok();
 
-        // Write back modified config locals.
+        // Write back.
         self.file_picker = file_picker;
         self.server = server;
         self.port = port;
@@ -333,9 +376,6 @@ impl GuiState {
             self.save_config();
         }
         self.trust_state = trust_state;
-        if let Some((key, pem)) = trust_to_store {
-            self.known_hosts.insert_and_save(key, pem);
-        }
         if should_connect {
             self.should_connect = true;
         }
@@ -344,54 +384,166 @@ impl GuiState {
         }
     }
 
-    fn init_renderer(&mut self) {
-        let mut ctx = imgui::Context::create();
-        ctx.set_ini_filename(None);
-        ctx.style_mut().use_dark_colors();
-        // Disable full-screen modal dim; draw_modal_dim() draws our own clipped to the plugin window.
-        ctx.style_mut().colors[imgui::StyleColor::ModalWindowDimBg as usize] = [0.0; 4];
-        ctx.fonts().add_font(&[imgui::FontSource::DefaultFontData {
-            config: Some(imgui::FontConfig {
-                size_pixels: 15.0,
-                ..Default::default()
-            }),
-        }]);
+    pub fn draw_file_picker(&mut self, win: XPLMWindowID) {
+        if self.file_picker.is_none() {
+            unsafe { XPLMSetWindowIsVisible(win, 0) };
+            return;
+        }
+        if self.fp_imgui.ctx.is_none() {
+            init_imgui(&mut self.fp_imgui);
+        }
 
-        match imgui_glow_renderer::AutoRenderer::initialize(Self::make_gl(), &mut ctx) {
-            Ok(renderer) => {
-                self.imgui_ctx = Some(ctx);
-                self.imgui_renderer = Some(renderer);
-            }
-            Err(e) => warn!("renderer init failed: {e}"),
+        let (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y) =
+            window_metrics(win);
+        self.screen_h = virt_h;
+
+        let dt = {
+            let now = Instant::now();
+            let d = (now - self.fp_imgui.last_time).as_secs_f32().max(1e-6);
+            self.fp_imgui.last_time = now;
+            d
+        };
+
+        let mut file_picker = self.file_picker.take();
+        let mut cert_path = self.cert_path.clone();
+        let mut server_ca = self.server_ca.clone();
+        let file_picker_win = self.file_picker_win;
+        let mouse_pos = self.fp_imgui.mouse_pos;
+        let mouse_down = self.fp_imgui.mouse_down;
+
+        let (Some(ctx), Some(renderer)) =
+            (self.fp_imgui.ctx.as_mut(), self.fp_imgui.renderer.as_mut())
+        else {
+            self.file_picker = file_picker;
+            return;
+        };
+
+        {
+            let io = ctx.io_mut();
+            io.display_size = [virt_w as f32, virt_h as f32];
+            io.display_framebuffer_scale = [scale_x, scale_y];
+            io.delta_time = dt;
+            io.mouse_pos = mouse_pos;
+            io.mouse_down = mouse_down;
+        }
+
+        let mut close = false;
+        {
+            let ui = ctx.frame();
+            let pad_r = ui.clone_style().window_padding[0];
+            let fw = (width as f32 - LABEL_COL_X - pad_r).max(80.0);
+            let p = Ctx { ui: &*ui, fw };
+            ui.window("##fp")
+                .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
+                .size([width as f32, height as f32], imgui::Condition::Always)
+                .title_bar(false)
+                .resizable(false)
+                .movable(false)
+                .build(|| {
+                    if let Some(fp) = file_picker.as_mut() {
+                        match p.file_picker_content(fp) {
+                            FilePick::Open => {}
+                            FilePick::Closed => {
+                                file_picker = None;
+                                close = true;
+                            }
+                            FilePick::Selected(target, path) => {
+                                match target {
+                                    FilePickTarget::UserCert => cert_path = path,
+                                    FilePickTarget::ServerCa => server_ca = path,
+                                }
+                                file_picker = None;
+                                close = true;
+                            }
+                        }
+                    } else {
+                        close = true;
+                    }
+                });
+        }
+        let draw_data = ctx.render();
+        unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
+        renderer.render(draw_data).ok();
+
+        self.file_picker = file_picker;
+        self.cert_path = cert_path;
+        self.server_ca = server_ca;
+        if close {
+            unsafe { XPLMSetWindowIsVisible(file_picker_win, 0) };
         }
     }
 
-    fn make_gl() -> glow::Context {
-        unsafe {
-            glow::Context::from_loader_function(|s| {
-                let cstr = CString::new(s).expect("GL symbol names contain no interior nul bytes");
-                #[cfg(not(target_os = "windows"))]
-                {
-                    // RTLD_DEFAULT (null) searches already-loaded libs — libGL is loaded by X-Plane.
-                    libc::dlsym(std::ptr::null_mut(), cstr.as_ptr()) as *const c_void
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    extern "system" {
-                        fn wglGetProcAddress(name: *const i8) -> *const c_void;
-                        fn LoadLibraryA(name: *const i8) -> *mut c_void;
-                        fn GetProcAddress(module: *mut c_void, name: *const i8) -> *const c_void;
-                    }
-                    // wglGetProcAddress covers OpenGL extensions; GetProcAddress covers core 1.1.
-                    let p = wglGetProcAddress(cstr.as_ptr());
-                    if !p.is_null() {
-                        p
-                    } else {
-                        let lib = LoadLibraryA(b"opengl32.dll\0".as_ptr() as *const i8);
-                        GetProcAddress(lib, cstr.as_ptr())
-                    }
-                }
-            })
+    pub fn draw_tofu(&mut self, win: XPLMWindowID) {
+        if !matches!(self.trust_state, TrustState::Decide(_)) {
+            unsafe { XPLMSetWindowIsVisible(win, 0) };
+            return;
+        }
+        if self.tofu_imgui.ctx.is_none() {
+            init_imgui(&mut self.tofu_imgui);
+        }
+
+        let (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y) =
+            window_metrics(win);
+        self.screen_h = virt_h;
+
+        let dt = {
+            let now = Instant::now();
+            let d = (now - self.tofu_imgui.last_time).as_secs_f32().max(1e-6);
+            self.tofu_imgui.last_time = now;
+            d
+        };
+
+        let mut trust_state = std::mem::replace(&mut self.trust_state, TrustState::Idle);
+        let server = self.server.clone();
+        let tofu_win = self.tofu_win;
+        let mouse_pos = self.tofu_imgui.mouse_pos;
+        let mouse_down = self.tofu_imgui.mouse_down;
+
+        let (Some(ctx), Some(renderer)) =
+            (self.tofu_imgui.ctx.as_mut(), self.tofu_imgui.renderer.as_mut())
+        else {
+            self.trust_state = trust_state;
+            return;
+        };
+
+        {
+            let io = ctx.io_mut();
+            io.display_size = [virt_w as f32, virt_h as f32];
+            io.display_framebuffer_scale = [scale_x, scale_y];
+            io.delta_time = dt;
+            io.mouse_pos = mouse_pos;
+            io.mouse_down = mouse_down;
+        }
+
+        let mut action = tofu::TofuWindowAction::default();
+        {
+            let ui = ctx.frame();
+            let pad_r = ui.clone_style().window_padding[0];
+            let fw = (width as f32 - LABEL_COL_X - pad_r).max(80.0);
+            let p = Ctx { ui: &*ui, fw };
+            ui.window("##tofu")
+                .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
+                .size([width as f32, height as f32], imgui::Condition::Always)
+                .title_bar(false)
+                .resizable(false)
+                .movable(false)
+                .build(|| {
+                    action = tofu::render_decision(&mut trust_state, &p, &server);
+                });
+        }
+        let draw_data = ctx.render();
+        unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
+        renderer.render(draw_data).ok();
+
+        self.trust_state = trust_state;
+        if action.should_connect {
+            self.should_connect = true;
+        }
+        if let Some((key, pem)) = action.to_store {
+            self.known_hosts.insert_and_save(key, pem);
+        }
+        if action.close {
+            unsafe { XPLMSetWindowIsVisible(tofu_win, 0) };
         }
     }
 }

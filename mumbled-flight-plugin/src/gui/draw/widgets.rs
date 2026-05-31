@@ -30,11 +30,6 @@ pub(super) const LABEL_COL_X: f32 = 115.0;
 pub(super) struct Ctx<'ui> {
     pub(super) ui: &'ui imgui::Ui,
     pub(super) fw: f32,
-    /// XPLM window top-left in ImGui virtual coordinates.
-    pub(super) win_x: f32,
-    pub(super) win_y: f32,
-    pub(super) win_w: f32,
-    pub(super) win_h: f32,
 }
 
 impl<'ui> Ctx<'ui> {
@@ -55,37 +50,6 @@ impl<'ui> Ctx<'ui> {
         self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw);
         self.ui.input_text(id, buf).password(true).build();
-    }
-
-    /// Draws a semi-transparent overlay over the full XPLM window, sitting on top of all
-    /// regular widgets but below the modal popup (which is a separate ImGui window).
-    pub(super) fn draw_modal_dim(&self) {
-        let dim = imgui::ImColor32::from_rgba_f32s(0.2, 0.2, 0.2, 0.35);
-        unsafe {
-            // Override the window's content-area scissor so the dim covers the full XPLM
-            // window including its padding, not just the inner content region.
-            imgui_sys::igPushClipRect(
-                imgui_sys::ImVec2 {
-                    x: self.win_x,
-                    y: self.win_y,
-                },
-                imgui_sys::ImVec2 {
-                    x: self.win_x + self.win_w,
-                    y: self.win_y + self.win_h,
-                },
-                false,
-            );
-        }
-        self.ui
-            .get_window_draw_list()
-            .add_rect(
-                [self.win_x, self.win_y],
-                [self.win_x + self.win_w, self.win_y + self.win_h],
-                dim,
-            )
-            .filled(true)
-            .build();
-        unsafe { imgui_sys::igPopClipRect() }
     }
 
     /// Same layout as `row` but with a `…` browse button; returns `true` when clicked.
