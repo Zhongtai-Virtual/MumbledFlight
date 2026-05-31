@@ -20,7 +20,7 @@
 //! per-client status display.
 
 use log::{debug, warn, LevelFilter};
-use mumbled_flight_core::mumble::{ClientStatus, VoipStatuses};
+use mumbled_flight_core::mumble::{VoipClientStatus, VoipStatuses};
 
 use super::widgets::{Ctx, LABEL_COL_X};
 
@@ -28,7 +28,6 @@ pub(super) struct BrowseClicks {
     pub(super) cert: bool,
     pub(super) ca: bool,
 }
-
 
 impl<'ui> Ctx<'ui> {
     #[allow(clippy::too_many_arguments)]
@@ -47,7 +46,8 @@ impl<'ui> Ctx<'ui> {
         {
             self.ui.text("Port");
             self.ui.same_line();
-            self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
+            self.ui
+                .set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
             self.ui.set_next_item_width(self.fw);
             let mut p = *port as i32;
             if self
@@ -124,7 +124,8 @@ impl<'ui> Ctx<'ui> {
     pub(super) fn denoise_toggle(&self, denoise: &mut bool, is_connected: bool) {
         self.ui.text("Denoise");
         self.ui.same_line();
-        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
+        self.ui
+            .set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         let _dis = self.ui.begin_disabled(is_connected);
         self.ui.checkbox("##denoise", denoise);
     }
@@ -189,7 +190,8 @@ impl<'ui> Ctx<'ui> {
         let level_preview = format!("{log_level}");
         self.ui.text("Log Level");
         self.ui.same_line();
-        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
+        self.ui
+            .set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         self.ui.set_next_item_width(self.fw);
         if let Some(_tok) = self.ui.begin_combo("##loglevel", &level_preview) {
             for &lvl in LOG_LEVELS {
@@ -247,9 +249,9 @@ impl<'ui> Ctx<'ui> {
                 if let Some(slot) = map.get(label) {
                     let s = slot.lock().unwrap();
                     let (color, tag) = match *s {
-                        ClientStatus::Connecting => ([1.0f32, 0.8, 0.2, 1.0], "connecting"),
-                        ClientStatus::Connected => ([0.3, 1.0, 0.3, 1.0], "connected"),
-                        ClientStatus::Disconnected => ([0.8, 0.3, 0.3, 1.0], "disconnected"),
+                        VoipClientStatus::Connecting => ([1.0f32, 0.8, 0.2, 1.0], "connecting"),
+                        VoipClientStatus::Connected => ([0.3, 1.0, 0.3, 1.0], "connected"),
+                        VoipClientStatus::Disconnected => ([0.8, 0.3, 0.3, 1.0], "disconnected"),
                     };
                     self.ui.text_disabled(format!("{label}: "));
                     self.ui.same_line();
