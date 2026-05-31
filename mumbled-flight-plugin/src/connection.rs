@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with MumbledFlight.  If not, see <https://www.gnu.org/licenses/>.
 
-
 //! Mumble connection lifecycle — start and stop helpers.
 
 use log::{info, warn};
@@ -23,7 +22,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mumbled_flight_core::{mumble, mumble::{InputType, MumbleStackConfig, TestClient, VoipStatuses}, state::CockpitState};
+use mumbled_flight_core::{
+    mumble,
+    mumble::{InputType, MumbleStackConfig, VoipClient, VoipStatuses},
+    state::CockpitState,
+};
 
 use crate::PluginState;
 
@@ -72,26 +75,29 @@ pub fn start(ps: &mut PluginState) {
     // Each Arc is split into two handles: one given to the async stack (moved into the
     // spawned future) and one retained on ps.gui.*_live so the draw loop can adjust
     // the value live without reconnecting.
-    let mic_gain     = f32_atomic(ps.gui.gain);
-    let ambient_vol  = f32_atomic(ps.gui.ambient_vol);
-    let ic_vol       = f32_atomic(ps.gui.ic_vol);
+    let mic_gain = f32_atomic(ps.gui.gain);
+    let ambient_vol = f32_atomic(ps.gui.ambient_vol);
+    let ic_vol = f32_atomic(ps.gui.ic_vol);
     let spatial_width = f32_atomic(ps.gui.spatial_width);
-    let mic_gain_for_thread      = Arc::clone(&mic_gain);
-    let ambient_vol_for_thread   = Arc::clone(&ambient_vol);
-    let ic_vol_for_thread        = Arc::clone(&ic_vol);
+    let mic_gain_for_thread = Arc::clone(&mic_gain);
+    let ambient_vol_for_thread = Arc::clone(&ambient_vol);
+    let ic_vol_for_thread = Arc::clone(&ic_vol);
     let spatial_width_for_thread = Arc::clone(&spatial_width);
     let denoise = ps.gui.denoise;
     let ambient_output = ps.gui.ambient_output();
-    let ic_output      = ps.gui.ic_output();
-    let mic_input      = ps.gui.mic_input();
-    let (radio_source, auto_sink) = ps.gui.radio_params();
+    let ic_output = ps.gui.ic_output();
+    let mic_input = ps.gui.mic_input();
+    let radio_source = ps.gui.radio_params();
 
     // Optional client-certificate auth. A bad path/passphrase aborts the connect with a
     // status message instead of failing silently inside the four spawned clients.
     let client_cert = if ps.gui.cert_path.trim().is_empty() {
         None
     } else {
-        match mumble::ClientCert::load(std::path::Path::new(ps.gui.cert_path.trim()), &ps.gui.cert_pass) {
+        match mumble::ClientCert::load(
+            std::path::Path::new(ps.gui.cert_path.trim()),
+            &ps.gui.cert_pass,
+        ) {
             Ok(c) => Some(Arc::new(c)),
             Err(e) => {
                 let msg = format!("Client certificate error: {e}");
@@ -134,8 +140,7 @@ pub fn start(ps: &mut PluginState) {
             mic_gain: mic_gain_for_thread,
             denoise,
             radio_source,
-            auto_sink,
-            test_client: TestClient::default(),
+            voip_client: VoipClient::default(),
             input_type: InputType::Real,
             mic_device: mic_input,
             test_pos: None,
@@ -152,9 +157,9 @@ pub fn start(ps: &mut PluginState) {
         .await;
     });
 
-    ps.gui.mic_gain_live    = Some(Arc::clone(&mic_gain));
+    ps.gui.mic_gain_live = Some(Arc::clone(&mic_gain));
     ps.gui.ambient_vol_live = Some(Arc::clone(&ambient_vol));
-    ps.gui.ic_vol_live      = Some(Arc::clone(&ic_vol));
+    ps.gui.ic_vol_live = Some(Arc::clone(&ic_vol));
     ps.gui.spatial_width_live = Some(spatial_width);
     ps.gui.voip_statuses = Some(statuses);
     ps.connection = Some(MumbleConnection {
@@ -174,10 +179,10 @@ pub fn start(ps: &mut PluginState) {
 
 pub fn stop(ps: &mut PluginState) {
     ps.connection = None;
-    ps.gui.mic_gain_live       = None;
-    ps.gui.ambient_vol_live    = None;
-    ps.gui.ic_vol_live         = None;
-    ps.gui.spatial_width_live  = None;
+    ps.gui.mic_gain_live = None;
+    ps.gui.ambient_vol_live = None;
+    ps.gui.ic_vol_live = None;
+    ps.gui.spatial_width_live = None;
     ps.gui.voip_statuses = None;
     ps.gui.is_connected = false;
     ps.gui.status = String::new();

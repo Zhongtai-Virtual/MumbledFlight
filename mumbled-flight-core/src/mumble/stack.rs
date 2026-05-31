@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::{broadcast, mpsc};
 
-use super::audio::{create_linux_sink, start_capture, start_loopback_capture, start_playback};
+use super::audio::{start_capture, start_loopback_capture, start_playback};
 use super::voip::client::{ClientRole, MumbleVoipClient, VoipClientStatus};
-use super::{InputType, MumbleStackConfig, TestClient};
+use super::{InputType, MumbleStackConfig, RadioSource, VoipClient};
 use crate::state::{CockpitState, SharedCockpitZone};
 
 /// Spawns a single Mumble client's run loop, logging a disconnect at error level.
@@ -36,7 +36,10 @@ fn spawn_client(
     playback_tx: mpsc::Sender<Vec<f32>>,
 ) {
     tokio::spawn(async move {
-        if let Err(e) = client.run(&server_host, server_port, state, audio_rx, playback_tx).await {
+        if let Err(e) = client
+            .run(&server_host, server_port, state, audio_rx, playback_tx)
+            .await
+        {
             log::error!("[VoIP:{}] disconnected: {e}", client.username);
         }
     });
@@ -73,8 +76,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         mic_gain,
         denoise,
         radio_source,
-        auto_sink,
-        test_client,
+        voip_client,
         input_type,
         mic_device,
         test_pos,
@@ -109,14 +111,17 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // 2. RADIO Chain.
-    let final_radio_source = if auto_sink { create_linux_sink() } else { radio_source };
-    let radio_tx = match final_radio_source {
-        Some(src) if matches!(test_client, TestClient::All | TestClient::Radio) => {
+    let radio_tx: Option<broadcast::Sender<Vec<f32>>> = match radio_source {
+        #[cfg(target_os = "linux")]
+        RadioSource::AutoSink if matches!(voip_client, VoipClient::All | VoipClient::Radio) => {
+            super::audio::create_linux_sink().map(radio_loopback_sender)
+        }
+        RadioSource::Device(src) if matches!(voip_client, VoipClient::All | VoipClient::Radio) => {
             Some(radio_loopback_sender(src))
         }
         // --test radio with --sine/--file: bridge the mic chain into the radio channel so the
         // Radio client receives synthetic audio without needing a real loopback device.
-        None if matches!(test_client, TestClient::Radio) && is_synthetic_input => {
+        RadioSource::Disabled if voip_client == VoipClient::Radio && is_synthetic_input => {
             let (tx, _) = broadcast::channel::<Vec<f32>>(128);
             let tx_fwd = tx.clone();
             let mut mic_rx = mic_tx.subscribe();
@@ -145,33 +150,36 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     // Helper: allocate a status slot and register it in the shared map.
     let mk_status = |label: &str| -> Arc<Mutex<VoipClientStatus>> {
         let slot = Arc::new(Mutex::new(VoipClientStatus::Connecting));
-        statuses.lock().unwrap().insert(label.to_string(), Arc::clone(&slot));
+        statuses
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), Arc::clone(&slot));
         slot
     };
 
-    let fbo_ch      = format!("{session_id}_ambient_fbo");
+    let fbo_ch = format!("{session_id}_ambient_fbo");
     let aircraft_ch = format!("{session_id}_ambient_aircraft");
     let ambient_ctx = format!("{session_id}_ambient");
 
     // 4. Voice Client — natural speech, spatialized. Starts in the channel for the current zone.
-    if matches!(test_client, TestClient::All | TestClient::Voice) {
+    if matches!(voip_client, VoipClient::All | VoipClient::Voice) {
         let initial_ch = match state.lock().unwrap().zone {
-            SharedCockpitZone::InFbo             => fbo_ch.clone(),
+            SharedCockpitZone::InFbo => fbo_ch.clone(),
             SharedCockpitZone::AroundOrInAircraft => aircraft_ch.clone(),
         };
         spawn_client(
             MumbleVoipClient {
-                username:       format!("{user_name}_voice"),
-                context:        ambient_ctx.clone(),
-                role:           ClientRole::Voice,
-                voip_status:    mk_status("Voice"),
+                username: format!("{user_name}_voice"),
+                context: ambient_ctx.clone(),
+                role: ClientRole::Voice,
+                voip_status: mk_status("Voice"),
                 target_channel: initial_ch,
-                zone_channels:  Some((fbo_ch.clone(), aircraft_ch.clone())),
+                zone_channels: Some((fbo_ch.clone(), aircraft_ch.clone())),
                 test_pos,
-                password:       server_password.clone(),
-                client_cert:    client_cert.clone(),
-                server_trust:   server_trust.clone(),
-                spatial_width:  Arc::clone(&spatial_width),
+                password: server_password.clone(),
+                client_cert: client_cert.clone(),
+                server_trust: server_trust.clone(),
+                spatial_width: Arc::clone(&spatial_width),
             },
             server_host.clone(),
             server_port,
@@ -181,25 +189,25 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         );
     }
 
-    if test_client == TestClient::Voice {
+    if voip_client == VoipClient::Voice {
         return;
     }
 
     // 5. Intercom Client.
-    if !matches!(test_client, TestClient::Pa | TestClient::Radio) {
+    if !matches!(voip_client, VoipClient::Pa | VoipClient::Radio) {
         spawn_client(
             MumbleVoipClient {
-                username:       format!("{user_name}_ic"),
-                context:        format!("{session_id}_ic"),
-                role:           ClientRole::Ic,
-                voip_status:    mk_status("IC"),
+                username: format!("{user_name}_ic"),
+                context: format!("{session_id}_ic"),
+                role: ClientRole::Ic,
+                voip_status: mk_status("IC"),
                 target_channel: format!("{session_id}_ic"),
-                zone_channels:  None,
+                zone_channels: None,
                 test_pos,
-                password:       server_password.clone(),
-                client_cert:    client_cert.clone(),
-                server_trust:   server_trust.clone(),
-                spatial_width:  Arc::clone(&spatial_width),
+                password: server_password.clone(),
+                client_cert: client_cert.clone(),
+                server_trust: server_trust.clone(),
+                spatial_width: Arc::clone(&spatial_width),
             },
             server_host.clone(),
             server_port,
@@ -210,20 +218,20 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     }
 
     // 6. PA (Public Address) Client — always in the aircraft channel.
-    if !matches!(test_client, TestClient::Ic | TestClient::Radio) {
+    if !matches!(voip_client, VoipClient::Ic | VoipClient::Radio) {
         spawn_client(
             MumbleVoipClient {
-                username:       format!("{user_name}_PA"),
-                context:        ambient_ctx.clone(),
-                role:           ClientRole::Pa,
-                voip_status:    mk_status("PA"),
+                username: format!("{user_name}_PA"),
+                context: ambient_ctx.clone(),
+                role: ClientRole::Pa,
+                voip_status: mk_status("PA"),
                 target_channel: aircraft_ch.clone(),
-                zone_channels:  None,
-                test_pos:       None,
-                password:       server_password.clone(),
-                client_cert:    client_cert.clone(),
-                server_trust:   server_trust.clone(),
-                spatial_width:  Arc::clone(&spatial_width),
+                zone_channels: None,
+                test_pos: None,
+                password: server_password.clone(),
+                client_cert: client_cert.clone(),
+                server_trust: server_trust.clone(),
+                spatial_width: Arc::clone(&spatial_width),
             },
             server_host.clone(),
             server_port,
@@ -239,17 +247,17 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         const RADIO_SPEAKER_POSITION: [f32; 3] = super::voip::xplane_to_mumble([0.0, 0.9, -6.8]);
         spawn_client(
             MumbleVoipClient {
-                username:       format!("{user_name}_radio"),
-                context:        ambient_ctx.clone(),
-                role:           ClientRole::Radio { has_source: true },
-                voip_status:    mk_status("Radio"),
+                username: format!("{user_name}_radio"),
+                context: ambient_ctx.clone(),
+                role: ClientRole::Radio { has_source: true },
+                voip_status: mk_status("Radio"),
                 target_channel: aircraft_ch.clone(),
-                zone_channels:  None,
-                test_pos:       test_pos.or(Some(RADIO_SPEAKER_POSITION)),
-                password:       server_password.clone(),
-                client_cert:    client_cert.clone(),
-                server_trust:   server_trust.clone(),
-                spatial_width:  Arc::clone(&spatial_width),
+                zone_channels: None,
+                test_pos: test_pos.or(Some(RADIO_SPEAKER_POSITION)),
+                password: server_password.clone(),
+                client_cert: client_cert.clone(),
+                server_trust: server_trust.clone(),
+                spatial_width: Arc::clone(&spatial_width),
             },
             server_host.clone(),
             server_port,
