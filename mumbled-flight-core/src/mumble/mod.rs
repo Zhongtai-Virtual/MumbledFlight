@@ -40,7 +40,7 @@ pub const OPUS_FRAME_SAMPLES: usize = 960;
 pub type VoipStatuses = Arc<Mutex<HashMap<String, Arc<Mutex<VoipClientStatus>>>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TestClient {
+pub enum VoipClient {
     #[default]
     All,
     Voice,
@@ -61,6 +61,19 @@ pub enum InputType {
     File(std::path::PathBuf),
 }
 
+/// Audio source for the radio relay client.
+#[derive(Debug, Default)]
+pub enum RadioSource {
+    /// Radio relay disabled — the Radio VoIP client is not spawned.
+    #[default]
+    Disabled,
+    /// Auto-create a "MumblingRadio" virtual null-sink (Linux/PipeWire only).
+    #[cfg(target_os = "linux")]
+    AutoSink,
+    /// Capture from a named input device / PipeWire node.
+    Device(String),
+}
+
 /// Everything `run_mumble_stack` needs to bring up the VoIP stack. Built by each frontend
 /// (CLI / plugin) from its own config + cockpit state.
 pub struct MumbleStackConfig {
@@ -75,9 +88,8 @@ pub struct MumbleStackConfig {
     pub server_trust: Option<Arc<ServerTrust>>,
     pub mic_gain: Arc<AtomicU32>,
     pub denoise: bool,
-    pub radio_source: Option<String>,
-    pub auto_sink: bool,
-    pub test_client: TestClient,
+    pub radio_source: RadioSource,
+    pub voip_client: VoipClient,
     pub input_type: InputType,
     /// PipeWire/CPAL node name to use for microphone capture. `None` = system default.
     pub mic_device: Option<String>,

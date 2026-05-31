@@ -30,7 +30,7 @@ use known_hosts::KnownHosts;
 use trust::{ProbeSlot, TrustState};
 
 use mumbled_flight_core::mumble::audio::enumerate_pw_devices;
-use mumbled_flight_core::mumble::VoipStatuses;
+use mumbled_flight_core::mumble::{RadioSource, VoipStatuses};
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -526,13 +526,17 @@ impl GuiState {
         self.radio_input_device_labels  = snap.input_labels;
     }
 
-    /// Returns `(radio_source, auto_sink)` for passing to `run_mumble_stack`.
-    pub fn radio_params(&self) -> (Option<String>, bool) {
+    /// Returns the `RadioSource` for passing to `run_mumble_stack`.
+    pub fn radio_params(&self) -> RadioSource {
         match self.selected_radio {
-            0 => (None, false),
+            0 => RadioSource::Disabled,
             #[cfg(target_os = "linux")]
-            1 => (None, true),
-            i => (self.radio_input_devices.get(i as usize - RADIO_DEVICE_OFFSET).cloned(), false),
+            1 => RadioSource::AutoSink,
+            i => self.radio_input_devices
+                .get(i as usize - RADIO_DEVICE_OFFSET)
+                .cloned()
+                .map(RadioSource::Device)
+                .unwrap_or(RadioSource::Disabled),
         }
     }
 

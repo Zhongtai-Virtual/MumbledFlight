@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with MumbledFlight.  If not, see <https://www.gnu.org/licenses/>.
 
-
 //! MumbledFlight: A high-fidelity bridge between X-Plane 12 and Mumble.
 
 mod xplane;
@@ -24,7 +23,9 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::{error, info};
 use mumbled_flight_core::config::Config;
-use mumbled_flight_core::mumble::{self, voip::xplane_to_mumble, InputType, MumbleStackConfig, TestClient};
+use mumbled_flight_core::mumble::{
+    self, voip::xplane_to_mumble, InputType, MumbleStackConfig, RadioSource, VoipClient,
+};
 use mumbled_flight_core::state::CockpitState;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -248,12 +249,12 @@ async fn main() -> Result<()> {
     let state_mumble = Arc::clone(&state);
     tokio::spawn(async move {
         use std::sync::atomic::{AtomicBool, AtomicU32};
-        let test_client = match args.test {
-            None                    => TestClient::All,
-            Some(CliClient::Voice)  => TestClient::Voice,
-            Some(CliClient::Ic)     => TestClient::Ic,
-            Some(CliClient::Pa)     => TestClient::Pa,
-            Some(CliClient::Radio)  => TestClient::Radio,
+        let voip_client = match args.test {
+            None => VoipClient::All,
+            Some(CliClient::Voice) => VoipClient::Voice,
+            Some(CliClient::Ic) => VoipClient::Ic,
+            Some(CliClient::Pa) => VoipClient::Pa,
+            Some(CliClient::Radio) => VoipClient::Radio,
         };
         let statuses = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let input_type = if let Some(path) = args.file {
@@ -263,6 +264,14 @@ async fn main() -> Result<()> {
         } else {
             InputType::Real
         };
+        #[cfg(target_os = "linux")]
+        let radio_source = if args.auto_sink {
+            RadioSource::AutoSink
+        } else {
+            args.radio_source.map(RadioSource::Device).unwrap_or(RadioSource::Disabled)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let radio_source = args.radio_source.map(RadioSource::Device).unwrap_or(RadioSource::Disabled);
         mumble::run_mumble_stack(MumbleStackConfig {
             state: state_mumble,
             user_name: user_prefix,
@@ -272,9 +281,8 @@ async fn main() -> Result<()> {
             server_trust,
             mic_gain: Arc::new(AtomicU32::new(args.gain.to_bits())),
             denoise: args.denoise,
-            radio_source: args.radio_source,
-            auto_sink: args.auto_sink,
-            test_client,
+            radio_source,
+            voip_client,
             input_type,
             mic_device: args.mic_device,
             test_pos, // None = use real X-Plane position; Some = fixed pos
@@ -283,7 +291,7 @@ async fn main() -> Result<()> {
             ambient_output: None,
             ic_output: None,
             ambient_vol: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
-            ic_vol:      Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            ic_vol: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             statuses,
             // One-shot process — never torn down, so the flag is never set.
             shutdown: Arc::new(AtomicBool::new(false)),
