@@ -20,15 +20,20 @@
 //! The per-frame drawing is split across submodules:
 //! - [`widgets`] — the `Ctx` panel-renderer and its reusable primitive widgets.
 //! - [`panels`] — the individual config panels rendered onto a `Ctx`.
-//! - [`file_picker`] — the modal file-browser popup.
+//! - [`file_picker`] — file-browser content (`file_picker_content`, `FilePick`, `start_dir`,
+//!   `render_fp_overlay`).
+//! - [`tofu`] — TOFU probe/decide logic (`start_probe`, `poll_step`, `render_tofu_overlay`).
 //!
-//! This module owns the orchestration: it computes the XPLM↔ImGui coordinate
-//! mapping, snapshots `GuiState` into locals (to dodge the borrow conflict
-//! between `imgui::Ui` and `self`), drives the panels via `Ctx`, and writes the
-//! edited locals back.
+//! **Single-frame input rule**: all interactive imgui content — including the TOFU trust dialog
+//! and file-picker — is rendered inside `GuiState::draw` (the main window's frame).  There are
+//! no separate XPLM windows for popups; the overlays appear as imgui windows with their own
+//! title bars, centered within the main 630×600 window.  This means the complete
+//! mouse-down → mouse-up cycle for every button is visible in one imgui frame, which is the
+//! only reliable way to handle clicks with a shared imgui context.
 
 mod file_picker;
 mod panels;
+mod tofu;
 mod widgets;
 
 use log::{debug, warn};
@@ -36,6 +41,7 @@ use std::ffi::CString;
 use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use xplane_sys::{
@@ -43,54 +49,128 @@ use xplane_sys::{
     XPLMWindowID,
 };
 
-use super::{FilePickTarget, FilePicker, GuiState};
-use file_picker::{start_dir, FilePick};
+use super::known_hosts::KnownHosts;
+use super::trust::TrustState;
+use super::{FilePickTarget, FilePicker, GuiState, ImguiWindowState};
+use file_picker::{render_fp_overlay, start_dir};
 use panels::BrowseClicks;
+use tofu::{render_tofu_overlay, TofuDrawResult};
 use widgets::{Ctx, LABEL_COL_X};
 
+// ── Shared renderer helpers ───────────────────────────────────────────────────
+
+pub(super) fn init_imgui(state: &mut ImguiWindowState) {
+    let mut ctx = imgui::Context::create();
+    ctx.set_ini_filename(None);
+    ctx.style_mut().use_dark_colors();
+    ctx.fonts().add_font(&[imgui::FontSource::DefaultFontData {
+        config: Some(imgui::FontConfig {
+            size_pixels: 15.0,
+            ..Default::default()
+        }),
+    }]);
+    match imgui_glow_renderer::AutoRenderer::initialize(make_gl(), &mut ctx) {
+        Ok(renderer) => {
+            state.ctx = Some(ctx);
+            state.renderer = Some(renderer);
+        }
+        Err(e) => warn!("renderer init failed: {e}"),
+    }
+}
+
+fn make_gl() -> glow::Context {
+    unsafe {
+        glow::Context::from_loader_function(|s| {
+            let cstr = CString::new(s).expect("GL symbol names contain no interior nul bytes");
+            #[cfg(not(target_os = "windows"))]
+            {
+                libc::dlsym(std::ptr::null_mut(), cstr.as_ptr()) as *const c_void
+            }
+            #[cfg(target_os = "windows")]
+            {
+                extern "system" {
+                    fn wglGetProcAddress(name: *const i8) -> *const c_void;
+                    fn LoadLibraryA(name: *const i8) -> *mut c_void;
+                    fn GetProcAddress(module: *mut c_void, name: *const i8) -> *const c_void;
+                }
+                let p = wglGetProcAddress(cstr.as_ptr());
+                if !p.is_null() {
+                    p
+                } else {
+                    let lib = LoadLibraryA(b"opengl32.dll\0".as_ptr() as *const i8);
+                    GetProcAddress(lib, cstr.as_ptr())
+                }
+            }
+        })
+    }
+}
+
+/// Reads the XPLM window geometry and virtual/physical screen metrics, returning
+/// `(width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y)`.
+pub(super) fn window_metrics(win: XPLMWindowID) -> (i32, i32, i32, i32, f32, f32, f32, f32) {
+    let (mut left, mut top, mut right, mut bottom) = (0i32, 0, 0, 0);
+    unsafe { XPLMGetWindowGeometry(win, &mut left, &mut top, &mut right, &mut bottom) };
+    let width = (right - left).max(1);
+    let height = (top - bottom).max(1);
+
+    let (mut virt_l, mut virt_t, mut virt_r, mut virt_b) = (0i32, 0, 0, 0);
+    unsafe { XPLMGetScreenBoundsGlobal(&mut virt_l, &mut virt_t, &mut virt_r, &mut virt_b) };
+    let virt_w = (virt_r - virt_l).max(1);
+    let virt_h = (virt_t - virt_b).max(1);
+
+    let (mut phys_w, mut phys_h) = (0i32, 0);
+    unsafe { XPLMGetScreenSize(&mut phys_w, &mut phys_h) };
+    let scale_x = phys_w as f32 / virt_w as f32;
+    let scale_y = phys_h as f32 / virt_h as f32;
+
+    let win_imgui_x = (left - virt_l) as f32;
+    let win_imgui_y = (virt_h - (top - virt_b)) as f32;
+
+    (
+        width,
+        height,
+        virt_w,
+        virt_h,
+        scale_x,
+        scale_y,
+        win_imgui_x,
+        win_imgui_y,
+    )
+}
+
+// ── Draw implementations ──────────────────────────────────────────────────────
+
 impl GuiState {
+    pub fn draw_any(&mut self, win: XPLMWindowID) {
+        self.draw(win);
+    }
+
     pub fn draw(&mut self, win: XPLMWindowID) {
-        if self.imgui_ctx.is_none() {
-            self.init_renderer();
+        if self.main_imgui.ctx.is_none() {
+            init_imgui(&mut self.main_imgui);
         }
 
-        let (mut left, mut top, mut right, mut bottom) = (0i32, 0i32, 0i32, 0i32);
-        unsafe { XPLMGetWindowGeometry(win, &mut left, &mut top, &mut right, &mut bottom) };
-        let width = (right - left).max(1);
-        let height = (top - bottom).max(1);
-
-        let (mut virt_l, mut virt_t, mut virt_r, mut virt_b) = (0i32, 0i32, 0i32, 0i32);
-        unsafe { XPLMGetScreenBoundsGlobal(&mut virt_l, &mut virt_t, &mut virt_r, &mut virt_b) };
-        let virt_w = (virt_r - virt_l).max(1);
-        let virt_h = (virt_t - virt_b).max(1); // Y-up: top > bottom
-
-        let (mut phys_w, mut phys_h) = (0i32, 0i32);
-        unsafe { XPLMGetScreenSize(&mut phys_w, &mut phys_h) };
-        let scale_x = phys_w as f32 / virt_w as f32;
-        let scale_y = phys_h as f32 / virt_h as f32;
-
+        let (width, height, virt_w, virt_h, scale_x, scale_y, win_imgui_x, win_imgui_y) =
+            window_metrics(win);
         self.screen_h = virt_h;
 
-        let win_imgui_x = (left - virt_l) as f32;
-        let win_imgui_y = (virt_h - (top - virt_b)) as f32;
-
-        if !self.logged_coords {
-            self.logged_coords = true;
+        if !self.main_imgui.logged_coords {
+            self.main_imgui.logged_coords = true;
             debug!(
-                "virt={virt_w}x{virt_h} phys={phys_w}x{phys_h} \
-                 scale={scale_x:.2}x{scale_y:.2} win=({left},{bottom})-({right},{top}) \
-                 imgui_pos=({win_imgui_x},{win_imgui_y})"
+                "virt={virt_w}x{virt_h} phys={:.0}x{:.0} scale={scale_x:.2}x{scale_y:.2} \
+                 imgui_pos=({win_imgui_x},{win_imgui_y})",
+                virt_w as f32 * scale_x,
+                virt_h as f32 * scale_y,
             );
         }
 
         let dt = {
             let now = Instant::now();
-            let d = (now - self.last_time).as_secs_f32().max(1e-6);
-            self.last_time = now;
+            let d = (now - self.main_imgui.last_time).as_secs_f32().max(1e-6);
+            self.main_imgui.last_time = now;
             d
         };
 
-        // Plugin folder derived from the already-resolved config path (XPLMGetSystemPath-based).
         let plugin_dir = self
             .config_path
             .parent()
@@ -98,7 +178,7 @@ impl GuiState {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }));
 
-        // Snapshot mutable fields — avoids borrow conflict between imgui::Ui and self.
+        // Snapshot mutable fields to avoid borrow conflict with imgui::Ui.
         let mut file_picker = self.file_picker.take();
         let mut server = self.server.clone();
         let mut port = self.port;
@@ -118,6 +198,12 @@ impl GuiState {
         let mut log_level = self.log_level;
         let mut should_connect = false;
         let mut should_disconnect = false;
+        let mut trust_state = std::mem::replace(&mut self.trust_state, TrustState::Idle);
+        let probe_slot = Arc::clone(&self.probe_slot);
+        // Snapshot known_hosts so the closure can look up the current server's stored cert using
+        // the post-edit server value (text widgets in the closure may update `server`/`port`
+        // before start_probe is called).
+        let known_hosts_snap = self.known_hosts.snapshot();
         let is_connected = self.is_connected;
         let status = self.status.clone();
         let voip_statuses = self.voip_statuses.clone();
@@ -126,11 +212,14 @@ impl GuiState {
         let mut selected_mic = self.selected_mic;
         let radio_input_device_labels = self.radio_input_device_labels.clone();
         let mut selected_radio = self.selected_radio;
-        let mouse_pos = self.mouse_pos;
-        let mouse_down = self.mouse_down;
+        let mouse_pos = self.main_imgui.mouse_pos;
+        let mouse_down = self.main_imgui.mouse_down;
+        let window_id = self.window_id;
 
-        let (Some(ctx), Some(renderer)) = (self.imgui_ctx.as_mut(), self.imgui_renderer.as_mut())
-        else {
+        let (Some(ctx), Some(renderer)) = (
+            self.main_imgui.ctx.as_mut(),
+            self.main_imgui.renderer.as_mut(),
+        ) else {
             return;
         };
 
@@ -143,21 +232,16 @@ impl GuiState {
             io.mouse_down = mouse_down;
         }
 
+        // Results from overlay renders — processed after the frame to avoid borrow conflicts.
+        let mut tofu_result = TofuDrawResult::default();
+        let mut fp_cert_path: Option<(FilePickTarget, String)> = None;
+        let mut fp_open = false;
+
         {
             let ui = ctx.frame();
-            // Right edge of the widget column = content-region edge. Subtracting the window
-            // padding keeps the right margin symmetric with the left and stops the trailing
-            // reset icons from being jammed against the window's outer edge.
             let pad_r = ui.clone_style().window_padding[0];
             let fw = (width as f32 - LABEL_COL_X - pad_r).max(80.0);
-            let p = Ctx {
-                ui: &*ui,
-                fw,
-                win_x: win_imgui_x,
-                win_y: win_imgui_y,
-                win_w: width as f32,
-                win_h: height as f32,
-            };
+            let p = Ctx { ui: &*ui, fw };
 
             ui.window("##main")
                 .position([win_imgui_x, win_imgui_y], imgui::Condition::Always)
@@ -167,7 +251,6 @@ impl GuiState {
                 .movable(false)
                 .scroll_bar(false)
                 .build(|| {
-                    // ── Regular UI (rendered first, sits behind the dim) ────────────
                     let BrowseClicks {
                         cert: cert_browse,
                         ca: ca_browse,
@@ -198,68 +281,103 @@ impl GuiState {
                         &mut selected_radio,
                     );
                     p.log_level_picker(&mut log_level);
-                    let (conn, disc) = p.connect_button(is_connected, &flight_id, &user_name);
-                    should_connect = conn;
+                    let tofu_active = matches!(
+                        trust_state,
+                        TrustState::Probing { .. } | TrustState::Decide(_)
+                    );
+                    let picker_active = file_picker.is_some();
+                    let (conn, disc) = p.connect_button(
+                        is_connected || tofu_active || picker_active,
+                        &flight_id,
+                        &user_name,
+                    );
                     should_disconnect = disc;
+                    if disc {
+                        trust_state = TrustState::Idle;
+                    }
+                    if conn {
+                        if !server_ca.trim().is_empty() {
+                            should_connect = true;
+                        } else {
+                            let probe_key = KnownHosts::key(&server, port);
+                            let probe_stored = known_hosts_snap.get(&probe_key).cloned();
+                            tofu::start_probe(
+                                &mut trust_state,
+                                &probe_slot,
+                                probe_key,
+                                probe_stored,
+                                &server,
+                                port,
+                            );
+                        }
+                    }
                     p.status_display(voip_statuses.as_ref(), &status);
 
-                    // ── File picker (dim + modal rendered last, on top of all widgets) ─
-                    {
+                    // Open the file picker when a Browse button is clicked.
+                    if file_picker.is_none() {
                         let requests: [(bool, FilePickTarget, &str, &'static [&'static str]); 2] = [
-                            (
-                                cert_browse,
-                                FilePickTarget::UserCert,
-                                &cert_path,
-                                &["p12", "pfx"],
-                            ),
-                            (
-                                ca_browse,
-                                FilePickTarget::ServerCa,
-                                &server_ca,
-                                &["pem", "der", "crt"],
-                            ),
+                            (cert_browse, FilePickTarget::UserCert, &cert_path, &["p12", "pfx"]),
+                            (ca_browse,   FilePickTarget::ServerCa, &server_ca, &["pem", "der", "crt"]),
                         ];
-                        if file_picker.is_none() {
-                            if let Some((_, target, current, exts)) =
-                                requests.iter().find(|(b, ..)| *b)
-                            {
-                                file_picker = Some(FilePicker::new(
-                                    start_dir(current, &plugin_dir),
-                                    *target,
-                                    exts,
-                                ));
-                                ui.open_popup("##fp");
-                            }
+                        if let Some((_, target, current, exts)) =
+                            requests.iter().find(|(b, ..)| *b)
+                        {
+                            file_picker = Some(FilePicker::new(
+                                start_dir(current, &plugin_dir),
+                                *target,
+                                exts,
+                            ));
+                            fp_open = true;
                         }
                     }
-                    if file_picker.is_some() {
-                        p.draw_modal_dim();
-                    }
-                    let pick = file_picker.as_mut().map(|fp| p.file_picker_modal(fp));
-                    if let Some(pick) = pick {
-                        match pick {
-                            FilePick::Open => {}
-                            FilePick::Closed => {
-                                file_picker = None;
-                            }
-                            FilePick::Selected(target, path) => {
-                                match target {
-                                    FilePickTarget::UserCert => cert_path = path,
-                                    FilePickTarget::ServerCa => server_ca = path,
-                                }
-                                file_picker = None;
-                            }
-                        }
+
+                    // Poll the TOFU probe.
+                    let outcome = tofu::poll_step(&mut trust_state, &probe_slot);
+                    if outcome.silent_connect {
+                        should_connect = true;
                     }
                 });
-        } // ui borrow ends here
-        let draw_data = ctx.render();
 
-        // Sync X-Plane's GL state cache before the renderer touches raw GL.
+            // ── File-picker overlay ───────────────────────────────────────────────────
+            if file_picker.is_some() {
+                // Centre a 430×330 popup within the main window.
+                let popup_w = 430.0_f32;
+                let popup_h = 330.0_f32;
+                let popup_x = win_imgui_x + (width as f32 - popup_w) / 2.0;
+                let popup_y = win_imgui_y + (height as f32 - popup_h) / 2.0;
+                let r = render_fp_overlay(
+                    &*ui,
+                    pad_r,
+                    file_picker.take().unwrap(),
+                    [popup_x, popup_y],
+                    [popup_w, popup_h],
+                );
+                file_picker = r.picker;
+                fp_cert_path = r.path;
+            }
+
+            // ── TOFU overlay ──────────────────────────────────────────────────────────
+            if matches!(trust_state, TrustState::Decide(_)) {
+                // Centre a 430×280 popup within the main window.
+                let popup_w = 430.0_f32;
+                let popup_h = 280.0_f32;
+                let popup_x = win_imgui_x + (width as f32 - popup_w) / 2.0;
+                let popup_y = win_imgui_y + (height as f32 - popup_h) / 2.0;
+                tofu_result = render_tofu_overlay(
+                    &*ui,
+                    pad_r,
+                    &mut trust_state,
+                    [popup_x, popup_y],
+                    [popup_w, popup_h],
+                    &server,
+                );
+            }
+        }
+        let draw_data = ctx.render();
         unsafe { XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
         renderer.render(draw_data).ok();
 
-        // Write back modified config locals.
+        // Write back.
         self.file_picker = file_picker;
         self.server = server;
         self.port = port;
@@ -295,62 +413,29 @@ impl GuiState {
             log::set_max_level(log_level);
             self.save_config();
         }
+        self.trust_state = trust_state;
         if should_connect {
             self.should_connect = true;
         }
         if should_disconnect {
             self.should_disconnect = true;
         }
-    }
 
-    fn init_renderer(&mut self) {
-        let mut ctx = imgui::Context::create();
-        ctx.set_ini_filename(None);
-        ctx.style_mut().use_dark_colors();
-        // Disable full-screen modal dim; draw_modal_dim() draws our own clipped to the plugin window.
-        ctx.style_mut().colors[imgui::StyleColor::ModalWindowDimBg as usize] = [0.0; 4];
-        ctx.fonts().add_font(&[imgui::FontSource::DefaultFontData {
-            config: Some(imgui::FontConfig {
-                size_pixels: 15.0,
-                ..Default::default()
-            }),
-        }]);
+        // fp_open: picker was just created this frame; nothing else to do.
+        let _ = (fp_open, window_id);
 
-        match imgui_glow_renderer::AutoRenderer::initialize(Self::make_gl(), &mut ctx) {
-            Ok(renderer) => {
-                self.imgui_ctx = Some(ctx);
-                self.imgui_renderer = Some(renderer);
-            }
-            Err(e) => warn!("renderer init failed: {e}"),
+        // Process overlay results after write-back (needs &mut self free of borrow).
+        if tofu_result.should_connect {
+            self.should_connect = true;
         }
-    }
-
-    fn make_gl() -> glow::Context {
-        unsafe {
-            glow::Context::from_loader_function(|s| {
-                let cstr = CString::new(s).expect("GL symbol names contain no interior nul bytes");
-                #[cfg(not(target_os = "windows"))]
-                {
-                    // RTLD_DEFAULT (null) searches already-loaded libs — libGL is loaded by X-Plane.
-                    libc::dlsym(std::ptr::null_mut(), cstr.as_ptr()) as *const c_void
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    extern "system" {
-                        fn wglGetProcAddress(name: *const i8) -> *const c_void;
-                        fn LoadLibraryA(name: *const i8) -> *mut c_void;
-                        fn GetProcAddress(module: *mut c_void, name: *const i8) -> *const c_void;
-                    }
-                    // wglGetProcAddress covers OpenGL extensions; GetProcAddress covers core 1.1.
-                    let p = wglGetProcAddress(cstr.as_ptr());
-                    if !p.is_null() {
-                        p
-                    } else {
-                        let lib = LoadLibraryA(b"opengl32.dll\0".as_ptr() as *const i8);
-                        GetProcAddress(lib, cstr.as_ptr())
-                    }
-                }
-            })
+        if let Some((key, pem)) = tofu_result.to_store {
+            self.known_hosts.insert_and_save(key, pem);
+        }
+        if let Some((target, path)) = fp_cert_path {
+            match target {
+                FilePickTarget::UserCert => self.cert_path = path,
+                FilePickTarget::ServerCa => self.server_ca = path,
+            }
         }
     }
 }

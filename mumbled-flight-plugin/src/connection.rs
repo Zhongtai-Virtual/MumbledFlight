@@ -108,10 +108,10 @@ pub fn start(ps: &mut PluginState) {
         }
     };
 
-    // Optional server-certificate verification (server cert or its CA).
-    let server_trust = if ps.gui.server_ca.trim().is_empty() {
-        None
-    } else {
+    // Server-certificate verification. An explicit Server CA/cert wins; otherwise fall back to
+    // the TOFU-pinned cert remembered for this server (the draw loop only sets `should_connect`
+    // once the user has trusted it, so a missing pin here means the user opted to stay unverified).
+    let server_trust = if !ps.gui.server_ca.trim().is_empty() {
         match mumble::ServerTrust::load(std::path::Path::new(ps.gui.server_ca.trim())) {
             Ok(t) => Some(Arc::new(t)),
             Err(e) => {
@@ -121,6 +121,23 @@ pub fn start(ps: &mut PluginState) {
                 return;
             }
         }
+    } else {
+        let key = crate::gui::known_hosts::KnownHosts::key(&ps.gui.server, ps.gui.port);
+        match ps.gui.known_hosts.get(&key) {
+            Some(pem) => match mumble::ServerTrust::from_pem(pem.clone().into_bytes()) {
+                Ok(t) => Some(Arc::new(t)),
+                Err(e) => {
+                    let msg = format!(
+                        "Stored server certificate for {key} is corrupt: {e}. \
+                         Reconnect to re-trust the server."
+                    );
+                    warn!("{msg}");
+                    ps.gui.status = msg;
+                    return;
+                }
+            },
+            None => None,
+        }
     };
 
     let statuses: VoipStatuses = Arc::new(Mutex::new(HashMap::new()));
@@ -128,6 +145,10 @@ pub fn start(ps: &mut PluginState) {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_for_stack = Arc::clone(&shutdown);
+
+    // Captured before `server_trust` is moved into the stack: when no anchor is configured the
+    // server's TLS certificate is not verified, so warn the user in the status area.
+    let server_unverified = server_trust.is_none();
 
     runtime.spawn(async move {
         mumble::run_mumble_stack(MumbleStackConfig {
@@ -169,7 +190,11 @@ pub fn start(ps: &mut PluginState) {
         _runtime: runtime,
     });
     ps.gui.is_connected = true;
-    ps.gui.status = String::new();
+    ps.gui.status = if server_unverified {
+        "Warning: server identity unverified — set a Server CA to authenticate the server.".to_string()
+    } else {
+        String::new()
+    };
     ps.gui.save_config();
     info!(
         "connected — user={} flight={}",

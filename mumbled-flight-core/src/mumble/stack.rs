@@ -91,6 +91,19 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         spatial_width,
     } = cfg;
 
+    // Surface the unverified-server risk once per connection. With no trust anchor the TLS
+    // handshake accepts any certificate (see `MumbleVoipClient::connect`), so the server's
+    // identity is unauthenticated and an on-path attacker could intercept the connection —
+    // including the server password sent in the Authenticate message.
+    if server_trust.is_none() {
+        log::warn!(
+            "Connecting to {server_host}:{server_port} WITHOUT server-certificate verification \
+             (no Server CA/cert configured). The server's identity is not authenticated and the \
+             connection — including the server password — could be intercepted by an on-path \
+             attacker. Configure a Server CA/cert anchor to verify the server."
+        );
+    }
+
     // 1. MIC Chain — capture thread bridges sync → broadcast.
     let is_synthetic_input = !matches!(input_type, InputType::Real);
     let (mic_tx, _) = broadcast::channel::<Vec<f32>>(128);

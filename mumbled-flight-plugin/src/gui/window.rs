@@ -17,88 +17,109 @@
 
 
 //! XPLM floating-window creation and C event callbacks.
+//!
+//! All three windows (main, file-picker, TOFU) share the same five C callbacks.
+//! The draw callback dispatches via `GuiState::draw_any`; the input callbacks
+//! dispatch via `GuiState::on_any_*`, which resolves the target `ImguiWindowState`
+//! from the `win` parameter.
 
+use std::ffi::CStr;
+use std::mem;
 use std::os::raw::{c_char, c_int, c_void};
 use xplane_sys::{
     XPLMCreateWindowEx, XPLMMouseStatus, XPLMSetWindowPositioningMode, XPLMSetWindowTitle,
     XPLMWindowDecoration, XPLMWindowID, XPLMWindowLayer, XPLMWindowPositioningMode,
 };
 
-pub unsafe fn create_xplm_window() -> XPLMWindowID {
-    unsafe extern "C-unwind" fn draw_cb(win: XPLMWindowID, _: *mut c_void) {
+// ── Shared C callbacks (used by all three windows) ────────────────────────────
+
+unsafe extern "C-unwind" fn draw_any_cb(win: XPLMWindowID, _: *mut c_void) {
+    let Ok(mut g) = crate::plugin_cell().lock() else { return };
+    if let Some(ps) = g.as_mut() {
+        ps.gui.draw_any(win);
+    }
+}
+
+unsafe extern "C-unwind" fn mouse_cb(
+    win: XPLMWindowID,
+    x: c_int,
+    y: c_int,
+    s: XPLMMouseStatus,
+    _: *mut c_void,
+) -> c_int {
+    let Ok(mut g) = crate::plugin_cell().lock() else { return 1 };
+    if let Some(ps) = g.as_mut() {
+        ps.gui.on_any_mouse(win, x, y, s);
+    }
+    1
+}
+
+unsafe extern "C-unwind" fn cursor_cb(
+    win: XPLMWindowID,
+    x: c_int,
+    y: c_int,
+    _: *mut c_void,
+) -> xplane_sys::XPLMCursorStatus {
+    let Ok(mut g) = crate::plugin_cell().lock() else {
+        return xplane_sys::XPLMCursorStatus::Default;
+    };
+    if let Some(ps) = g.as_mut() {
+        ps.gui.on_any_mouse_move(win, x, y);
+    }
+    xplane_sys::XPLMCursorStatus::Default
+}
+
+unsafe extern "C-unwind" fn wheel_cb(
+    win: XPLMWindowID,
+    x: c_int,
+    y: c_int,
+    wheel: c_int,
+    clicks: c_int,
+    _: *mut c_void,
+) -> c_int {
+    let Ok(mut g) = crate::plugin_cell().lock() else { return 1 };
+    if let Some(ps) = g.as_mut() {
+        ps.gui.on_any_wheel(win, x, y, wheel, clicks);
+    }
+    1
+}
+
+unsafe extern "C-unwind" fn key_cb(
+    win: XPLMWindowID,
+    key: c_char,
+    flags: xplane_sys::XPLMKeyFlags,
+    _vk: c_char,
+    _: *mut c_void,
+    losing: c_int,
+) {
+    if losing != 0 || (flags & xplane_sys::XPLMKeyFlags::Down).0 == 0 {
+        return;
+    }
+    if key > 0 {
         let Ok(mut g) = crate::plugin_cell().lock() else { return };
         if let Some(ps) = g.as_mut() {
-            ps.gui.draw(win);
+            ps.gui.on_any_char(win, key as u8);
         }
     }
-    unsafe extern "C-unwind" fn mouse_cb(
-        win: XPLMWindowID,
-        x: c_int,
-        y: c_int,
-        s: XPLMMouseStatus,
-        _: *mut c_void,
-    ) -> c_int {
-        let Ok(mut g) = crate::plugin_cell().lock() else { return 1 };
-        if let Some(ps) = g.as_mut() {
-            ps.gui.on_mouse(win, x, y, s);
-        }
-        1
-    }
-    unsafe extern "C-unwind" fn cursor_cb(
-        _win: XPLMWindowID,
-        x: c_int,
-        y: c_int,
-        _: *mut c_void,
-    ) -> xplane_sys::XPLMCursorStatus {
-        let Ok(mut g) = crate::plugin_cell().lock() else {
-            return xplane_sys::XPLMCursorStatus::Default;
-        };
-        if let Some(ps) = g.as_mut() {
-            ps.gui.on_mouse_move(x, y);
-        }
-        xplane_sys::XPLMCursorStatus::Default
-    }
-    unsafe extern "C-unwind" fn wheel_cb(
-        _win: XPLMWindowID,
-        x: c_int,
-        y: c_int,
-        wheel: c_int,
-        clicks: c_int,
-        _: *mut c_void,
-    ) -> c_int {
-        let Ok(mut g) = crate::plugin_cell().lock() else { return 1 };
-        if let Some(ps) = g.as_mut() {
-            ps.gui.on_wheel(x, y, wheel, clicks);
-        }
-        1
-    }
-    unsafe extern "C-unwind" fn key_cb(
-        _: XPLMWindowID,
-        key: c_char,
-        flags: xplane_sys::XPLMKeyFlags,
-        _vk: c_char,
-        _: *mut c_void,
-        losing: c_int,
-    ) {
-        if losing != 0 || (flags & xplane_sys::XPLMKeyFlags::Down).0 == 0 {
-            return;
-        }
-        if key > 0 {
-            let Ok(mut g) = crate::plugin_cell().lock() else { return };
-            if let Some(ps) = g.as_mut() {
-                ps.gui.on_char(key as u8);
-            }
-        }
-    }
+}
 
+// ── Window creation ───────────────────────────────────────────────────────────
+
+unsafe fn make_window(
+    left: c_int,
+    top: c_int,
+    right: c_int,
+    bottom: c_int,
+    title: &CStr,
+) -> XPLMWindowID {
     let mut params = xplane_sys::XPLMCreateWindow_t {
-        structSize: std::mem::size_of::<xplane_sys::XPLMCreateWindow_t>() as c_int,
-        left: 60,
-        top: 660,
-        right: 690,
-        bottom: 60,
+        structSize: mem::size_of::<xplane_sys::XPLMCreateWindow_t>() as c_int,
+        left,
+        top,
+        right,
+        bottom,
         visible: 0,
-        drawWindowFunc: Some(draw_cb),
+        drawWindowFunc: Some(draw_any_cb),
         handleMouseClickFunc: Some(mouse_cb),
         handleKeyFunc: Some(key_cb),
         handleCursorFunc: Some(cursor_cb),
@@ -108,9 +129,12 @@ pub unsafe fn create_xplm_window() -> XPLMWindowID {
         layer: XPLMWindowLayer::FloatingWindows,
         handleRightClickFunc: None,
     };
-
     let win = XPLMCreateWindowEx(&mut params);
-    XPLMSetWindowTitle(win, c"MumbledFlight".as_ptr());
+    XPLMSetWindowTitle(win, title.as_ptr());
     XPLMSetWindowPositioningMode(win, XPLMWindowPositioningMode::PositionFree, -1);
     win
+}
+
+pub unsafe fn create_xplm_window() -> XPLMWindowID {
+    make_window(60, 660, 690, 60, c"MumbledFlight")
 }

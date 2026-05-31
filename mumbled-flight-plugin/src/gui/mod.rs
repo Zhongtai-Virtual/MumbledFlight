@@ -21,8 +21,13 @@
 pub mod config;
 pub mod devices;
 mod draw;
+pub mod known_hosts;
 mod secrets;
+pub(super) mod trust;
 mod window;
+
+use known_hosts::KnownHosts;
+use trust::{ProbeSlot, TrustState};
 
 use mumbled_flight_core::mumble::audio::enumerate_pw_devices;
 use mumbled_flight_core::mumble::{RadioSource, VoipStatuses};
@@ -52,14 +57,11 @@ pub struct FilePicker {
     pub selected: Option<usize>,
     pub target: FilePickTarget,
     pub filter_exts: &'static [&'static str],
-    /// Offset of the picker centre from the XPLM window centre, in screen pixels.
-    /// `None` until the first frame after opening (initialised to [0, 0] = centred).
-    pub win_offset: Option<[f32; 2]>,
 }
 
 impl FilePicker {
     pub fn new(start: PathBuf, target: FilePickTarget, filter_exts: &'static [&'static str]) -> Self {
-        let mut s = Self { current_dir: start, entries: Vec::new(), selected: None, target, filter_exts, win_offset: None };
+        let mut s = Self { current_dir: start, entries: Vec::new(), selected: None, target, filter_exts };
         s.refresh();
         s
     }
@@ -112,6 +114,65 @@ struct DeviceSnapshot {
 
 use xplane_sys::{XPLMMouseStatus, XPLMTakeKeyboardFocus, XPLMWindowID};
 
+/// Per-XPLM-window ImGui state: one instance for each floating window.
+struct ImguiWindowState {
+    ctx: Option<imgui::Context>,
+    renderer: Option<imgui_glow_renderer::AutoRenderer>,
+    last_time: Instant,
+    mouse_pos: [f32; 2],
+    mouse_down: [bool; 5],
+    logged_coords: bool,
+}
+
+fn press_key(io: &mut imgui::Io, key: imgui::Key) {
+    io.add_key_event(key, true);
+    io.add_key_event(key, false);
+}
+
+impl ImguiWindowState {
+    fn new() -> Self {
+        Self {
+            ctx: None,
+            renderer: None,
+            last_time: Instant::now(),
+            mouse_pos: [0.0; 2],
+            mouse_down: [false; 5],
+            logged_coords: false,
+        }
+    }
+
+    fn on_mouse(&mut self, screen_h: i32, x: c_int, y: c_int, status: XPLMMouseStatus) {
+        self.mouse_pos = [x as f32, (screen_h - y) as f32];
+        if status == XPLMMouseStatus::Down {
+            self.mouse_down[0] = true;
+        } else if status == XPLMMouseStatus::Up {
+            self.mouse_down[0] = false;
+        }
+    }
+
+    fn on_mouse_move(&mut self, screen_h: i32, x: i32, y: i32) {
+        self.mouse_pos = [x as f32, (screen_h - y) as f32];
+    }
+
+    fn on_wheel(&mut self, screen_h: i32, x: i32, y: i32, axis: i32, clicks: i32) {
+        self.mouse_pos = [x as f32, (screen_h - y) as f32];
+        let Some(ctx) = &mut self.ctx else { return };
+        let io = ctx.io_mut();
+        if axis == 0 { io.mouse_wheel   += clicks as f32; }
+        else         { io.mouse_wheel_h += clicks as f32; }
+    }
+
+    fn on_char(&mut self, key: u8) {
+        let Some(ctx) = &mut self.ctx else { return };
+        let io = ctx.io_mut();
+        match key {
+            8    => press_key(io, imgui::Key::Backspace),
+            32.. => io.add_input_character(key as char),
+            _    => {}
+        }
+    }
+}
+
 /// Sentinel stored in config when the auto-sink option is selected.
 pub const RADIO_AUTO_SINK: &str = "__auto__";
 
@@ -123,20 +184,17 @@ const RADIO_DEVICE_OFFSET: usize = 2;
 #[cfg(not(target_os = "linux"))]
 const RADIO_DEVICE_OFFSET: usize = 1;
 
+
 pub struct GuiState {
     pub window_id: XPLMWindowID,
     config_path: PathBuf,
 
-    // Lazily initialised on first draw — GL context guaranteed active then.
-    imgui_ctx: Option<imgui::Context>,
-    imgui_renderer: Option<imgui_glow_renderer::AutoRenderer>,
+    // Single ImGui context — imgui-rs only allows one per thread.
+    main_imgui: ImguiWindowState,
 
-    last_time: Instant,
     pending_devices: Arc<Mutex<Option<DeviceSnapshot>>>,
+    // Virtual screen height — shared across all windows (same coordinate space).
     screen_h: i32,
-    logged_coords: bool,
-    mouse_pos: [f32; 2],
-    pub mouse_down: [bool; 5],
 
     pub server: String,
     pub port: u16,
@@ -177,6 +235,12 @@ pub struct GuiState {
 
     pub should_connect: bool,
     pub should_disconnect: bool,
+    /// TOFU server-certificate store (`host:port` → pinned PEM).
+    pub known_hosts: KnownHosts,
+    /// State of the connect-time trust prompt / certificate probe.
+    trust_state: TrustState,
+    /// Background probe result, polled by the draw loop.
+    probe_slot: ProbeSlot,
     pub is_connected: bool,
     pub status: String,
     /// Per-client connection statuses — None when disconnected.
@@ -229,6 +293,8 @@ impl GuiState {
         // Secrets come from the OS secret store, never from config.toml.
         let server_password = secrets::load(secrets::SERVER_PASSWORD);
         let cert_pass = secrets::load(secrets::CERT_PASSPHRASE);
+
+        let known_hosts = KnownHosts::load(&config_path);
 
         info!("GuiState::new: creating XPLM window...");
         let window_id = unsafe { window::create_xplm_window() };
@@ -292,14 +358,9 @@ impl GuiState {
         Self {
             window_id,
             config_path,
-            imgui_ctx: None,
-            imgui_renderer: None,
-            last_time: Instant::now(),
+            main_imgui: ImguiWindowState::new(),
             pending_devices,
             screen_h: 0,
-            logged_coords: false,
-            mouse_pos: [0.0; 2],
-            mouse_down: [false; 5],
             server: cfg.server,
             port: cfg.port,
             server_password,
@@ -331,6 +392,9 @@ impl GuiState {
             file_picker: None,
             should_connect: false,
             should_disconnect: false,
+            known_hosts,
+            trust_state: TrustState::Idle,
+            probe_slot: Arc::new(Mutex::new(None)),
             is_connected: false,
             status: String::new(),
             voip_statuses: None,
@@ -480,40 +544,33 @@ impl GuiState {
 
     // ── Input handlers ────────────────────────────────────────────────────────
 
-    pub fn on_mouse(&mut self, win: XPLMWindowID, x: c_int, y: c_int, status: XPLMMouseStatus) {
-        self.mouse_pos = [x as f32, (self.screen_h - y) as f32];
+    fn imgui_for_win(&mut self, _win: XPLMWindowID) -> &mut ImguiWindowState {
+        &mut self.main_imgui
+    }
+
+    pub fn on_any_mouse(&mut self, win: XPLMWindowID, x: c_int, y: c_int, status: XPLMMouseStatus) {
+        let screen_h = self.screen_h;
+        self.imgui_for_win(win).on_mouse(screen_h, x, y, status);
         if status == XPLMMouseStatus::Down {
-            self.mouse_down[0] = true;
             unsafe { XPLMTakeKeyboardFocus(win); }
-            debug!("mouse down xplm=({x},{y}) imgui=({:.0},{:.0}) screen_h={}",
-                self.mouse_pos[0], self.mouse_pos[1], self.screen_h);
-        } else if status == XPLMMouseStatus::Up {
-            self.mouse_down[0] = false;
-        }
-    }
-
-    pub fn on_mouse_move(&mut self, x: i32, y: i32) {
-        self.mouse_pos = [x as f32, (self.screen_h - y) as f32];
-    }
-
-    pub fn on_wheel(&mut self, x: i32, y: i32, axis: i32, clicks: i32) {
-        self.on_mouse_move(x, y);
-        let Some(ctx) = &mut self.imgui_ctx else { return };
-        let io = ctx.io_mut();
-        if axis == 0 { io.mouse_wheel   += clicks as f32; }
-        else         { io.mouse_wheel_h += clicks as f32; }
-    }
-
-    pub fn on_char(&mut self, key: u8) {
-        let Some(ctx) = &mut self.imgui_ctx else { return };
-        let io = ctx.io_mut();
-        match key {
-            8    => {
-                io.add_key_event(imgui::Key::Backspace, true);
-                io.add_key_event(imgui::Key::Backspace, false);
+            if win == self.window_id {
+                debug!("mouse down xplm=({x},{y}) imgui=({:.0},{:.0}) screen_h={}",
+                    self.main_imgui.mouse_pos[0], self.main_imgui.mouse_pos[1], screen_h);
             }
-            32.. => io.add_input_character(key as char),
-            _    => {}
         }
+    }
+
+    pub fn on_any_mouse_move(&mut self, win: XPLMWindowID, x: i32, y: i32) {
+        let screen_h = self.screen_h;
+        self.imgui_for_win(win).on_mouse_move(screen_h, x, y);
+    }
+
+    pub fn on_any_wheel(&mut self, win: XPLMWindowID, x: i32, y: i32, axis: i32, clicks: i32) {
+        let screen_h = self.screen_h;
+        self.imgui_for_win(win).on_wheel(screen_h, x, y, axis, clicks);
+    }
+
+    pub fn on_any_char(&mut self, win: XPLMWindowID, key: u8) {
+        self.imgui_for_win(win).on_char(key);
     }
 }
