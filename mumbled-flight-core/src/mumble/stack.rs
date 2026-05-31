@@ -103,6 +103,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     }
 
     // 1. MIC Chain — capture thread bridges sync → broadcast.
+    let is_synthetic_input = !matches!(input_type, InputType::Real);
     let (mic_tx, _) = broadcast::channel::<Vec<f32>>(128);
     let mic_tx_clone = mic_tx.clone();
     std::thread::spawn(move || {
@@ -125,6 +126,23 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     let radio_tx = match final_radio_source {
         Some(src) if matches!(test_client, TestClient::All | TestClient::Radio) => {
             Some(radio_loopback_sender(src))
+        }
+        // --test radio with --sine/--file: bridge the mic chain into the radio channel so the
+        // Radio client receives synthetic audio without needing a real loopback device.
+        None if matches!(test_client, TestClient::Radio) && is_synthetic_input => {
+            let (tx, _) = broadcast::channel::<Vec<f32>>(128);
+            let tx_fwd = tx.clone();
+            let mut mic_rx = mic_tx.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match mic_rx.recv().await {
+                        Ok(frame) => { let _ = tx_fwd.send(frame); }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            Some(tx)
         }
         _ => None,
     };
