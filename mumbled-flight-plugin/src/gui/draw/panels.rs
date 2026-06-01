@@ -151,20 +151,30 @@ impl<'ui> Ctx<'ui> {
         self.combo("IC Out", "##dev_ic", output_device_labels, selected_ic);
     }
 
+    /// Renders the mic device combo plus a "Test Mic"/"Stop Test" toggle. Returns `true` when the
+    /// toggle is clicked. The combo is locked while connected or testing (the device is captured
+    /// at test/connect start); the toggle itself is disabled only while connected.
     pub(super) fn mic_picker(
         &self,
         is_connected: bool,
+        is_testing: bool,
         mic_input_device_labels: &[String],
         selected_mic: &mut i32,
-    ) {
+    ) -> bool {
         if mic_input_device_labels.is_empty() {
-            return;
+            return false;
         }
         let mic_labels: Vec<String> = std::iter::once("(system default)".to_string())
             .chain(mic_input_device_labels.iter().cloned())
             .collect();
+        {
+            let _dis = self.ui.begin_disabled(is_connected || is_testing);
+            self.combo("Mic In", "##mic_in", &mic_labels, selected_mic);
+        }
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
         let _dis = self.ui.begin_disabled(is_connected);
-        self.combo("Mic In", "##mic_in", &mic_labels, selected_mic);
+        self.ui
+            .button(if is_testing { "Stop Test" } else { "Test Mic" })
     }
 
     pub(super) fn radio_picker(

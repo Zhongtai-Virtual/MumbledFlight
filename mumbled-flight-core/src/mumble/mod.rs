@@ -24,7 +24,7 @@ pub mod voip;
 pub use self::voip::client::{
     cert_fingerprint, probe_server_cert, ClientCert, ProbedCert, ServerTrust, VoipClientStatus,
 };
-pub use stack::run_mumble_stack;
+pub use stack::{run_mumble_stack, start_mic_level_test};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32};

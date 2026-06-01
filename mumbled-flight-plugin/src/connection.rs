@@ -55,6 +55,9 @@ pub fn start(ps: &mut PluginState) {
         ps.gui.server, ps.gui.port, ps.gui.user_name, ps.gui.flight_id
     );
 
+    // Release any metering-only mic capture so the connection's own capture can claim the device.
+    ps.gui.stop_mic_test();
+
     let cockpit_state = Arc::new(Mutex::new(CockpitState::default()));
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
