@@ -97,6 +97,7 @@ impl<'ui> Ctx<'ui> {
         ic_vol: &mut f32,
         gain: &mut f32,
         spatial_width: &mut f32,
+        mic_level: f32,
     ) {
         let vol_flags = imgui::SliderFlags::LOGARITHMIC | imgui::SliderFlags::NO_INPUT;
         self.slider(
@@ -110,6 +111,9 @@ impl<'ui> Ctx<'ui> {
         );
         self.slider("IC Vol", "##ic_vol", ic_vol, 0.1, 20.0, vol_flags, 1.0);
         self.slider("Mic Gain", "##gain", gain, 0.1, 20.0, vol_flags, 1.0);
+        // Live post-gain input level, right under Mic Gain so the user can tune toward the
+        // target band (~-6 dBFS). Only meaningful while connected; reads 0 / "—" otherwise.
+        self.input_meter("Mic Level", mic_level);
         self.slider(
             "Spatial",
             "##spatial",

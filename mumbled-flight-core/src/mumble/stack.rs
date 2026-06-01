@@ -72,6 +72,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         client_cert,
         server_trust,
         mic_gain,
+        mic_level,
         denoise,
         radio_source,
         voip_client,
@@ -112,7 +113,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         match input_type {
             InputType::Sine => super::audio::start_sine_capture(sync_tx, mic_gain),
             InputType::File(path) => super::audio::start_file_capture(path, sync_tx, mic_gain),
-            InputType::Real => start_capture(sync_tx, denoise, mic_gain, 0.0, mic_device, mic_shutdown),
+            InputType::Real => start_capture(sync_tx, denoise, mic_gain, mic_level, 0.0, mic_device, mic_shutdown),
         }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);

@@ -247,6 +247,9 @@ pub struct GuiState {
     pub voip_statuses: Option<VoipStatuses>,
     /// Shared with the capture thread while connected — None when disconnected.
     pub mic_gain_live: Option<Arc<AtomicU32>>,
+    /// Live post-gain mic peak (f32 bits, 0.0–1.0) for the input level meter — None when
+    /// disconnected. Written by the capture thread, read by the draw loop.
+    pub mic_level_live: Option<Arc<AtomicU32>>,
     /// Shared with playback threads while connected — None when disconnected.
     pub ambient_vol_live: Option<Arc<AtomicU32>>,
     pub ic_vol_live: Option<Arc<AtomicU32>>,
@@ -399,6 +402,7 @@ impl GuiState {
             status: String::new(),
             voip_statuses: None,
             mic_gain_live: None,
+            mic_level_live: None,
             ambient_vol_live: None,
             ic_vol_live: None,
             spatial_width_live: None,

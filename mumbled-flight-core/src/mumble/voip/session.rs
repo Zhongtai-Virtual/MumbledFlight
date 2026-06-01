@@ -414,7 +414,9 @@ impl Session {
             match client.role {
                 ClientRole::Radio { has_source } => (s.should_transmit_radio(has_source), s.spkr_vol),
                 ClientRole::Ic    => (s.should_transmit_ic(), 1.0),
-                ClientRole::Pa    => (s.should_transmit_pa(), 2.0),
+                // PA transmits at unity like Voice/IC so every mic-fed client sends at the same
+                // level; the in-cabin PA loudness is shaped on the receive side by `pa_gain`.
+                ClientRole::Pa    => (s.should_transmit_pa(), 1.0),
                 ClientRole::Voice => (true, 1.0),
             }
         };

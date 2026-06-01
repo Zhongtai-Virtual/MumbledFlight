@@ -280,6 +280,7 @@ async fn main() -> Result<()> {
             client_cert,
             server_trust,
             mic_gain: Arc::new(AtomicU32::new(args.gain.to_bits())),
+            mic_level: Arc::new(AtomicU32::new(0)), // no GUI meter in CLI
             denoise: args.denoise,
             radio_source,
             voip_client,

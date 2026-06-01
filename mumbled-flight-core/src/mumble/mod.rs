@@ -86,6 +86,9 @@ pub struct MumbleStackConfig {
     /// Optional trust anchor(s) to verify the server certificate (server cert or its CA).
     pub server_trust: Option<Arc<ServerTrust>>,
     pub mic_gain: Arc<AtomicU32>,
+    /// Live post-gain mic peak level (f32 bits, 0.0–1.0), written by the capture stream for the
+    /// GUI level meter. The plugin reads it each frame; the CLI passes a slot it never reads.
+    pub mic_level: Arc<AtomicU32>,
     pub denoise: bool,
     pub radio_source: RadioSource,
     pub voip_client: VoipClient,

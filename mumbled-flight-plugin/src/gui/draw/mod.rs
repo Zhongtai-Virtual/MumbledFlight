@@ -189,6 +189,12 @@ impl GuiState {
         let mut flight_id = self.flight_id.clone();
         let mut user_name = self.user_name.clone();
         let mut gain = self.gain;
+        // Read-only snapshot of the live input level for the meter (0.0 when disconnected).
+        let mic_level = self
+            .mic_level_live
+            .as_ref()
+            .map(|a| f32::from_bits(a.load(Ordering::Relaxed)))
+            .unwrap_or(0.0);
         let mut ambient_vol = self.ambient_vol;
         let mut ic_vol = self.ic_vol;
         let mut spatial_width = self.spatial_width;
@@ -264,7 +270,7 @@ impl GuiState {
                         &mut flight_id,
                         &mut user_name,
                     );
-                    p.audio_controls(&mut ambient_vol, &mut ic_vol, &mut gain, &mut spatial_width);
+                    p.audio_controls(&mut ambient_vol, &mut ic_vol, &mut gain, &mut spatial_width, mic_level);
                     p.denoise_toggle(&mut denoise, is_connected);
                     if !output_device_labels.is_empty() {
                         p.output_device_pickers(
