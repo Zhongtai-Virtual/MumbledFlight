@@ -119,7 +119,7 @@ X-Plane 12/Resources/plugins/MumbledFlight/
 
 ### CI / pre-built releases
 
-GitHub Actions builds the plugin for all three platforms on every push to `main`. Download the `MumbledFlight` zip from the latest release and extract it directly into `Resources/plugins/`.
+GitHub Actions builds the plugin for all three platforms on every push to `main`. Pushing a version tag (e.g. `v1.2.0`) additionally publishes the combined `MumbledFlight.zip` as a GitHub Release asset. Download it from the latest release and extract it directly into `Resources/plugins/`.
 
 ## License
 
