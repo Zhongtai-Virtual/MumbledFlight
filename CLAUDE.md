@@ -133,8 +133,12 @@ helper in `stack.rs`:
 - Mixers: there are two playback sinks — **ambient** (Voice + PA + Radio RX) and **IC** — routed to
   separate output devices. The Radio source is also mirrored into the IC output so pilots monitor
   COM through their IC headphones.
-- The radio loopback capture stream is created **once per process** via a `OnceLock`
-  (`radio_loopback_sender`) regardless of reconnects.
+- The radio loopback capture stream is created **per connection** (`radio_loopback_sender` in
+  `stack.rs`) and tied to the connection's `shutdown: Arc<AtomicBool>`, so it is torn down on
+  disconnect and rebinds to the (possibly changed) radio source on reconnect. On Linux the
+  capture lives in `pw_capture_loop`, whose PipeWire mainloop quits when a 200 ms shutdown timer
+  observes the flag; the `MumblingRadio` *sink* itself (`create_linux_sink`) is still a
+  process-wide `OnceLock` and is reused across reconnects.
 
 ### 4. The Mumble protocol state machine (`core/src/mumble/voip/`)
 - `client.rs` — `MumbleVoipClient` holds the *static* per-client config (role, channel, context,
@@ -199,6 +203,16 @@ used to capture xPilot's radio output — all `#[cfg(target_os = "linux")]`. On 
 `start_loopback_capture` uses a standard CPAL `build_input_stream` instead (for virtual audio
 cables such as BlackHole or VB-Cable). `mic_gain` / `ambient_vol` / `ic_vol` / `spatial_width`
 are all `Arc<AtomicU32>` (f32 bits) so the GUI can adjust them live without reconnecting.
+
+> **Loopback targeting (Linux gotcha):** `pw_capture_loop` does **not** use `AUTOCONNECT` /
+> `STREAM_CAPTURE_SINK`. WirePlumber's standard linking policy overrides the connect target for
+> capture(-sink) streams and routes them to the *default* device — capturing the wrong monitor
+> (the "wrong input stream" bug). Instead it watches the registry, finds the target node and its
+> own stream node (tagged `node.name = "mumbled-flight-loopback"`) plus all ports, and creates the
+> links itself via the `link-factory`, exactly like `pw-link`, which no policy can override.
+> Channels are matched positionally by `port.id` (a null-sink monitor reports `audio.channel =
+> "UNK"`, so names can't be used); the stereo stream is averaged to mono `(L+R)/2` in the process
+> callback, matching the CPAL downmix so a centred mono signal stays at unity gain.
 
 **Denoise** (`--denoise` flag / GUI checkbox): RNNoise via `nnnoiseless`, 480-sample (10 ms)
 frames. Gain is applied *after* `process_frame` so the denoiser always sees a normalised signal.

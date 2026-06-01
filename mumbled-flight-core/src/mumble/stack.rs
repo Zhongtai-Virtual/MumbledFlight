@@ -17,7 +17,8 @@
 
 //! Stack startup: wires mic capture, radio loopback, playback mixers, and the four VoIP clients.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, mpsc};
 
@@ -45,24 +46,21 @@ fn spawn_client(
     });
 }
 
-/// Returns a `Sender` into the shared radio loopback broadcast channel.
-/// The underlying capture stream and forwarding thread are created only once per process
-/// regardless of reconnects, so reconnecting never spawns a second loopback stream.
-fn radio_loopback_sender(source_name: String) -> broadcast::Sender<Vec<f32>> {
-    static TX: OnceLock<broadcast::Sender<Vec<f32>>> = OnceLock::new();
-    TX.get_or_init(|| {
-        let (tx, _) = broadcast::channel::<Vec<f32>>(128);
-        let tx_fwd = tx.clone();
-        std::thread::spawn(move || {
-            let (sync_tx, mut sync_rx) = mpsc::channel(128);
-            start_loopback_capture(source_name, sync_tx);
-            while let Some(frame) = sync_rx.blocking_recv() {
-                let _ = tx_fwd.send(frame);
-            }
-        });
-        tx
-    })
-    .clone()
+/// Spawns a radio loopback capture for `source_name` and returns a broadcast `Sender` carrying its
+/// frames. The capture is tied to `shutdown`: when the connection tears down it stops and releases
+/// the source, so a reconnect rebinds to the (possibly changed) radio source rather than reusing a
+/// stale process-wide stream.
+fn radio_loopback_sender(source_name: String, shutdown: Arc<AtomicBool>) -> broadcast::Sender<Vec<f32>> {
+    let (tx, _) = broadcast::channel::<Vec<f32>>(128);
+    let tx_fwd = tx.clone();
+    std::thread::spawn(move || {
+        let (sync_tx, mut sync_rx) = mpsc::channel(128);
+        start_loopback_capture(source_name, sync_tx, shutdown);
+        while let Some(frame) = sync_rx.blocking_recv() {
+            let _ = tx_fwd.send(frame);
+        }
+    });
+    tx
 }
 
 pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
@@ -108,12 +106,13 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     let is_synthetic_input = !matches!(input_type, InputType::Real);
     let (mic_tx, _) = broadcast::channel::<Vec<f32>>(128);
     let mic_tx_clone = mic_tx.clone();
+    let mic_shutdown = Arc::clone(&shutdown);
     std::thread::spawn(move || {
         let (sync_tx, mut sync_rx) = mpsc::channel(128);
         match input_type {
             InputType::Sine => super::audio::start_sine_capture(sync_tx, mic_gain),
             InputType::File(path) => super::audio::start_file_capture(path, sync_tx, mic_gain),
-            InputType::Real => start_capture(sync_tx, denoise, mic_gain, 0.0, mic_device, shutdown),
+            InputType::Real => start_capture(sync_tx, denoise, mic_gain, 0.0, mic_device, mic_shutdown),
         }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);
@@ -123,14 +122,19 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     // Wait for the primary mic capture to fully establish itself in the OS mixer.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // 2. RADIO Chain.
+    // 2. RADIO Chain. The loopback capture shares the connection's `shutdown` flag so it is torn
+    // down on disconnect and rebound to the current radio source on reconnect.
     let radio_tx: Option<broadcast::Sender<Vec<f32>>> = match radio_source {
         #[cfg(target_os = "linux")]
         RadioSource::AutoSink if matches!(voip_client, VoipClient::All | VoipClient::Radio) => {
-            super::audio::create_linux_sink().map(radio_loopback_sender)
+            tokio::task::spawn_blocking(super::audio::create_linux_sink)
+                .await
+                .ok()
+                .flatten()
+                .map(|monitor| radio_loopback_sender(monitor, Arc::clone(&shutdown)))
         }
         RadioSource::Device(src) if matches!(voip_client, VoipClient::All | VoipClient::Radio) => {
-            Some(radio_loopback_sender(src))
+            Some(radio_loopback_sender(src, Arc::clone(&shutdown)))
         }
         // --test radio with --sine/--file: bridge the mic chain into the radio channel so the
         // Radio client receives synthetic audio without needing a real loopback device.

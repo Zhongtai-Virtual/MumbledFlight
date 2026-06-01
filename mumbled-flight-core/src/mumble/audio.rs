@@ -485,7 +485,9 @@ fn run_ffmpeg_capture(
 /// For monitor sources (e.g. "MumblingRadio.monitor") the ".monitor" suffix is stripped
 /// and STREAM_CAPTURE_SINK is set, because in native PipeWire the monitor ports live on
 /// the sink node itself — there is no separate monitor node.
-pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
+/// `shutdown` is watched so the capture stream is torn down when the connection ends, instead of
+/// leaking across reconnects — this is what lets a changed radio source take effect on reconnect.
+pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>, shutdown: Arc<AtomicBool>) {
     #[cfg(target_os = "linux")]
     std::thread::spawn(move || {
         // std::sync channel for the RT callback (no async runtime in RT thread).
@@ -494,13 +496,14 @@ pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
         {
             let src = source_name.clone();
             std::thread::spawn(move || {
-                if let Err(e) = pw_capture_loop(&src, raw_tx) {
+                if let Err(e) = pw_capture_loop(&src, raw_tx, shutdown) {
                     error!("[Audio:Loopback] PipeWire error: {e}");
                 }
             });
         }
 
         // Accumulate variable-sized PipeWire buffers into 960-sample Opus frames.
+        // Ends when pw_capture_loop quits (on shutdown) and drops raw_tx.
         let mut accum: Vec<f32> = Vec::new();
         for chunk in raw_rx {
             accum.extend_from_slice(&chunk);
@@ -509,58 +512,66 @@ pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
                 let _ = tx.try_send(frame);
             }
         }
+        info!("[Audio:Loopback] capture stopped");
     });
 
     #[cfg(not(target_os = "linux"))]
     std::thread::spawn(move || {
-        let _guard = device_open_lock().lock().unwrap();
-        let device = match select_device(Some(&source_name), true) {
-            Some(d) => d,
-            None => { error!("[Audio:Loopback] no input device available for '{source_name}'"); return; }
-        };
-        let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
-        let config = match device.supported_input_configs() {
-            Ok(mut cfgs) => cfgs.find(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000),
-            Err(e) => { error!("[Audio:Loopback] failed to query configs for '{device_name}': {e}"); return; }
-        };
-        let config = match config {
-            Some(c) => c.with_sample_rate(cpal::SampleRate(48000)),
-            None => { error!("[Audio:Loopback] '{device_name}' does not support 48 kHz"); return; }
-        };
-        let num_channels = config.channels() as usize;
-        info!("[Audio:Loopback] Active: {device_name} (48kHz, {num_channels} ch)");
+        let _stream = {
+            let _guard = device_open_lock().lock().unwrap();
+            let device = match select_device(Some(&source_name), true) {
+                Some(d) => d,
+                None => { error!("[Audio:Loopback] no input device available for '{source_name}'"); return; }
+            };
+            let device_name = device.name().unwrap_or_else(|_| "(unknown)".into());
+            let config = match device.supported_input_configs() {
+                Ok(mut cfgs) => cfgs.find(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000),
+                Err(e) => { error!("[Audio:Loopback] failed to query configs for '{device_name}': {e}"); return; }
+            };
+            let config = match config {
+                Some(c) => c.with_sample_rate(cpal::SampleRate(48000)),
+                None => { error!("[Audio:Loopback] '{device_name}' does not support 48 kHz"); return; }
+            };
+            let num_channels = config.channels() as usize;
+            info!("[Audio:Loopback] Active: {device_name} (48kHz, {num_channels} ch)");
 
-        let mut accum: Vec<f32> = Vec::new();
-        let _stream = match device.build_input_stream(
-            &config.into(),
-            move |data: &[f32], _| {
-                // Downmix to mono then accumulate into 960-sample Opus frames.
-                if num_channels > 1 {
-                    for chunk in data.chunks_exact(num_channels) {
-                        let sum: f32 = chunk.iter().sum();
-                        accum.push(sum / num_channels as f32);
+            let mut accum: Vec<f32> = Vec::new();
+            let s = match device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    // Downmix to mono then accumulate into 960-sample Opus frames.
+                    if num_channels > 1 {
+                        for chunk in data.chunks_exact(num_channels) {
+                            let sum: f32 = chunk.iter().sum();
+                            accum.push(sum / num_channels as f32);
+                        }
+                    } else {
+                        accum.extend_from_slice(data);
                     }
-                } else {
-                    accum.extend_from_slice(data);
-                }
-                while accum.len() >= 960 {
-                    let frame: Vec<f32> = accum.drain(..960).collect();
-                    let _ = tx.try_send(frame);
-                }
-            },
-            |err| error!("[Audio:Loopback] stream error: {err}"),
-            None,
-        ) {
-            Ok(s) => s,
-            Err(e) => { error!("[Audio:Loopback] failed to build stream for '{device_name}': {e}"); return; }
+                    while accum.len() >= OPUS_FRAME_SAMPLES {
+                        let frame: Vec<f32> = accum.drain(..OPUS_FRAME_SAMPLES).collect();
+                        let _ = tx.try_send(frame);
+                    }
+                },
+                |err| error!("[Audio:Loopback] stream error: {err}"),
+                None,
+            ) {
+                Ok(s) => s,
+                Err(e) => { error!("[Audio:Loopback] failed to build stream for '{device_name}': {e}"); return; }
+            };
+            if let Err(e) = s.play() {
+                error!("[Audio:Loopback] failed to start stream for '{device_name}': {e}");
+                return;
+            }
+            s
         };
-        if let Err(e) = _stream.play() {
-            error!("[Audio:Loopback] failed to start stream for '{device_name}': {e}");
-            return;
+        // Keep the stream alive until the connection is torn down, then drop it so the source is
+        // released and a reconnect can rebind to a different device.
+        while !shutdown.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        // Park the thread — the stream keeps running as long as this thread lives.
-        // Loop guards against spurious unparks.
-        loop { std::thread::park(); }
+        drop(_stream);
+        info!("[Audio:Loopback] capture stopped");
     });
 }
 
@@ -568,6 +579,7 @@ pub fn start_loopback_capture(source_name: String, tx: mpsc::Sender<Vec<f32>>) {
 fn pw_capture_loop(
     source_name: &str,
     tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), pipewire::Error> {
     use pipewire as pw;
     use pw::spa::{
@@ -575,9 +587,13 @@ fn pw_capture_loop(
         pod::{Object, Pod, Value, serialize::PodSerializer},
         utils::{Direction, SpaTypes},
     };
+    use pw::types::ObjectType;
 
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    // node.name we give our own capture stream, so the registry listener can recognise it.
+    const STREAM_NODE_NAME: &str = "mumbled-flight-loopback";
 
     pw::init();
 
@@ -585,74 +601,136 @@ fn pw_capture_loop(
     let context  = pw::context::ContextRc::new(&mainloop, None)?;
     let core     = context.connect_rc(None)?;
 
-    // "MumblingRadio.monitor" → target sink "MumblingRadio" + STREAM_CAPTURE_SINK,
-    // because monitor ports in native PipeWire live on the sink node itself.
-    let (target, capture_sink) = source_name
-        .strip_suffix(".monitor")
-        .map(|s| (s.to_string(), true))
-        .unwrap_or_else(|| (source_name.to_string(), false));
+    // A "MumblingRadio.monitor" source name targets the "MumblingRadio" sink node: in native
+    // PipeWire a sink's monitor ports are simply its output ports, so capturing a sink monitor and
+    // capturing a real source are the same operation — link the target node's *output* ports to
+    // our stream's input port. The ".monitor" suffix is only a naming convention; we strip it to
+    // recover the node name.
+    let target = source_name.strip_suffix(".monitor").unwrap_or(source_name).to_string();
 
-    // Phase 1: resolve the target node *name* to its object.serial via a one-shot registry dump.
-    // Targeting by serial is honoured by every WirePlumber version; a `target.object` set to a
-    // bare node name is not always resolved, and an unresolved target makes AUTOCONNECT silently
-    // fall back to the *default* device — e.g. capturing the headphone monitor instead of the
-    // selected radio source. (This is the loopback "wrong input stream" bug.)
-    let serial: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    {
-        let registry = core.get_registry()?;
-        let serial_cl = serial.clone();
+    // We do NOT use AUTOCONNECT. WirePlumber's standard linking policy overrides the connect
+    // target for capture streams (and especially capture-sink streams), routing them to the
+    // *default* device regardless of the target id or `target.object` hint — capturing the
+    // headphone-output monitor instead of the selected radio source. (This is the loopback "wrong
+    // input stream" bug.) Instead we resolve the graph from the registry and create the links
+    // ourselves via the link-factory, exactly like `pw-link`, which no policy can override.
+
+    /// Graph state assembled from the registry, then used to wire the links.
+    #[derive(Default)]
+    struct Graph {
+        target_node: Option<u32>,           // sink/source node we capture from
+        our_node: Option<u32>,              // our capture stream's node
+        // (owning node id, port global id, port channel index, is_output). The channel index
+        // (`port.id`) gives the per-node channel order (0,1,…) used for positional matching, since
+        // a null-sink's monitor ports carry no channel map (audio.channel = "UNK").
+        ports: Vec<(u32, u32, u32, bool)>,
+        // Global ids of our input ports already linked, so each is wired exactly once.
+        linked_inputs: Vec<u32>,
+    }
+    let graph = Rc::new(RefCell::new(Graph::default()));
+    // Created Link proxies must be kept alive — dropping a proxy tears the link down.
+    let links: Rc<RefCell<Vec<pw::link::Link>>> = Rc::new(RefCell::new(Vec::new()));
+
+    // Link the target node's output ports → our stream's input ports as they appear in the
+    // registry. Each of our input ports is wired to the source output port with the same channel
+    // index (a mono source clamps to its single port, feeding every input channel). Per-input-port
+    // and idempotent — NOT a one-shot latch: our two DSP input ports (input_FL/_FR) are registered
+    // in separate events, so a single-shot link would wire only the first channel. The two
+    // channels are averaged to mono in the process callback below — matching the CPAL downmix
+    // convention (sum / n), so a centred mono radio signal stays at unity gain instead of +6 dB.
+    let attempt_link: Rc<dyn Fn()> = {
+        let graph = graph.clone();
+        let links = links.clone();
+        let core = core.clone();
+        Rc::new(move || {
+            let mut g = graph.borrow_mut();
+            let (Some(tnode), Some(onode)) = (g.target_node, g.our_node) else { return };
+            // Source output ports sorted by channel index → outs[i] is channel i.
+            let mut outs: Vec<(u32, u32)> = g.ports.iter()
+                .filter(|&&(n, _, _, out)| n == tnode && out)
+                .map(|&(_, gid, idx, _)| (idx, gid))
+                .collect();
+            outs.sort_unstable();
+            if outs.is_empty() { return; }
+
+            // Our input ports, with their channel index, that aren't linked yet.
+            let pending: Vec<(u32, u32)> = g.ports.iter()
+                .filter(|&&(n, gid, _, out)| n == onode && !out && !g.linked_inputs.contains(&gid))
+                .map(|&(_, gid, idx, _)| (idx, gid))
+                .collect();
+
+            for (in_idx, dst) in pending {
+                let (_, src) = outs[(in_idx as usize).min(outs.len() - 1)];
+                let link_props = pw::properties::properties! {
+                    *pw::keys::LINK_OUTPUT_NODE => tnode.to_string(),
+                    *pw::keys::LINK_OUTPUT_PORT => src.to_string(),
+                    *pw::keys::LINK_INPUT_NODE  => onode.to_string(),
+                    *pw::keys::LINK_INPUT_PORT  => dst.to_string(),
+                    *pw::keys::OBJECT_LINGER    => "false",
+                };
+                match core.create_object::<pw::link::Link>("link-factory", &link_props) {
+                    Ok(l) => {
+                        links.borrow_mut().push(l);
+                        g.linked_inputs.push(dst);
+                        info!("[Audio:Loopback] linked {tnode}:{src} → {onode}:{dst} (ch {in_idx})");
+                    }
+                    Err(e) => warn!("[Audio:Loopback] link {tnode}:{src} → {onode}:{dst} failed: {e}"),
+                }
+            }
+        })
+    };
+
+    // Registry listener (alive for the whole loop): discovers the target node, our own stream
+    // node, and every port, retrying the link on each change so ordering of globals doesn't matter.
+    let registry = core.get_registry()?;
+    let _reg = {
+        let graph = graph.clone();
+        let attempt = attempt_link.clone();
         let want = target.clone();
-        let _reg = registry
+        registry
             .add_listener_local()
             .global(move |global| {
                 let Some(props) = global.props else { return };
-                if props.get(*pw::keys::NODE_NAME) == Some(want.as_str()) {
-                    if let Some(s) = props.get("object.serial") {
-                        let mut slot = serial_cl.borrow_mut();
-                        if slot.is_none() {
-                            *slot = Some(s.to_string());
+                match global.type_ {
+                    ObjectType::Node => {
+                        match props.get(*pw::keys::NODE_NAME) {
+                            Some(n) if n == want => {
+                                let mut g = graph.borrow_mut();
+                                g.target_node.get_or_insert(global.id);
+                            }
+                            Some(STREAM_NODE_NAME) => {
+                                let mut g = graph.borrow_mut();
+                                g.our_node.get_or_insert(global.id);
+                            }
+                            _ => return,
                         }
                     }
+                    ObjectType::Port => {
+                        let Some(node) = props.get(*pw::keys::NODE_ID)
+                            .and_then(|s| s.parse::<u32>().ok()) else { return };
+                        // port.id is the per-node channel index (0,1,…); default to 0 if absent.
+                        let index = props.get(*pw::keys::PORT_ID)
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        let is_output = props.get(*pw::keys::PORT_DIRECTION) == Some("out");
+                        graph.borrow_mut().ports.push((node, global.id, index, is_output));
+                    }
+                    _ => return,
                 }
+                attempt();
             })
-            .register();
+            .register()
+    };
 
-        let pending = core.sync(0)?;
-        let ml = mainloop.clone();
-        let _done = core
-            .add_listener_local()
-            .done(move |_id, seq| {
-                if seq == pending {
-                    ml.quit();
-                }
-            })
-            .register();
-        mainloop.run(); // returns once the initial registry dump completes
-    } // registry + listeners dropped here
-
-    let resolved = serial.borrow().clone();
-
-    // Phase 2: build the capture stream, bound to the resolved node by serial when possible.
-    let mut props = pw::properties::properties! {
+    // Build the capture stream. NODE_NAME lets the registry listener above recognise our own node.
+    let props = pw::properties::properties! {
         *pw::keys::MEDIA_TYPE     => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Capture",
-        *pw::keys::MEDIA_ROLE     => "Communication",
+        *pw::keys::MEDIA_ROLE     => "Production",
+        *pw::keys::NODE_NAME      => STREAM_NODE_NAME,
     };
-    match &resolved {
-        Some(s) => { props.insert(*pw::keys::TARGET_OBJECT, s.clone()); }
-        None => {
-            warn!(
-                "[Audio:Loopback] '{target}' not present in the PipeWire registry; \
-                 targeting by name (capture may fall back to the default device)"
-            );
-            props.insert(*pw::keys::TARGET_OBJECT, target.clone());
-        }
-    }
-    if capture_sink {
-        props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
-    }
 
-    let stream = pw::stream::StreamBox::new(&core, "mumbled-flight-loopback", props)?;
+    let stream = pw::stream::StreamBox::new(&core, STREAM_NODE_NAME, props)?;
 
     let _listener = stream
         .add_local_listener_with_user_data(tx)
@@ -666,9 +744,15 @@ fn pw_capture_loop(
             let n = datas[0].chunk().size() as usize;
             if let Some(raw) = datas[0].data() {
                 let end = n.min(raw.len());
+                // Interleaved stereo F32LE → mono by averaging L/R (sum / 2), matching the
+                // CPAL downmix convention so a centred mono signal stays at unity gain.
                 let samples: Vec<f32> = raw[..end]
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .chunks_exact(8)
+                    .map(|b| {
+                        let l = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                        let r = f32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+                        (l + r) * 0.5
+                    })
                     .collect();
                 let _ = tx.try_send(samples);
             }
@@ -678,7 +762,7 @@ fn pw_capture_loop(
     let mut audio_info = AudioInfoRaw::new();
     audio_info.set_format(AudioFormat::F32LE);
     audio_info.set_rate(48000);
-    audio_info.set_channels(1);
+    audio_info.set_channels(2);
     let obj = Object {
         type_: SpaTypes::ObjectParamFormat.as_raw(),
         id:    ParamType::EnumFormat.as_raw(),
@@ -691,17 +775,53 @@ fn pw_capture_loop(
     ).expect("SPA pod serialize").0.into_inner();
     let mut params = [Pod::from_bytes(&values).expect("SPA pod deserialize")];
 
+    // No AUTOCONNECT: the stream node + its input port are still created and exported, but the
+    // session manager never links them. `attempt_link` creates the links from the registry data.
     stream.connect(
         Direction::Input,
         None,
-        pw::stream::StreamFlags::AUTOCONNECT
-            | pw::stream::StreamFlags::MAP_BUFFERS
-            | pw::stream::StreamFlags::RT_PROCESS,
+        pw::stream::StreamFlags::MAP_BUFFERS | pw::stream::StreamFlags::RT_PROCESS,
         &mut params,
     )?;
 
-    info!("[Audio:Loopback] PipeWire capture active: '{source_name}' (serial={resolved:?})");
-    mainloop.run();
+    info!("[Audio:Loopback] PipeWire capture starting: target '{target}' (manual link)");
+
+    // Shutdown timer: poll the connection's flag and quit the mainloop when it is set, so the
+    // stream + links are dropped on disconnect rather than leaking across reconnects (this is what
+    // lets a changed radio source rebind on the next connect).
+    let timer = mainloop.loop_().add_timer({
+        let ml = mainloop.clone();
+        move |_| {
+            if shutdown.load(Ordering::Acquire) {
+                ml.quit();
+            }
+        }
+    });
+    let tick = std::time::Duration::from_millis(200);
+    if let Err(e) = timer.update_timer(Some(tick), Some(tick)).into_result() {
+        error!("[Audio:Loopback] failed to arm shutdown timer: {e:?}");
+    }
+
+    // One-shot sanity check: after the initial registry dump has been delivered, warn if the
+    // target node was never found, so a vanished/misnamed source is not a silent no-audio failure.
+    {
+        let graph = graph.clone();
+        let target = target.clone();
+        let warned = std::cell::Cell::new(false);
+        let pending = core.sync(0)?;
+        let _done = core
+            .add_listener_local()
+            .done(move |_id, seq| {
+                if seq == pending && !warned.replace(true) && graph.borrow().target_node.is_none() {
+                    warn!(
+                        "[Audio:Loopback] target node '{target}' not present in the PipeWire \
+                         registry — radio capture will be silent until it appears"
+                    );
+                }
+            })
+            .register();
+        mainloop.run();
+    }
     Ok(())
 }
 
