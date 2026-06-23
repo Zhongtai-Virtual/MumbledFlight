@@ -186,6 +186,8 @@ impl<'ui> Ctx<'ui> {
             LevelFilter::Warn,
             LevelFilter::Info,
             LevelFilter::Debug,
+            // Trace is the firehose: per-packet/per-device-global detail plus third-party crates.
+            LevelFilter::Trace,
         ];
         let level_preview = format!("{log_level}");
         self.ui.text("Log Level");

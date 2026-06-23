@@ -21,7 +21,7 @@
 use super::OPUS_FRAME_SAMPLES;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use log::{info, debug, error, warn};
+use log::{info, debug, error, trace, warn};
 use nnnoiseless::DenoiseState;
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -153,7 +153,8 @@ pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<PwSinkInfo>) {
                     }
                 }
                 other => {
-                    debug!("[DeviceEnum] global id={} class={other}", global.id);
+                    // Per-global firehose (≈150 lines per 2 s enumeration) — Trace only.
+                    trace!("[DeviceEnum] global id={} class={other}", global.id);
                 }
             }
         })
@@ -167,7 +168,7 @@ pub fn enumerate_pw_devices() -> (Vec<PwSinkInfo>, Vec<PwSinkInfo>) {
     let _done = core
         .add_listener_local()
         .done(move |id, seq| {
-            debug!("[DeviceEnum] done id={id} seq={seq:?} pending={pending:?}");
+            trace!("[DeviceEnum] done id={id} seq={seq:?} pending={pending:?}");
             // id 0 = core proxy in native PW; some versions report a different id.
             // Match on sequence number alone as a fallback.
             if seq == pending { ml.quit(); }
@@ -228,7 +229,7 @@ where
     let _done = core
         .add_listener_local()
         .done(move |id, seq| {
-            debug!("[PwEnum] done id={id} seq={seq:?} pending={pending:?}");
+            trace!("[PwEnum] done id={id} seq={seq:?} pending={pending:?}");
             if seq == pending { ml.quit(); }
         })
         .register();

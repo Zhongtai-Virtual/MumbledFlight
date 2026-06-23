@@ -280,6 +280,7 @@ impl GuiState {
             "error" => LevelFilter::Error,
             "warn"  => LevelFilter::Warn,
             "debug" => LevelFilter::Debug,
+            "trace" => LevelFilter::Trace,
             _       => LevelFilter::Info,
         };
         log::set_max_level(log_level);

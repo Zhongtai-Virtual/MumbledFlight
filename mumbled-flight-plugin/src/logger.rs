@@ -26,16 +26,25 @@ pub struct XPlaneLogger;
 
 impl log::Log for XPlaneLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Debug
+        metadata.level() <= log::max_level()
     }
     fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            xp_log(&format!(
-                "[MumbledFlight:{}] {}\n",
-                record.level(),
-                record.args()
-            ));
+        if !self.enabled(record.metadata()) {
+            return;
         }
+        // All records land in X-Plane's shared Log.txt, so suppress third-party crates
+        // (keyring, pipewire, native-tls, …) unless the user has explicitly opted into Trace.
+        // Otherwise their internal debug chatter drowns out MumbledFlight's own diagnostics.
+        if !record.target().starts_with("mumbled_flight")
+            && log::max_level() < log::LevelFilter::Trace
+        {
+            return;
+        }
+        xp_log(&format!(
+            "[MumbledFlight:{}] {}\n",
+            record.level(),
+            record.args()
+        ));
     }
     fn flush(&self) {}
 }
