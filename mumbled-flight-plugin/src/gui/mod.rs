@@ -30,11 +30,11 @@ use known_hosts::KnownHosts;
 use trust::{ProbeSlot, TrustState};
 
 use mumbled_flight_core::mumble::audio::enumerate_pw_devices;
-use mumbled_flight_core::mumble::{RadioSource, VoipStatuses};
+use mumbled_flight_core::mumble::{start_mic_level_test, RadioSource, VoipStatuses};
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use log::{debug, info, warn, LevelFilter};
 
@@ -247,6 +247,12 @@ pub struct GuiState {
     pub voip_statuses: Option<VoipStatuses>,
     /// Shared with the capture thread while connected — None when disconnected.
     pub mic_gain_live: Option<Arc<AtomicU32>>,
+    /// Live post-gain mic peak (f32 bits, 0.0–1.0) for the input level meter — None when neither
+    /// connected nor mic-testing. Written by the capture thread, read by the draw loop.
+    pub mic_level_live: Option<Arc<AtomicU32>>,
+    /// Set while a connection-less mic level test is running (see `start_mic_test`); its flag
+    /// stops the metering capture. `None` when no test is active.
+    pub mic_test_shutdown: Option<Arc<AtomicBool>>,
     /// Shared with playback threads while connected — None when disconnected.
     pub ambient_vol_live: Option<Arc<AtomicU32>>,
     pub ic_vol_live: Option<Arc<AtomicU32>>,
@@ -400,6 +406,8 @@ impl GuiState {
             status: String::new(),
             voip_statuses: None,
             mic_gain_live: None,
+            mic_level_live: None,
+            mic_test_shutdown: None,
             ambient_vol_live: None,
             ic_vol_live: None,
             spatial_width_live: None,
@@ -447,6 +455,46 @@ impl GuiState {
         match self.selected_mic {
             0 => None,
             i => self.mic_input_devices.get(i as usize - 1).cloned(),
+        }
+    }
+
+    /// `true` while a connection-less mic level test is running.
+    pub fn is_mic_testing(&self) -> bool {
+        self.mic_test_shutdown.is_some()
+    }
+
+    /// Starts a metering-only mic capture so the level meter works before connecting. The Mic
+    /// Gain slider stays live (shares `mic_gain_live`) and the meter reads `mic_level_live`,
+    /// exactly as when connected. No-op while connected or already testing.
+    pub fn start_mic_test(&mut self) {
+        if self.is_connected || self.is_mic_testing() {
+            return;
+        }
+        let mic_gain = Arc::new(AtomicU32::new(self.gain.to_bits()));
+        let mic_level = Arc::new(AtomicU32::new(0));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        start_mic_level_test(
+            self.mic_input(),
+            self.denoise,
+            Arc::clone(&mic_gain),
+            Arc::clone(&mic_level),
+            Arc::clone(&shutdown),
+        );
+        self.mic_gain_live = Some(mic_gain);
+        self.mic_level_live = Some(mic_level);
+        self.mic_test_shutdown = Some(shutdown);
+        info!("mic level test started (device={:?})", self.mic_input());
+    }
+
+    /// Stops the metering-only mic capture, releasing the device and clearing the meter.
+    /// No-op if no test is running. Must not be called while connected (the connection owns
+    /// these live handles); the Test button is disabled then.
+    pub fn stop_mic_test(&mut self) {
+        if let Some(shutdown) = self.mic_test_shutdown.take() {
+            shutdown.store(true, Ordering::Relaxed);
+            self.mic_gain_live = None;
+            self.mic_level_live = None;
+            info!("mic level test stopped");
         }
     }
 

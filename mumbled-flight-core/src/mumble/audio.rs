@@ -34,6 +34,23 @@ use std::io::Read;
 // navigating into the capture closure.
 const VAD_THRESHOLD: f32 = 0.5;
 
+// Transmit-level advisory thresholds, in dBFS, measured on the post-gain mic signal.
+// Mumble/Opus carries float PCM normalised to ±1.0, so every mic-fed client (Voice, IC,
+// PA) transmits at this same level. Mic hardware/OS levels vary per user, so we cannot
+// pick a single mic_gain for everyone — instead we meter the resulting level and advise the
+// user to tune their Mic Gain toward the target. `start_capture` emits the advisory.
+//   TARGET: nominal speech peak we want users to aim for (~-6 dBFS leaves headroom to ±1.0).
+//   LOW/HIGH: out-of-range bounds that trigger a "raise"/"lower" advisory.
+//   SILENCE: peaks below this are room noise, not speech — skipped so we don't nag on silence.
+const MIC_TARGET_PEAK_DBFS: f32 = -6.0;
+const MIC_LOW_PEAK_DBFS: f32 = -18.0;
+const MIC_HIGH_PEAK_DBFS: f32 = -3.0;
+const MIC_SILENCE_PEAK_DBFS: f32 = -40.0;
+
+// Per-frame (20 ms) decay applied to the shared GUI level meter: instant attack, ~0.25 s release
+// so the bar tracks speech responsively without flickering between syllables.
+const METER_RELEASE: f32 = 0.92;
+
 // Serialises concurrent CPAL device-open calls. On Linux also gates the
 // PIPEWIRE_NODE env-var mutation, which is unsound under concurrent writes.
 fn device_open_lock() -> &'static Mutex<()> {
@@ -830,11 +847,15 @@ pub fn start_capture(
     tx: mpsc::Sender<Vec<f32>>,
     denoise: bool,
     mic_gain: Arc<AtomicU32>,
+    mic_level: Arc<AtomicU32>,
     _gate_threshold: f32,
     device_name_filter: Option<String>,
     shutdown: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
+        // Running peak of the post-gain signal (f32 bits). Written by the audio callback,
+        // read by the advisory loop below — declared out here so it outlives the stream block.
+        let level_peak = Arc::new(AtomicU32::new(0));
         // Hold the lock across device selection → build_input_stream → play() to
         // serialise concurrent opens (on Linux also guards the PIPEWIRE_NODE write).
         let _stream = {
@@ -866,6 +887,8 @@ pub fn start_capture(
             } else {
                 None
             };
+            let level_peak_cb = Arc::clone(&level_peak);
+            let mic_level_cb = Arc::clone(&mic_level);
             let s = match device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
@@ -908,6 +931,17 @@ pub fn start_capture(
 
                     while output_buffer.len() >= OPUS_FRAME_SAMPLES {
                         let frame: Vec<f32> = output_buffer.drain(..OPUS_FRAME_SAMPLES).collect();
+                        // Track the post-gain peak so the advisory loop can compare it to the
+                        // target dBFS. Single writer (this callback), single reader (swap below).
+                        let frame_peak = frame.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+                        // Window max for the log advisory (reset every 3 s by the loop below).
+                        if frame_peak > f32::from_bits(level_peak_cb.load(Ordering::Relaxed)) {
+                            level_peak_cb.store(frame_peak.to_bits(), Ordering::Relaxed);
+                        }
+                        // Smooth peak-hold for the GUI meter: instant attack, decayed release.
+                        let meter = frame_peak
+                            .max(f32::from_bits(mic_level_cb.load(Ordering::Relaxed)) * METER_RELEASE);
+                        mic_level_cb.store(meter.to_bits(), Ordering::Relaxed);
                         let _ = tx.try_send(frame);
                     }
                 },
@@ -925,10 +959,46 @@ pub fn start_capture(
         }; // device_open_lock released — stream is already connected
         // Keep the stream alive until the connection is torn down, then drop it so the
         // CPAL/PipeWire input stream is released instead of leaking across reconnects.
+        // While alive, sample the post-gain peak every ~3 s and, when speech is out of the
+        // target band, advise the user to retune Mic Gain (throttled to ~15 s so it doesn't spam).
+        let mut ticks: u32 = 0;
+        let mut last_advisory_tick: u32 = 0;
         while !shutdown.load(Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(200));
+            ticks += 1;
+            if !ticks.is_multiple_of(15) {
+                continue; // ~3 s measurement window
+            }
+            let peak = f32::from_bits(level_peak.swap(0, Ordering::Relaxed));
+            if peak <= 0.0 {
+                continue;
+            }
+            let dbfs = 20.0 * peak.log10();
+            if dbfs < MIC_SILENCE_PEAK_DBFS {
+                continue; // silence — nothing to advise on
+            }
+            let advice = if dbfs < MIC_LOW_PEAK_DBFS {
+                Some(format!(
+                    "Mic level low ({dbfs:.0} dBFS peak) — raise Mic Gain to reach ~{MIC_TARGET_PEAK_DBFS:.0} dBFS \
+                     so you transmit at a consistent level with other clients."
+                ))
+            } else if dbfs > MIC_HIGH_PEAK_DBFS {
+                Some(format!(
+                    "Mic level hot ({dbfs:.0} dBFS peak) — lower Mic Gain toward ~{MIC_TARGET_PEAK_DBFS:.0} dBFS \
+                     to avoid clipping."
+                ))
+            } else {
+                None
+            };
+            if let Some(msg) = advice {
+                if ticks - last_advisory_tick >= 75 {
+                    warn!("[Audio:Capture] {msg}");
+                    last_advisory_tick = ticks;
+                }
+            }
         }
         drop(_stream);
+        mic_level.store(0, Ordering::Relaxed); // drop the GUI meter to zero on disconnect
         info!("[Audio:Capture] stream stopped");
     });
 }

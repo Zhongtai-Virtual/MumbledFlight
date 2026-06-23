@@ -210,7 +210,8 @@ pub unsafe extern "C" fn XPluginDisable() {
     info!("XPluginDisable");
     XPLMUnregisterFlightLoopCallback(Some(flight_loop_cb), std::ptr::null_mut());
     let mut guard = plugin_cell().lock().unwrap();
-    if let Some(ps) = guard.as_ref() {
+    if let Some(ps) = guard.as_mut() {
+        ps.gui.stop_mic_test(); // release the metering capture before dropping state
         ps.gui.save_config();
         XPLMDestroyMenu(ps.menu_id);
     }

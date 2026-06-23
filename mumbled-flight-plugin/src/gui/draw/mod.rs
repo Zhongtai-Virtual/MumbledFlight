@@ -189,6 +189,12 @@ impl GuiState {
         let mut flight_id = self.flight_id.clone();
         let mut user_name = self.user_name.clone();
         let mut gain = self.gain;
+        // Read-only snapshot of the live input level for the meter (0.0 when disconnected).
+        let mic_level = self
+            .mic_level_live
+            .as_ref()
+            .map(|a| f32::from_bits(a.load(Ordering::Relaxed)))
+            .unwrap_or(0.0);
         let mut ambient_vol = self.ambient_vol;
         let mut ic_vol = self.ic_vol;
         let mut spatial_width = self.spatial_width;
@@ -205,6 +211,8 @@ impl GuiState {
         // before start_probe is called).
         let known_hosts_snap = self.known_hosts.snapshot();
         let is_connected = self.is_connected;
+        let is_testing = self.is_mic_testing();
+        let mut toggle_mic_test = false;
         let status = self.status.clone();
         let voip_statuses = self.voip_statuses.clone();
         let output_device_labels = self.output_device_labels.clone();
@@ -264,7 +272,7 @@ impl GuiState {
                         &mut flight_id,
                         &mut user_name,
                     );
-                    p.audio_controls(&mut ambient_vol, &mut ic_vol, &mut gain, &mut spatial_width);
+                    p.audio_controls(&mut ambient_vol, &mut ic_vol, &mut gain, &mut spatial_width, mic_level);
                     p.denoise_toggle(&mut denoise, is_connected);
                     if !output_device_labels.is_empty() {
                         p.output_device_pickers(
@@ -274,7 +282,8 @@ impl GuiState {
                             &mut selected_ic,
                         );
                     }
-                    p.mic_picker(is_connected, &mic_input_device_labels, &mut selected_mic);
+                    toggle_mic_test =
+                        p.mic_picker(is_connected, is_testing, &mic_input_device_labels, &mut selected_mic);
                     p.radio_picker(
                         is_connected,
                         &radio_input_device_labels,
@@ -419,6 +428,13 @@ impl GuiState {
         }
         if should_disconnect {
             self.should_disconnect = true;
+        }
+        if toggle_mic_test {
+            if self.is_mic_testing() {
+                self.stop_mic_test();
+            } else {
+                self.start_mic_test();
+            }
         }
 
         // fp_open: picker was just created this frame; nothing else to do.

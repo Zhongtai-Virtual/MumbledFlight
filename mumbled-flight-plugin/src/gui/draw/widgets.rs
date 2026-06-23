@@ -153,6 +153,47 @@ impl<'ui> Ctx<'ui> {
         clicked
     }
 
+    /// A read-only input level meter: a coloured bar plus the peak in dBFS. `peak` is the
+    /// linear post-gain amplitude (0.0–1.0) the capture thread reports. The bar maps the last
+    /// 60 dB to its width; colour flags whether the level sits in the target band (green), is
+    /// too quiet (amber — raise Mic Gain), or is near clipping (red — lower Mic Gain). The
+    /// thresholds mirror the advisory constants in `mumbled_flight_core::mumble::audio`.
+    pub(super) fn input_meter(&self, label: &str, peak: f32) {
+        const LOW_DBFS: f32 = -18.0;
+        const HIGH_DBFS: f32 = -3.0;
+        const FLOOR_DBFS: f32 = -60.0;
+
+        let dbfs = if peak > 0.0 {
+            20.0 * peak.log10()
+        } else {
+            f32::NEG_INFINITY
+        };
+        let frac = ((dbfs - FLOOR_DBFS) / -FLOOR_DBFS).clamp(0.0, 1.0);
+        let color: [f32; 4] = if dbfs >= HIGH_DBFS {
+            [0.85, 0.25, 0.25, 1.0] // red — clipping risk
+        } else if dbfs < LOW_DBFS {
+            [0.80, 0.65, 0.20, 1.0] // amber — too quiet
+        } else {
+            [0.30, 0.70, 0.35, 1.0] // green — in target band
+        };
+        let overlay = if dbfs.is_finite() {
+            format!("{dbfs:.0} dBFS")
+        } else {
+            "—".to_string()
+        };
+
+        self.ui.text(label);
+        self.ui.same_line();
+        self.ui.set_cursor_pos([LABEL_COL_X, self.ui.cursor_pos()[1]]);
+        let _c = self
+            .ui
+            .push_style_color(imgui::StyleColor::PlotHistogram, color);
+        imgui::ProgressBar::new(frac)
+            .size([self.fw, 0.0])
+            .overlay_text(overlay)
+            .build(self.ui);
+    }
+
     pub(super) fn combo(&self, label: &str, id: &str, labels: &[String], selected: &mut i32) {
         let preview = labels
             .get(*selected as usize)

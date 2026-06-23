@@ -17,7 +17,7 @@
 
 //! Stack startup: wires mic capture, radio loopback, playback mixers, and the four VoIP clients.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, mpsc};
@@ -63,6 +63,23 @@ fn radio_loopback_sender(source_name: String, shutdown: Arc<AtomicBool>) -> broa
     tx
 }
 
+/// Starts a microphone capture purely to drive the input level meter, without connecting to any
+/// server. Captured frames are discarded — only `mic_level` is updated (and `mic_gain` is read
+/// live) — so a GUI can show the mic level before connecting. The capture stops and releases the
+/// device when `shutdown` is set, mirroring the connected capture's lifecycle.
+pub fn start_mic_level_test(
+    mic_device: Option<String>,
+    denoise: bool,
+    mic_gain: Arc<AtomicU32>,
+    mic_level: Arc<AtomicU32>,
+    shutdown: Arc<AtomicBool>,
+) {
+    // No consumer: `start_capture`'s `try_send` simply drops frames into the closed channel,
+    // while the level meter is still updated each frame.
+    let (tx, _rx) = mpsc::channel::<Vec<f32>>(8);
+    start_capture(tx, denoise, mic_gain, mic_level, 0.0, mic_device, shutdown);
+}
+
 pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
     let MumbleStackConfig {
         state,
@@ -72,6 +89,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         client_cert,
         server_trust,
         mic_gain,
+        mic_level,
         denoise,
         radio_source,
         voip_client,
@@ -112,7 +130,7 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         match input_type {
             InputType::Sine => super::audio::start_sine_capture(sync_tx, mic_gain),
             InputType::File(path) => super::audio::start_file_capture(path, sync_tx, mic_gain),
-            InputType::Real => start_capture(sync_tx, denoise, mic_gain, 0.0, mic_device, mic_shutdown),
+            InputType::Real => start_capture(sync_tx, denoise, mic_gain, mic_level, 0.0, mic_device, mic_shutdown),
         }
         while let Some(frame) = sync_rx.blocking_recv() {
             let _ = mic_tx_clone.send(frame);

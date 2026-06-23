@@ -55,6 +55,9 @@ pub fn start(ps: &mut PluginState) {
         ps.gui.server, ps.gui.port, ps.gui.user_name, ps.gui.flight_id
     );
 
+    // Release any metering-only mic capture so the connection's own capture can claim the device.
+    ps.gui.stop_mic_test();
+
     let cockpit_state = Arc::new(Mutex::new(CockpitState::default()));
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -79,6 +82,9 @@ pub fn start(ps: &mut PluginState) {
     let ambient_vol = f32_atomic(ps.gui.ambient_vol);
     let ic_vol = f32_atomic(ps.gui.ic_vol);
     let spatial_width = f32_atomic(ps.gui.spatial_width);
+    // Capture writes the live mic level here; the draw loop reads it for the meter.
+    let mic_level = Arc::new(AtomicU32::new(0));
+    let mic_level_for_thread = Arc::clone(&mic_level);
     let mic_gain_for_thread = Arc::clone(&mic_gain);
     let ambient_vol_for_thread = Arc::clone(&ambient_vol);
     let ic_vol_for_thread = Arc::clone(&ic_vol);
@@ -159,6 +165,7 @@ pub fn start(ps: &mut PluginState) {
             user_name,
             session_id: flight_id,
             mic_gain: mic_gain_for_thread,
+            mic_level: mic_level_for_thread,
             denoise,
             radio_source,
             voip_client: VoipClient::default(),
@@ -179,6 +186,7 @@ pub fn start(ps: &mut PluginState) {
     });
 
     ps.gui.mic_gain_live = Some(Arc::clone(&mic_gain));
+    ps.gui.mic_level_live = Some(mic_level);
     ps.gui.ambient_vol_live = Some(Arc::clone(&ambient_vol));
     ps.gui.ic_vol_live = Some(Arc::clone(&ic_vol));
     ps.gui.spatial_width_live = Some(spatial_width);
@@ -205,6 +213,7 @@ pub fn start(ps: &mut PluginState) {
 pub fn stop(ps: &mut PluginState) {
     ps.connection = None;
     ps.gui.mic_gain_live = None;
+    ps.gui.mic_level_live = None;
     ps.gui.ambient_vol_live = None;
     ps.gui.ic_vol_live = None;
     ps.gui.spatial_width_live = None;
