@@ -286,7 +286,7 @@ impl MumbleVoipClient {
         port: u16,
         state: Arc<Mutex<CockpitState>>,
         mut audio_rx: broadcast::Receiver<Vec<f32>>,
-        playback_tx: mpsc::Sender<Vec<f32>>,
+        playback_tx: mpsc::Sender<(u32, Vec<f32>)>,
     ) -> Result<()> {
         info!("[VoIP:{}] Connecting to {}:{}...", self.username, host, port);
         let (mut control, addr) = self.connect(host, port).await?;

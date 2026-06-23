@@ -317,7 +317,7 @@ impl Session {
         len: usize,
         client: &MumbleVoipClient,
         state: &Arc<Mutex<CockpitState>>,
-        playback_tx: &mpsc::Sender<Vec<f32>>,
+        playback_tx: &mpsc::Sender<(u32, Vec<f32>)>,
     ) {
         // Decrypt in an inner block so the crypt borrow ends before we touch decoders.
         let packet = {
@@ -399,7 +399,7 @@ impl Session {
                 *s *= rx_vol;
             }
         }
-        let _ = playback_tx.send(stereo).await;
+        let _ = playback_tx.send((session_id, stereo)).await;
     }
 
     pub async fn on_mic_pcm(

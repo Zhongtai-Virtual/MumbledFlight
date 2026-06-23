@@ -34,7 +34,7 @@ fn spawn_client(
     server_port: u16,
     state: Arc<Mutex<CockpitState>>,
     audio_rx: broadcast::Receiver<Vec<f32>>,
-    playback_tx: mpsc::Sender<Vec<f32>>,
+    playback_tx: mpsc::Sender<(u32, Vec<f32>)>,
 ) {
     tokio::spawn(async move {
         if let Err(e) = client
@@ -284,13 +284,16 @@ pub async fn run_mumble_stack(cfg: MumbleStackConfig) {
         );
 
         // Mirror radio source to the IC output so pilots monitor COM through their IC headphones.
+        // This is a local source (not a remote Mumble session), so it gets a synthetic session id
+        // that can't collide with a server-assigned one, giving it its own slot in the IC mixer.
+        const RADIO_MONITOR_SESSION: u32 = u32::MAX;
         let mut monitor_rx = rtx.subscribe();
         tokio::spawn(async move {
             loop {
                 match monitor_rx.recv().await {
                     Ok(pcm) => {
                         let stereo: Vec<f32> = pcm.iter().flat_map(|&s| [s, s]).collect();
-                        let _ = ic_monitor_tx.send(stereo).await;
+                        let _ = ic_monitor_tx.send((RADIO_MONITOR_SESSION, stereo)).await;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,

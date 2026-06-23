@@ -26,7 +26,7 @@ use nnnoiseless::DenoiseState;
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 
 // RNNoise VAD probability below this value is treated as non-speech.
@@ -932,12 +932,20 @@ pub fn start_capture(
     });
 }
 
-pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option<String>, vol: Arc<AtomicU32>) {
+/// Per-source playback mixer. Each remote source (keyed by its Mumble session id) gets its own FIFO
+/// of device-layout samples; the output callback drains every source's FIFO in lockstep and **sums**
+/// them. This is what makes concurrent streams mix correctly — e.g. a talker's always-on Voice plus
+/// their keyed PA, or the radio COM monitor alongside IC speech. A single source behaves exactly like
+/// a plain FIFO (drain what's queued, zero-fill the rest), so solo playback is unchanged. Because
+/// each source has its own queue drained at the device's real rate, the consumed rate stays 1×
+/// regardless of how many sources are active — concatenating into one shared queue did not, which is
+/// what filled the buffer at N× and chopped the audio.
+pub fn start_playback(mut rx: mpsc::Receiver<(u32, Vec<f32>)>, preferred_device: Option<String>, vol: Arc<AtomicU32>) {
     // Build and run entirely inside one thread — CPAL Stream is !Send on ALSA,
     // so creating and dropping it in the same thread avoids any Send requirement.
     std::thread::spawn(move || {
-        let pending_samples    = Arc::new(Mutex::new(VecDeque::<f32>::new()));
-        let pending_samples_cb = Arc::clone(&pending_samples);
+        let sources    = Arc::new(Mutex::new(HashMap::<u32, VecDeque<f32>>::new()));
+        let sources_cb = Arc::clone(&sources);
 
         let (stream, device_channels) = {
             let _guard = device_open_lock().lock().unwrap();
@@ -969,12 +977,17 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
             let s = match device.build_output_stream(
                 &config.into(),
                 move |data: &mut [f32], _| {
-                    let mut lock = pending_samples_cb.lock().unwrap();
-                    let n = lock.len().min(data.len());
-                    for (dst, src) in data[..n].iter_mut().zip(lock.drain(..n)) {
-                        *dst = src;
+                    for x in data.iter_mut() { *x = 0.0; }
+                    let mut map = sources_cb.lock().unwrap();
+                    // Sum one real-time slice from every source. Each source contributes what it
+                    // has; a starved source simply adds nothing (its slot stays at the running sum).
+                    for q in map.values_mut() {
+                        let n = q.len().min(data.len());
+                        for (dst, src) in data[..n].iter_mut().zip(q.drain(..n)) { *dst += src; }
                     }
-                    for x in data[n..].iter_mut() { *x = 0.0; }
+                    // Drop fully-drained sources so the map tracks only active speakers; a source
+                    // that resumes is simply re-created on its next frame.
+                    map.retain(|_, q| !q.is_empty());
                 },
                 |err| error!("[Audio:Out] stream error: {err}"),
                 None,
@@ -989,32 +1002,46 @@ pub fn start_playback(mut rx: mpsc::Receiver<Vec<f32>>, preferred_device: Option
             (s, device_channels)
         }; // device_open_lock released — stream is already connected
 
+        let max_buffered = 24000 * device_channels;
         let mut last_log = std::time::Instant::now();
-        while let Some(mut stereo_frame_48k) = rx.blocking_recv() {
+        while let Some((sid, mut stereo_frame_48k)) = rx.blocking_recv() {
             let v = f32::from_bits(vol.load(std::sync::atomic::Ordering::Relaxed));
             if (v - 1.0).abs() > 1e-4 {
                 for s in &mut stereo_frame_48k { *s *= v; }
             }
-            let mut lock = pending_samples.lock().unwrap();
 
-            if device_channels == 2 {
-                lock.extend(stereo_frame_48k);
+            // Lay the frame out in the device's channel count (stereo passthrough, or downmix to
+            // mono replicated across channels) before queueing it on this source's FIFO.
+            let frame: Vec<f32> = if device_channels == 2 {
+                stereo_frame_48k
             } else {
+                let mut f = Vec::with_capacity(stereo_frame_48k.len() / 2 * device_channels);
                 for chunk in stereo_frame_48k.chunks_exact(2) {
                     let mono = (chunk[0] + chunk[1]) * 0.5;
-                    for _ in 0..device_channels { lock.push_back(mono); }
+                    for _ in 0..device_channels { f.push(mono); }
                 }
-            }
+                f
+            };
 
-            let max_buffered = 24000 * device_channels;
-            if lock.len() > max_buffered {
-                let to_drain = lock.len() - max_buffered;
+            let mut map = sources.lock().unwrap();
+            let q = map.entry(sid).or_default();
+            q.extend(frame);
+
+            // Per-source cap (≈0.5 s): if this source outruns the device clock, drop its oldest
+            // samples rather than letting its queue grow without bound.
+            if q.len() > max_buffered {
+                let to_drain = q.len() - max_buffered;
                 let aligned_drain = to_drain - (to_drain % device_channels);
-                let _ = lock.drain(..aligned_drain);
+                let _ = q.drain(..aligned_drain);
             }
 
             if last_log.elapsed().as_secs() >= 5 {
-                debug!("[Audio:Out] buffer {:.1}ms", lock.len() as f32 / (48.0 * device_channels as f32));
+                let depth = map.values().map(|q| q.len()).max().unwrap_or(0);
+                debug!(
+                    "[Audio:Out] {} source(s), max {:.1}ms buffered",
+                    map.len(),
+                    depth as f32 / (48.0 * device_channels as f32),
+                );
                 last_log = std::time::Instant::now();
             }
         }
