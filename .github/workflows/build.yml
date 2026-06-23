@@ -7,6 +7,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # Runners now ship CMake >= 4, which dropped compatibility with
+  # cmake_minimum_required(VERSION <3.5). audiopus_sys's vendored Opus still
+  # declares an old minimum and is CMake-built from source on Windows, so set
+  # the policy floor to keep it configurable.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
 jobs:
   lint:
     name: Clippy + tests (Linux)
